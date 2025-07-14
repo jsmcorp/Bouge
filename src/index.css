@@ -1,0 +1,1164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #0a0a0a;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: #10b981;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #059669;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #10b981;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  a:hover {
+    color: #059669;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 6%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 10%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 142 76% 36%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 142 76% 36%;
+    --chart-1: 142 76% 36%;
+    --chart-2: 158 64% 52%;
+    --chart-3: 175 70% 41%;
+    --chart-4: 35 91% 65%;
+    --chart-5: 43 74% 66%;
+    --radius: 0.75rem;
+  }
+  
+  .light {
+    --background: 0 0% 98%;
+    --foreground: 0 0% 8%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 8%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 8%;
+    --primary: 142 76% 36%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+    --accent: 142 76% 96%;
+    --accent-foreground: 142 76% 9%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 142 76% 36%;
+    --chart-1: 142 76% 36%;
+    --chart-2: 158 64% 52%;
+    --chart-3: 175 70% 41%;
+    --chart-4: 35 91% 65%;
+    --chart-5: 43 74% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Chat Bubble Styles - Faded Premium Look to Match Image */
+.chat-bubble-base {
+  border-radius: 1rem;
+  padding: 0.75rem 1rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Ghost message bubbles - Subtle blue fade like in image */
+.chat-bubble-ghost {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.03) 0%, 
+    rgba(147, 197, 253, 0.015) 30%, 
+    rgba(219, 234, 254, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.05);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.chat-bubble-ghost:hover {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.05) 0%, 
+    rgba(147, 197, 253, 0.025) 30%, 
+    rgba(219, 234, 254, 0.015) 60%,
+    rgba(255, 255, 255, 0.01) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Regular message bubbles - Subtle gray fade to match image */
+.chat-bubble-regular {
+  background: linear-gradient(135deg, 
+    rgba(255, 255, 255, 0.015) 0%, 
+    rgba(249, 250, 251, 0.01) 30%, 
+    rgba(243, 244, 246, 0.008) 60%,
+    rgba(229, 231, 235, 0.005) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.chat-bubble-regular:hover {
+  background: linear-gradient(135deg, 
+    rgba(255, 255, 255, 0.025) 0%, 
+    rgba(249, 250, 251, 0.015) 30%, 
+    rgba(243, 244, 246, 0.012) 60%,
+    rgba(229, 231, 235, 0.008) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
+}
+
+/* User's own messages - Light green fade on right side */
+.chat-bubble-own {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.02) 0%, 
+    rgba(110, 231, 183, 0.015) 30%, 
+    rgba(209, 250, 229, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.05);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.chat-bubble-own:hover {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.04) 0%, 
+    rgba(110, 231, 183, 0.025) 30%, 
+    rgba(209, 250, 229, 0.015) 60%,
+    rgba(255, 255, 255, 0.01) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Confession message bubbles - Subtle purple fade */
+.chat-bubble-confession {
+  background: linear-gradient(135deg, 
+    rgba(139, 92, 246, 0.025) 0%, 
+    rgba(196, 181, 253, 0.015) 30%, 
+    rgba(233, 213, 255, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.05);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.chat-bubble-confession:hover {
+  background: linear-gradient(135deg, 
+    rgba(139, 92, 246, 0.04) 0%, 
+    rgba(196, 181, 253, 0.025) 30%, 
+    rgba(233, 213, 255, 0.015) 60%,
+    rgba(255, 255, 255, 0.01) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Image message bubbles - Subtle green fade */
+.chat-bubble-image {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.025) 0%, 
+    rgba(110, 231, 183, 0.015) 30%, 
+    rgba(209, 250, 229, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.05);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.chat-bubble-image:hover {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.04) 0%, 
+    rgba(110, 231, 183, 0.025) 30%, 
+    rgba(209, 250, 229, 0.015) 60%,
+    rgba(255, 255, 255, 0.01) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Thread reply bubbles - Even more subtle */
+.chat-bubble-thread-reply {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border-radius: 0.75rem;
+  opacity: 0.9;
+  background: linear-gradient(135deg, 
+    rgba(255, 255, 255, 0.008) 0%, 
+    rgba(249, 250, 251, 0.005) 50%, 
+    rgba(243, 244, 246, 0.003) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+}
+
+/* Light mode adjustments for faded look */
+.light .chat-bubble-regular {
+  background: linear-gradient(135deg, 
+    rgba(0, 0, 0, 0.008) 0%, 
+    rgba(55, 65, 81, 0.005) 30%, 
+    rgba(75, 85, 99, 0.003) 60%,
+    rgba(107, 114, 128, 0.001) 100%);
+  border: 1px solid rgba(0, 0, 0, 0.03);
+}
+
+.light .chat-bubble-regular:hover {
+  background: linear-gradient(135deg, 
+    rgba(0, 0, 0, 0.015) 0%, 
+    rgba(55, 65, 81, 0.01) 30%, 
+    rgba(75, 85, 99, 0.008) 60%,
+    rgba(107, 114, 128, 0.005) 100%);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.light .chat-bubble-ghost {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.02) 0%, 
+    rgba(147, 197, 253, 0.015) 30%, 
+    rgba(219, 234, 254, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.08);
+}
+
+.light .chat-bubble-confession {
+  background: linear-gradient(135deg, 
+    rgba(139, 92, 246, 0.02) 0%, 
+    rgba(196, 181, 253, 0.015) 30%, 
+    rgba(233, 213, 255, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.08);
+}
+
+.light .chat-bubble-image {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.02) 0%, 
+    rgba(110, 231, 183, 0.015) 30%, 
+    rgba(209, 250, 229, 0.01) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.08);
+}
+
+.light .chat-bubble-own {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.015) 0%, 
+    rgba(110, 231, 183, 0.01) 30%, 
+    rgba(209, 250, 229, 0.008) 60%,
+    rgba(255, 255, 255, 0.005) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.06);
+}
+
+/* Bubble content animation */
+.chat-bubble-content {
+  position: relative;
+  z-index: 1;
+}
+
+/* Very subtle shine effect */
+.chat-bubble-base::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.02), transparent);
+  transition: left 0.8s ease;
+  z-index: 0;
+}
+
+.chat-bubble-base:hover::before {
+  left: 100%;
+}
+
+/* Animations */
+@keyframes ghost-glow {
+  0%, 100% {
+    box-shadow: 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.2);
+  }
+}
+
+.ghost-mode {
+  animation: ghost-glow 3s ease-in-out infinite;
+}
+
+/* Message animations */
+@keyframes message-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-enter {
+  animation: message-slide-in 0.3s ease-out;
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--chart-2)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Thread reply line */
+.thread-reply-line {
+  position: relative;
+}
+
+.thread-reply-line::before {
+  content: '';
+  position: absolute;
+  left: -16px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 1px;
+}
+
+/* Thread panel animations */
+@keyframes thread-slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes thread-slide-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+.thread-panel-enter {
+  animation: thread-slide-in 0.3s ease-out;
+}
+
+.thread-panel-exit {
+  animation: thread-slide-out 0.3s ease-in;
+}
+
+/* Reaction animations */
+@keyframes reaction-pop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.reaction-enter {
+  animation: reaction-pop 0.2s ease-out;
+}
+
+/* Poll animations */
+@keyframes poll-progress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: var(--progress-width);
+  }
+}
+
+@keyframes poll-vote-success {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes confetti-burst {
+  0% {
+    transform: scale(0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) rotate(360deg);
+    opacity: 0;
+  }
+}
+
+.poll-progress-bar {
+  animation: poll-progress 1s ease-out;
+}
+
+.poll-vote-success {
+  animation: poll-vote-success 0.3s ease-out;
+}
+
+.confetti-particle {
+  animation: confetti-burst 2s ease-out forwards;
+}
+
+/* Poll option hover effects */
+.poll-option {
+  transition: all 0.2s ease-in-out;
+}
+
+.poll-option:hover {
+  transform: scale(1.02);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15);
+}
+
+.poll-option:active {
+  transform: scale(0.98);
+}
+
+/* Hover effects */
+.message-hover {
+  transition: all 0.2s ease-in-out;
+}
+
+.message-hover:hover {
+  background-color: hsl(var(--muted) / 0.3);
+  border-radius: 12px;
+}
+
+/* Loading states */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200px 0;
+  }
+  100% {
+    background-position: calc(200px + 100%) 0;
+  }
+}
+
+.loading-pulse {
+  animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  background-size: 200px 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Focus states */
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background;
+}
+
+/* Ghost mode indicator */
+.ghost-indicator {
+  position: relative;
+}
+
+.ghost-indicator::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  background: hsl(var(--primary));
+  border-radius: 50%;
+  animation: ghost-glow 2s ease-in-out infinite;
+}
+
+/* Modern glass morphism effects */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.light .glass-card {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+/* Smooth transitions for theme switching */
+* {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+}
+
+/* Modern button styles */
+.btn-modern {
+  @apply relative overflow-hidden rounded-xl px-6 py-3 font-medium transition-all duration-300;
+  @apply bg-gradient-to-r from-primary to-primary/80 text-primary-foreground;
+  @apply hover:shadow-lg hover:shadow-primary/25 hover:scale-105;
+  @apply active:scale-95;
+}
+
+.btn-modern::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.5s;
+}
+
+.btn-modern:hover::before {
+  left: 100%;
+}
+
+/* Card hover effects */
+.card-hover {
+  @apply transition-all duration-300 hover:shadow-xl hover:shadow-primary/10 hover:-translate-y-1;
+}
+
+/* Floating elements */
+.floating {
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+/* Pulse animation for active elements */
+.pulse-primary {
+  animation: pulse-primary 2s infinite;
+}
+
+@keyframes pulse-primary {
+  0%, 100% {
+    box-shadow: 0 0 0 0 hsl(var(--primary) / 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px hsl(var(--primary) / 0);
+  }
+}
+
+/* Number counter animation */
+@keyframes number-count {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.number-count {
+  animation: number-count 0.3s ease-out;
+}
+
+/* Hide scrollbar for emoji category tabs */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* WhatsApp-style emoji panel animations */
+.emoji-panel-enter {
+  animation: emoji-panel-slide-up 0.3s ease-out;
+}
+
+.emoji-panel-exit {
+  animation: emoji-panel-slide-down 0.3s ease-in;
+}
+
+@keyframes emoji-panel-slide-up {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes emoji-panel-slide-down {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+/* Staggered animations for poll results */
+.stagger-animation {
+  animation-delay: calc(var(--stagger-delay) * 100ms);
+}
+
+/* Performance optimizations for 60fps */
+.gpu-accelerated {
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+/* Emoji picker custom styles */
+.emoji-picker-container .epr-main {
+  border: none !important;
+  background: transparent !important;
+}
+
+.emoji-picker-container .epr-category-nav {
+  border-bottom: 1px solid hsl(var(--border)) !important;
+}
+
+.emoji-picker-container .epr-emoji-category-label {
+  background: hsl(var(--background)) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.emoji-picker-container .epr-emoji:hover {
+  background: hsl(var(--muted)) !important;
+}
+
+.emoji-picker-container .epr-category-nav button {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+.emoji-picker-container .epr-category-nav button.epr-cat-btn.epr-active {
+  color: hsl(var(--primary)) !important;
+  border-bottom-color: hsl(var(--primary)) !important;
+}
+
+/* Poll specific animations */
+.poll-option-select {
+  animation: poll-option-select 0.2s ease-out;
+}
+
+@keyframes poll-option-select {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.poll-results-enter {
+  animation: poll-results-enter 0.5s ease-out;
+}
+
+/* Emoji button transitions */
+.emoji-button-transition {
+  transition: all 0.2s ease-in-out;
+}
+
+.emoji-button-transition:hover {
+  transform: scale(1.1);
+}
+
+.emoji-button-transition:active {
+  transform: scale(0.95);
+}
+
+@keyframes poll-results-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Premium faded bubble effects that blend with background */
+.chat-bubble-fade {
+  background: rgba(255, 255, 255, 0.008);
+  backdrop-filter: blur(25px);
+  -webkit-backdrop-filter: blur(25px);
+  border: 1px solid rgba(255, 255, 255, 0.015);
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.02),
+    0 1px 2px rgba(0, 0, 0, 0.01),
+    inset 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* Special fade for user messages on right */
+.chat-bubble-user-fade {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.015) 0%, 
+    rgba(110, 231, 183, 0.008) 40%, 
+    rgba(209, 250, 229, 0.005) 70%,
+    rgba(255, 255, 255, 0.003) 100%);
+  backdrop-filter: blur(25px);
+  -webkit-backdrop-filter: blur(25px);
+  border: 1px solid rgba(16, 185, 129, 0.03);
+  box-shadow: 
+    0 1px 3px rgba(16, 185, 129, 0.02),
+    0 1px 2px rgba(16, 185, 129, 0.01),
+    inset 0 0 1px rgba(16, 185, 129, 0.05);
+}
+
+/* Anonymous orange badge fade */
+.badge-anony-fade {
+  background: linear-gradient(135deg, 
+    rgba(251, 146, 60, 0.08) 0%, 
+    rgba(251, 146, 60, 0.05) 50%, 
+    rgba(251, 146, 60, 0.03) 100%);
+  border: 1px solid rgba(251, 146, 60, 0.15);
+  color: rgba(251, 146, 60, 0.9);
+}
+
+/* Funny category badge fade */
+.badge-funny-fade {
+  background: linear-gradient(135deg, 
+    rgba(251, 191, 36, 0.08) 0%, 
+    rgba(251, 191, 36, 0.05) 50%, 
+    rgba(251, 191, 36, 0.03) 100%);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  color: rgba(251, 191, 36, 0.9);
+}
+
+/* Confession badge fade - completing the incomplete rule */
+.badge-confession-fade {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.08) 0%, 
+    rgba(59, 130, 246, 0.05) 50%, 
+    rgba(59, 130, 246, 0.03) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  color: rgba(59, 130, 246, 0.9);
+}
+
+/* Enhanced chat bubble styles to match the image exactly */
+.chat-bubble-ultra-fade {
+  background: linear-gradient(135deg, 
+    rgba(255, 255, 255, 0.006) 0%, 
+    rgba(255, 255, 255, 0.003) 30%, 
+    rgba(255, 255, 255, 0.001) 70%,
+    transparent 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(255, 255, 255, 0.008);
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.015),
+    0 1px 2px rgba(0, 0, 0, 0.008),
+    inset 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+/* Ghost message - matching the blue fade in image */
+.chat-bubble-ghost-ultra {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.008) 0%, 
+    rgba(147, 197, 253, 0.005) 30%, 
+    rgba(219, 234, 254, 0.003) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(59, 130, 246, 0.012);
+  box-shadow: 
+    0 1px 3px rgba(59, 130, 246, 0.01),
+    0 1px 2px rgba(59, 130, 246, 0.005),
+    inset 0 0 1px rgba(59, 130, 246, 0.03);
+}
+
+/* Emma's messages - right side green fade */
+.chat-bubble-emma-ultra {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.008) 0%, 
+    rgba(110, 231, 183, 0.005) 30%, 
+    rgba(209, 250, 229, 0.003) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(16, 185, 129, 0.012);
+  box-shadow: 
+    0 1px 3px rgba(16, 185, 129, 0.01),
+    0 1px 2px rgba(16, 185, 129, 0.005),
+    inset 0 0 1px rgba(16, 185, 129, 0.03);
+}
+
+/* Anonymous message - orange fade */
+.chat-bubble-anonymous-ultra {
+  background: linear-gradient(135deg, 
+    rgba(251, 146, 60, 0.008) 0%, 
+    rgba(251, 146, 60, 0.005) 30%, 
+    rgba(251, 146, 60, 0.003) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(251, 146, 60, 0.012);
+  box-shadow: 
+    0 1px 3px rgba(251, 146, 60, 0.01),
+    0 1px 2px rgba(251, 146, 60, 0.005),
+    inset 0 0 1px rgba(251, 146, 60, 0.03);
+}
+
+/* Confession message - purple fade */
+.chat-bubble-confession-ultra {
+  background: linear-gradient(135deg, 
+    rgba(139, 92, 246, 0.008) 0%, 
+    rgba(196, 181, 253, 0.005) 30%, 
+    rgba(233, 213, 255, 0.003) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(139, 92, 246, 0.012);
+  box-shadow: 
+    0 1px 3px rgba(139, 92, 246, 0.01),
+    0 1px 2px rgba(139, 92, 246, 0.005),
+    inset 0 0 1px rgba(139, 92, 246, 0.03);
+}
+
+/* Badge styles matching the image */
+.badge-anony-ultra {
+  background: linear-gradient(135deg, 
+    rgba(251, 146, 60, 0.05) 0%, 
+    rgba(251, 146, 60, 0.03) 50%, 
+    rgba(251, 146, 60, 0.02) 100%);
+  border: 1px solid rgba(251, 146, 60, 0.08);
+  color: rgba(251, 146, 60, 0.85);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+}
+
+.badge-funny-ultra {
+  background: linear-gradient(135deg, 
+    rgba(251, 191, 36, 0.05) 0%, 
+    rgba(251, 191, 36, 0.03) 50%, 
+    rgba(251, 191, 36, 0.02) 100%);
+  border: 1px solid rgba(251, 191, 36, 0.08);
+  color: rgba(251, 191, 36, 0.85);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+}
+
+.badge-confession-ultra {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.05) 0%, 
+    rgba(59, 130, 246, 0.03) 50%, 
+    rgba(59, 130, 246, 0.02) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.08);
+  color: rgba(59, 130, 246, 0.85);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+}
+
+/* Light mode adjustments for ultra faded bubbles */
+.light .chat-bubble-ultra-fade {
+  background: linear-gradient(135deg, 
+    rgba(0, 0, 0, 0.004) 0%, 
+    rgba(0, 0, 0, 0.002) 30%, 
+    rgba(0, 0, 0, 0.001) 70%,
+    transparent 100%);
+  border: 1px solid rgba(0, 0, 0, 0.008);
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.01),
+    0 1px 2px rgba(0, 0, 0, 0.005),
+    inset 0 0 1px rgba(0, 0, 0, 0.02);
+}
+
+.light .chat-bubble-ghost-ultra {
+  background: linear-gradient(135deg, 
+    rgba(59, 130, 246, 0.006) 0%, 
+    rgba(147, 197, 253, 0.004) 30%, 
+    rgba(219, 234, 254, 0.002) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.01);
+}
+
+.light .chat-bubble-emma-ultra {
+  background: linear-gradient(135deg, 
+    rgba(16, 185, 129, 0.006) 0%, 
+    rgba(110, 231, 183, 0.004) 30%, 
+    rgba(209, 250, 229, 0.002) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.01);
+}
+
+.light .chat-bubble-anonymous-ultra {
+  background: linear-gradient(135deg, 
+    rgba(251, 146, 60, 0.006) 0%, 
+    rgba(251, 146, 60, 0.004) 30%, 
+    rgba(251, 146, 60, 0.002) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  border: 1px solid rgba(251, 146, 60, 0.01);
+}
+
+.light .chat-bubble-confession-ultra {
+  background: linear-gradient(135deg, 
+    rgba(139, 92, 246, 0.006) 0%, 
+    rgba(196, 181, 253, 0.004) 30%, 
+    rgba(233, 213, 255, 0.002) 60%,
+    rgba(255, 255, 255, 0.001) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.01);
+}
+
+/* Enhanced hover effects for ultra faded bubbles */
+.chat-bubble-ultra-fade:hover,
+.chat-bubble-ghost-ultra:hover,
+.chat-bubble-emma-ultra:hover,
+.chat-bubble-anonymous-ultra:hover,
+.chat-bubble-confession-ultra:hover {
+  transform: translateY(-1px);
+  box-shadow: 
+    0 4px 12px rgba(0, 0, 0, 0.02),
+    0 2px 4px rgba(0, 0, 0, 0.01),
+    inset 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* Message input area styling */
+.message-input-area {
+  background: rgba(255, 255, 255, 0.005);
+  backdrop-filter: blur(25px);
+  -webkit-backdrop-filter: blur(25px);
+  border: 1px solid rgba(255, 255, 255, 0.01);
+  border-radius: 1.5rem;
+}
+
+.light .message-input-area {
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+/* Avatar styling */
+.avatar-ghost {
+  background: linear-gradient(135deg, #60a5fa, #93c5fd);
+  border: 2px solid rgba(59, 130, 246, 0.1);
+}
+
+.avatar-emma {
+  border: 2px solid rgba(16, 185, 129, 0.1);
+}
+
+.avatar-confession {
+  background: linear-gradient(135deg, #8b5cf6, #c4b5fd);
+  border: 2px solid rgba(139, 92, 246, 0.1);
+}
+
+/* Ultra subtle animations */
+@keyframes ultra-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.message-ultra-fade-in {
+  animation: ultra-fade-in 0.4s ease-out;
+}
+
+/* Reaction button styling */
+.reaction-button {
+  background: rgba(255, 255, 255, 0.005);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.008);
+  border-radius: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.reaction-button:hover {
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.015);
+  transform: scale(1.05);
+}
+
+.light .reaction-button {
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.light .reaction-button:hover {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* Time stamps styling */
+.timestamp {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.light .timestamp {
+  color: rgba(0, 0, 0, 0.4);
+}
+
+/* Send button styling */
+.send-button {
+  background: linear-gradient(135deg, #10b981, #059669);
+  border: none;
+  border-radius: 50%;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
+}
+
+.send-button:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.send-button:active {
+  transform: scale(0.95);
+}
+
+/* Ensure all ultra faded elements blend seamlessly */
+.ultra-blend {
+  background: rgba(255, 255, 255, 0.003);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(255, 255, 255, 0.005);
+}
+
+.light .ultra-blend {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(0, 0, 0, 0.03);
+}

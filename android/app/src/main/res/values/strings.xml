@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Confessr</string>
+    <string name="title_activity_main">Confessr</string>
+    <string name="package_name">com.confessr.app</string>
+    <string name="custom_url_scheme">com.confessr.app</string>
+</resources>
