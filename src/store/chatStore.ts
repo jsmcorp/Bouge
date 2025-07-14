@@ -828,6 +828,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const isSqliteReady = isNative && await sqliteService.isReady();
       
       // ALWAYS load from local storage first if SQLite is available
+      let localDataLoaded = false;
       if (isSqliteReady) {
         console.log('📱 Loading groups from local storage first (local-first approach)');
         try {
@@ -845,16 +846,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
             
             // Update UI with local data immediately
-            set({ groups });
+            set({ groups, isLoading: false });
             console.log(`✅ Loaded ${groups.length} groups from local storage`);
+            localDataLoaded = true;
             
-            // Check network status - if online, sync in background
+            // After displaying local data, check if we should sync in background
             const networkStatus = await Network.getStatus();
             const isOnline = networkStatus.connected;
             
             if (!isOnline) {
               // If offline, we're done
-              set({ isLoading: false });
               return;
             }
             
@@ -866,6 +867,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       
+      // If we've already loaded data from local storage, don't show loading indicator for remote fetch
+      if (!localDataLoaded) {
+        set({ isLoading: true });
+      }
+      
       // Check network status
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
@@ -873,8 +879,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // If offline and we couldn't load from local storage, show empty state
       if (!isOnline) {
         console.log('📵 Offline and no local group data available');
-        set({ groups: [] });
-        set({ isLoading: false });
+        if (!localDataLoaded) {
+          set({ groups: [], isLoading: false });
+        }
         return;
       }
       
@@ -892,8 +899,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (memberError) throw memberError;
 
       if (!memberGroups || memberGroups.length === 0) {
-        set({ groups: [] });
-        set({ isLoading: false });
+        if (!localDataLoaded) {
+          set({ groups: [], isLoading: false });
+        }
         return;
       }
 
@@ -906,8 +914,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (groupsError) throw groupsError;
 
-      // Update UI with remote data
-      set({ groups: groups || [] });
+      // Update UI with remote data only if we didn't already show local data
+      if (!localDataLoaded) {
+        set({ groups: groups || [], isLoading: false });
+      }
       
       // If SQLite is available, sync groups to local storage
       if (isSqliteReady) {
@@ -926,9 +936,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (error) {
       console.error('Error fetching groups:', error);
-      set({ groups: [] });
-    } finally {
-      set({ isLoading: false });
+      set({ groups: [], isLoading: false });
     }
   },
 
@@ -941,6 +949,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const isSqliteReady = isNative && await sqliteService.isReady();
       
       // ALWAYS load from local storage first if SQLite is available
+      let localDataLoaded = false;
       if (isSqliteReady) {
         console.log('📱 Loading messages from local storage first (local-first approach)');
         try {
@@ -981,16 +990,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
             
             // Update UI with local data immediately
-            set({ messages });
+            set({ messages, isLoading: false });
             console.log(`✅ Loaded ${messages.length} messages from local storage`);
+            localDataLoaded = true;
             
-            // Check network status - if online, sync in background
+            // After displaying local data, check if we should sync in background
             const networkStatus = await Network.getStatus();
             const isOnline = networkStatus.connected;
             
             if (!isOnline) {
               // If offline, we're done
-              set({ isLoading: false });
               return;
             }
             
@@ -1002,6 +1011,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       
+      // If we've already loaded data from local storage, don't show loading indicator for remote fetch
+      if (!localDataLoaded) {
+        set({ isLoading: true });
+      }
+      
       // Check network status
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
@@ -1009,8 +1023,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // If offline and we couldn't load from local storage, show empty state
       if (!isOnline) {
         console.log('📵 Offline and no local data available');
-        set({ messages: [] });
-        set({ isLoading: false });
+        if (!localDataLoaded) {
+          set({ messages: [], isLoading: false });
+        }
         return;
       }
       
@@ -1108,7 +1123,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
 
       // Only update UI if we didn't already show local data
-      set({ messages });
+      if (!localDataLoaded) {
+        set({ messages, isLoading: false });
+      }
       
       // If SQLite is available, sync messages and user data to local storage
       if (isSqliteReady) {
@@ -1151,7 +1168,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
-    } finally {
       set({ isLoading: false });
     }
   },
