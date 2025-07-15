@@ -260,8 +260,10 @@ class SQLiteService {
       );
 
       /* indexes */
-      CREATE INDEX IF NOT EXISTS idx_msg_group_date
+      CREATE INDEX IF NOT EXISTS idx_msg_group_date_asc
         ON messages(group_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_msg_group_date_desc
+        ON messages(group_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_outbox_retry
         ON outbox(next_retry_at);
     `;
@@ -319,12 +321,13 @@ class SQLiteService {
     const sql = `
       SELECT * FROM messages 
       WHERE group_id = ? 
-      ORDER BY created_at ASC 
+      ORDER BY created_at DESC 
       LIMIT ? OFFSET ?
     `;
 
     const result = await this.db!.query(sql, [groupId, limit, offset]);
-    return result.values || [];
+    // Reverse the result to maintain chronological order (oldest to newest) for UI display
+    return result.values ? [...result.values].reverse() : [];
   }
 
   public async getLatestMessageTimestamp(groupId: string): Promise<number> {
