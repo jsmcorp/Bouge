@@ -113,25 +113,25 @@ export function MessageList() {
       {/* Pull-to-refresh indicator */}
       {(isPulling || isRefreshing) && (
         <div 
-          className="flex items-center justify-center py-4 transition-transform"
+          className="flex items-center justify-center py-2 sm:py-4 transition-transform"
           style={{ 
             transform: `translateY(${pullDistance}px)`,
             height: pullDistance > 0 ? `${pullDistance}px` : '0px'
           }}
         >
           <RefreshCw 
-            className={`w-6 h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`} 
+            className={`w-5 h-5 sm:w-6 sm:h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`} 
             style={{ 
               transform: `rotate(${pullDistance * 3}deg)` 
             }}
           />
-          <span className="ml-2 text-sm font-medium">
+          <span className="ml-2 text-xs sm:text-sm font-medium">
             {isRefreshing ? 'Refreshing...' : 'Pull to refresh'}
           </span>
         </div>
       )}
 
-      <div className="p-4 space-y-4">
+      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-4">
         <AnimatePresence initial={false}>
           {messages.map((message, index) => (
             <motion.div

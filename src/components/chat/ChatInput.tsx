@@ -273,17 +273,17 @@ export function ChatInput({
 
   return (
     <>
-      <div className={`space-y-3 ${isInThread ? 'p-2' : 'p-3'}`}>
+      <div className={`space-y-2 sm:space-y-3 ${isInThread ? 'p-1 sm:p-2' : 'p-2 sm:p-3'}`}>
         {/* Connection Status */}
         {connectionStatus !== 'connected' && (
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="flex items-center justify-center p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg"
+            className="flex items-center justify-center p-1 sm:p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg"
           >
             <div className="flex items-center space-x-2">
               <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
-              <span className="text-sm text-yellow-600">
+              <span className="text-xs sm:text-sm text-yellow-600">
                 {connectionStatus === 'connecting' && 'Connecting...'}
                 {connectionStatus === 'reconnecting' && 'Reconnecting...'}
                 {connectionStatus === 'disconnected' && 'Disconnected - Messages may not send'}
@@ -407,10 +407,10 @@ export function ChatInput({
 
         {/* Ghost Mode Toggle */}
         {messageType === 'text' && !selectedImage && (
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center space-x-2">
-              <Ghost className={`w-4 h-4 ${currentGhostMode ? 'text-green-500' : 'text-muted-foreground'}`} />
-              <Label htmlFor={`ghost-mode-${isInThread ? 'thread' : 'main'}`} className="text-sm">
+          <div className="flex items-center justify-between mb-1 sm:mb-2">
+            <div className="flex items-center space-x-1 sm:space-x-2">
+              <Ghost className={`w-3 h-3 sm:w-4 sm:h-4 ${currentGhostMode ? 'text-green-500' : 'text-muted-foreground'}`} />
+              <Label htmlFor={`ghost-mode-${isInThread ? 'thread' : 'main'}`} className="text-xs sm:text-sm">
                 Ghost Mode
               </Label>
               <Switch
@@ -419,16 +419,14 @@ export function ChatInput({
                 onCheckedChange={toggleGhostMode}
               />
             </div>
-            <div className="text-xs text-muted-foreground">
+            <div className="text-xs text-muted-foreground hidden sm:block">
               {currentGhostMode ? 'Messages will be anonymous' : 'Messages will show your identity'}
             </div>
           </div>
         )}
 
-      
-
         {/* Compact Input Bar */}
-        <form onSubmit={handleSubmit} className={`message-input-area flex items-center gap-2 p-2 shadow-lg ${isInThread ? 'h-12' : 'h-14'}`}>
+        <form onSubmit={handleSubmit} className={`message-input-area flex items-center gap-1 sm:gap-2 p-1 sm:p-2 shadow-lg ${isInThread ? 'h-10 sm:h-12' : 'h-12 sm:h-14'}`}>
           {/* Hidden file input */}
           <input
             ref={fileInputRef}
@@ -445,22 +443,22 @@ export function ChatInput({
                 <Button 
                   type="button" 
                   variant="ghost" 
-                  className={`${isInThread ? 'h-8 w-8' : 'h-10 w-10'} p-0 rounded-full hover:bg-muted/50`}
+                  className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
                 >
-                  <Plus className={isInThread ? "w-4 h-4" : "w-5 h-5"} />
+                  <Plus className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
                 <DropdownMenuItem onClick={() => setMessageType('text')}>
-                  <Ghost className="w-4 h-4 mr-2" />
+                  <Ghost className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
                   Regular Message
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setMessageType('confession')}>
-                  <Ghost className="w-4 h-4 mr-2 text-green-500" />
+                  <Ghost className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-green-500" />
                   Anonymous Confession
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={handleCreatePoll}>
-                  <BarChart3 className="w-4 h-4 mr-2 text-blue-500" />
+                  <BarChart3 className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-blue-500" />
                   Create Poll
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -472,12 +470,12 @@ export function ChatInput({
             type="button"
             variant="ghost"
             onClick={handleEmojiButtonClick}
-            className={`${isInThread ? 'h-8 w-8' : 'h-10 w-10'} p-0 rounded-full hover:bg-muted/50`}
+            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
           >
             {isMobile && showEmojiPanel ? (
-              <Keyboard className={isInThread ? "w-4 h-4" : "w-5 h-5"} />
+              <Keyboard className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
             ) : (
-              <Smile className={isInThread ? "w-4 h-4" : "w-5 h-5"} />
+              <Smile className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
             )}
           </Button>
 
@@ -490,7 +488,7 @@ export function ChatInput({
             onBlur={handleTypingStop}
             onFocus={handleTextareaFocus}
             placeholder={getPlaceholderText()}
-            className={`flex-1 min-h-0 ${isInThread ? 'h-8' : 'h-10'} py-2 px-4 rounded-3xl resize-none overflow-hidden ${isInThread ? 'text-sm' : 'text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none ${
+            className={`flex-1 min-h-0 ${isInThread ? 'h-7 sm:h-8' : 'h-8 sm:h-10'} py-1 sm:py-2 px-2 sm:px-4 rounded-3xl resize-none overflow-hidden ${isInThread ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none ${
               connectionStatus !== 'connected' || uploadingFile ? 'opacity-75' : ''
             }`}
             maxLength={2000}
@@ -503,28 +501,19 @@ export function ChatInput({
             type="button"
             variant="ghost"
             onClick={handleImageButtonClick}
-            disabled={uploadingFile || connectionStatus === 'disconnected'}
-            className={`${isInThread ? 'h-8 w-8' : 'h-10 w-10'} p-0 rounded-full hover:bg-muted/50`}
+            disabled={uploadingFile}
+            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
           >
-            {uploadingFile ? (
-              <div className={`border-2 border-muted-foreground border-t-transparent rounded-full animate-spin ${isInThread ? 'w-4 h-4' : 'w-5 h-5'}`} />
-            ) : (
-              <Image className={isInThread ? "w-4 h-4" : "w-5 h-5"} />
-            )}
+            <Image className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
           </Button>
 
           {/* Send Button */}
           <Button
             type="submit"
             disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || connectionStatus === 'disconnected'}
-            size="sm"
-            className={`send-button ${isInThread ? 'h-8 w-8' : 'h-10 w-10'} p-0 disabled:opacity-50`}
+            className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full`}
           >
-            {isLoading || uploadingFile ? (
-              <div className={`border-2 border-white border-t-transparent rounded-full animate-spin ${isInThread ? 'w-4 h-4' : 'w-5 h-5'}`} />
-            ) : (
-              <Send className={isInThread ? "w-4 h-4" : "w-5 h-5"} />
-            )}
+            <Send className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
           </Button>
         </form>
       </div>

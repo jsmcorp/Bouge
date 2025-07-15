@@ -68,30 +68,30 @@ export function Sidebar() {
       <motion.div
         initial={{ x: -300 }}
         animate={{ x: 0 }}
-        className="w-64 h-full bg-card/50 backdrop-blur-sm border-r border-border/50 flex flex-col"
+        className="w-full sm:w-60 md:w-64 h-full bg-card/50 backdrop-blur-sm border-r border-border/50 flex flex-col"
       >
         {/* Header - Fixed */}
-        <div className="flex-shrink-0 p-4 border-b border-border/50">
-          <div className="flex items-center space-x-3">
-            <div className="flex items-center justify-center w-10 h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-xl">
-              <Ghost className="w-5 h-5 text-white" />
+        <div className="flex-shrink-0 p-3 sm:p-4 border-b border-border/50">
+          <div className="flex items-center space-x-2 sm:space-x-3">
+            <div className="flex items-center justify-center w-8 h-8 sm:w-10 sm:h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-xl">
+              <Ghost className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
             </div>
             <div>
-              <h1 className="font-bold text-lg">Confessr</h1>
+              <h1 className="font-bold text-base sm:text-lg">Confessr</h1>
               <p className="text-xs text-muted-foreground">Anonymous messaging</p>
             </div>
           </div>
         </div>
 
         {/* Search - Fixed */}
-        <div className="flex-shrink-0 p-4 pb-2">
+        <div className="flex-shrink-0 p-3 sm:p-4 pb-2">
           <div className="relative">
-            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-2 sm:left-3 top-2.5 sm:top-3 h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
             <Input
               placeholder="Search groups..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10 bg-background/50"
+              className="pl-7 sm:pl-10 text-sm bg-background/50 h-8 sm:h-10"
             />
           </div>
         </div>
@@ -176,9 +176,9 @@ export function Sidebar() {
         <Separator />
 
         {/* User Profile - Fixed at bottom */}
-        <div className="flex-shrink-0 p-4">
-          <div className="flex items-center space-x-3">
-            <Avatar className="h-10 w-10">
+        <div className="flex-shrink-0 p-3 sm:p-4">
+          <div className="flex items-center space-x-2 sm:space-x-3">
+            <Avatar className="h-8 w-8 sm:h-10 sm:w-10">
               <AvatarImage src={user?.avatar_url || ''} />
               <AvatarFallback>
                 {user?.display_name?.charAt(0) || 'U'}
@@ -192,17 +192,17 @@ export function Sidebar() {
             </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-                  <MoreHorizontal className="h-4 w-4" />
+                <Button variant="ghost" size="sm" className="h-7 w-7 sm:h-8 sm:w-8 p-0">
+                  <MoreHorizontal className="h-3 w-3 sm:h-4 sm:w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={handleSettingsClick}>
-                  <Settings className="h-4 w-4 mr-2" />
+                  <Settings className="h-3 w-3 sm:h-4 sm:w-4 mr-2" />
                   Settings
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={handleLogout}>
-                  <LogOut className="h-4 w-4 mr-2" />
+                  <LogOut className="h-3 w-3 sm:h-4 sm:w-4 mr-2" />
                   Sign Out
                 </DropdownMenuItem>
               </DropdownMenuContent>

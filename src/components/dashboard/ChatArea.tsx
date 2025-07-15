@@ -113,43 +113,43 @@ export function ChatArea() {
         !isMobile && (activeThread || showGroupDetailsPanel) ? 'flex-1' : 'w-full'
       }`}>
         {/* Header - Fixed at top */}
-        <div className="flex-shrink-0 flex items-center justify-between p-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg">
+        <div className="flex-shrink-0 flex items-center justify-between p-2 sm:p-3 md:p-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg">
           <div 
-            className="flex items-center space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-2 transition-colors"
+            className="flex items-center space-x-2 sm:space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-1 sm:p-2 transition-colors"
             onClick={handleGroupHeaderClick}
           >
-            <div className="flex items-center justify-center w-8 h-8 bg-gradient-to-br from-green-500 to-green-600/80 rounded-lg shadow-md">
-              <Hash className="w-4 h-4 text-white" />
+            <div className="flex items-center justify-center w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-green-500 to-green-600/80 rounded-lg shadow-md">
+              <Hash className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold hover:text-primary transition-colors">
+              <h1 className="text-base sm:text-lg md:text-xl font-bold hover:text-primary transition-colors truncate">
                 {activeGroup.name}
               </h1>
               {activeGroup.description && (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs sm:text-sm text-muted-foreground truncate">
                   {activeGroup.description}
                 </p>
               )}
             </div>
           </div>
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-1 sm:space-x-3">
             {/* Sync Button */}
             <Button 
               variant="ghost" 
               size="sm" 
-              className="rounded-full hover:bg-muted/50"
+              className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
               onClick={handleSyncMessages}
               disabled={isSyncing}
             >
-              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3 h-3 sm:w-4 sm:h-4 ${isSyncing ? 'animate-spin' : ''}`} />
             </Button>
             
             {/* Connection Status Indicator */}
-            <div className="flex items-center space-x-1">
+            <div className="hidden sm:flex items-center space-x-1">
               {connectionStatus === 'connected' ? (
-                <Wifi className={`w-4 h-4 ${getConnectionStatusColor()}`} />
+                <Wifi className={`w-3 h-3 sm:w-4 sm:h-4 ${getConnectionStatusColor()}`} />
               ) : (
-                <WifiOff className={`w-4 h-4 ${getConnectionStatusColor()}`} />
+                <WifiOff className={`w-3 h-3 sm:w-4 sm:h-4 ${getConnectionStatusColor()}`} />
               )}
               <Badge 
                 variant="secondary" 
@@ -159,13 +159,21 @@ export function ChatArea() {
               </Badge>
             </div>
             
-            <Button variant="ghost" size="sm" className="rounded-full hover:bg-muted/50">
-              <Users className="w-4 h-4" />
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
+            >
+              <Users className="w-3 h-3 sm:w-4 sm:h-4" />
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="rounded-full hover:bg-muted/50">
-                  <MoreHorizontal className="w-4 h-4" />
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
+                >
+                  <MoreHorizontal className="w-3 h-3 sm:w-4 sm:h-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">

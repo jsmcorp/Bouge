@@ -28,10 +28,10 @@ export default function DashboardPage() {
           <ChatArea />
         ) : (
           !isMobile ? <WelcomeScreen /> : (
-            <div className="flex-1 flex items-center justify-center p-4">
+            <div className="flex-1 flex items-center justify-center p-2 sm:p-3 md:p-4">
               <div className="text-center">
-                <h2 className="text-xl font-semibold mb-2">Select a group</h2>
-                <p className="text-muted-foreground">Choose a group from the list to start chatting</p>
+                <h2 className="text-lg sm:text-xl font-semibold mb-2">Select a group</h2>
+                <p className="text-sm text-muted-foreground">Choose a group from the list to start chatting</p>
               </div>
             </div>
           )
