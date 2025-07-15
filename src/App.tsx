@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { useEffect, createContext } from 'react';
 import { useAuthStore, initializeAuthListener } from '@/store/authStore';
 import { useChatStore } from '@/store/chatStore';
@@ -29,7 +29,8 @@ import SettingsPage from '@/pages/SettingsPage';
 import { LoadingScreen } from '@/components/LoadingScreen';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 
-function App() {
+// AppContent component with access to routing hooks
+function AppContent() {
   const { 
     user, 
     isLoading, 
@@ -39,9 +40,44 @@ function App() {
   const { 
     setOnlineStatus, 
     startOutboxProcessor, 
-    stopOutboxProcessor 
+    stopOutboxProcessor
   } = useChatStore();
   const isMobile = useIsMobile();
+  const navigate = useNavigate();
+
+  // Handle hardware back button on mobile
+  useEffect(() => {
+    if (Capacitor.isNativePlatform() && isMobile) {
+      const handleBackButton = () => {
+        const currentPath = window.location.pathname;
+        
+        // If we're in a group chat, navigate to dashboard
+        if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details')) {
+          // Navigate first with replace to avoid history stacking
+          navigate('/dashboard', { replace: true });
+          
+          // Use setTimeout to clear the active group after navigation has started
+          setTimeout(() => {
+            useChatStore.getState().setActiveGroup(null);
+          }, 0);
+          
+          return true; // Prevent default back action
+        }
+        
+        // If we're at dashboard, let the default back action happen (exit app)
+        return false;
+      };
+
+      document.addEventListener('ionBackButton', (ev) => {
+        (ev as any).detail.register(10, handleBackButton);
+      });
+      
+      // Cleanup
+      return () => {
+        document.removeEventListener('ionBackButton', () => {});
+      };
+    }
+  }, [navigate, isMobile]);
 
   useEffect(() => {
     console.log('🚀 App mounted, setting up auth...');
@@ -129,156 +165,157 @@ function App() {
 
   // Show loading screen while auth is initializing
   if (!isInitialized || isLoading) {
-    return (
-      <ThemeProvider defaultTheme="light" storageKey="confessr-theme">
-        <LoadingScreen />
-        <Toaster />
-      </ThemeProvider>
-    );
+    return <LoadingScreen />;
   }
 
   return (
+    <MobileContext.Provider value={isMobile}>
+      <div className="min-h-screen bg-background text-foreground">
+        <Routes>
+          {/* Public routes */}
+          <Route
+            path="/auth/login"
+            element={
+              user ? (
+                user.is_onboarded ? (
+                  <Navigate to="/dashboard" replace />
+                ) : (
+                  <Navigate to="/onboarding/name" replace />
+                )
+              ) : (
+                <LoginPage />
+              )
+            }
+          />
+          <Route
+            path="/auth/verify"
+            element={
+              user ? (
+                user.is_onboarded ? (
+                  <Navigate to="/dashboard" replace />
+                ) : (
+                  <Navigate to="/onboarding/name" replace />
+                )
+              ) : (
+                <VerifyPage />
+              )
+            }
+          />
+
+          {/* Onboarding routes */}
+          <Route
+            path="/onboarding/name"
+            element={
+              <ProtectedRoute requireOnboarding={false}>
+                <OnboardingNamePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/onboarding/avatar"
+            element={
+              <ProtectedRoute requireOnboarding={false}>
+                <OnboardingAvatarPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Protected routes */}
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <DashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/groups/:groupId"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <GroupPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* Mobile-specific full-screen routes */}
+          <Route
+            path="/groups/:groupId/thread/:messageId"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <ThreadViewPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/groups/:groupId/details"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <GroupDetailsViewPage />
+              </ProtectedRoute>
+            }
+          />
+          
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <SettingsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Default redirect */}
+          <Route
+            path="/"
+            element={
+              <Navigate
+                to={
+                  !user 
+                    ? "/auth/login" 
+                    : user.is_onboarded 
+                      ? "/dashboard" 
+                      : "/onboarding/name"
+                }
+                replace
+              />
+            }
+          />
+
+          {/* Catch all */}
+          <Route
+            path="*"
+            element={
+              <Navigate
+                to={
+                  !user 
+                    ? "/auth/login" 
+                    : user.is_onboarded 
+                      ? "/dashboard" 
+                      : "/onboarding/name"
+                }
+                replace
+              />
+            }
+          />
+        </Routes>
+      </div>
+    </MobileContext.Provider>
+  );
+}
+
+function App() {
+  return (
     <ThemeProvider defaultTheme="light" storageKey="confessr-theme">
-      <MobileContext.Provider value={isMobile}>
-        <Router 
-          future={{ 
-            v7_startTransition: true,
-            v7_relativeSplatPath: true 
-          }}
-        >
-          <div className="min-h-screen bg-background text-foreground">
-            <Routes>
-              {/* Public routes */}
-              <Route
-                path="/auth/login"
-                element={
-                  user ? (
-                    user.is_onboarded ? (
-                      <Navigate to="/dashboard" replace />
-                    ) : (
-                      <Navigate to="/onboarding/name" replace />
-                    )
-                  ) : (
-                    <LoginPage />
-                  )
-                }
-              />
-              <Route
-                path="/auth/verify"
-                element={
-                  user ? (
-                    user.is_onboarded ? (
-                      <Navigate to="/dashboard" replace />
-                    ) : (
-                      <Navigate to="/onboarding/name" replace />
-                    )
-                  ) : (
-                    <VerifyPage />
-                  )
-                }
-              />
-
-              {/* Onboarding routes */}
-              <Route
-                path="/onboarding/name"
-                element={
-                  <ProtectedRoute requireOnboarding={false}>
-                    <OnboardingNamePage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/onboarding/avatar"
-                element={
-                  <ProtectedRoute requireOnboarding={false}>
-                    <OnboardingAvatarPage />
-                  </ProtectedRoute>
-                }
-              />
-
-              {/* Protected routes */}
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute requireOnboarding={true}>
-                    <DashboardPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/groups/:groupId"
-                element={
-                  <ProtectedRoute requireOnboarding={true}>
-                    <GroupPage />
-                  </ProtectedRoute>
-                }
-              />
-              
-              {/* Mobile-specific full-screen routes */}
-              <Route
-                path="/groups/:groupId/thread/:messageId"
-                element={
-                  <ProtectedRoute requireOnboarding={true}>
-                    <ThreadViewPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/groups/:groupId/details"
-                element={
-                  <ProtectedRoute requireOnboarding={true}>
-                    <GroupDetailsViewPage />
-                  </ProtectedRoute>
-                }
-              />
-              
-              <Route
-                path="/settings"
-                element={
-                  <ProtectedRoute requireOnboarding={true}>
-                    <SettingsPage />
-                  </ProtectedRoute>
-                }
-              />
-
-              {/* Default redirect */}
-              <Route
-                path="/"
-                element={
-                  <Navigate
-                    to={
-                      !user 
-                        ? "/auth/login" 
-                        : user.is_onboarded 
-                          ? "/dashboard" 
-                          : "/onboarding/name"
-                    }
-                    replace
-                  />
-                }
-              />
-
-              {/* Catch all */}
-              <Route
-                path="*"
-                element={
-                  <Navigate
-                    to={
-                      !user 
-                        ? "/auth/login" 
-                        : user.is_onboarded 
-                          ? "/dashboard" 
-                          : "/onboarding/name"
-                    }
-                    replace
-                  />
-                }
-              />
-            </Routes>
-          </div>
-          <Toaster />
-        </Router>
-      </MobileContext.Provider>
+      <Router 
+        future={{ 
+          v7_startTransition: true,
+          v7_relativeSplatPath: true 
+        }}
+      >
+        <AppContent />
+        <Toaster />
+      </Router>
     </ThemeProvider>
   );
 }

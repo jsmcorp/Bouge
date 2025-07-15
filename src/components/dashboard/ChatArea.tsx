@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
@@ -106,6 +106,19 @@ export function ChatArea() {
     }
   };
 
+  const handleBackClick = () => {
+    if (isMobile) {
+      // Navigate first with replace to prevent history stacking
+      navigate('/dashboard', { replace: true });
+      
+      // Use setTimeout to clear the active group after navigation has started
+      // This prevents the component from re-rendering before navigation completes
+      setTimeout(() => {
+        useChatStore.getState().setActiveGroup(null);
+      }, 0);
+    }
+  };
+
   return (
     <div className="h-full flex">
       {/* Main Chat Area */}
@@ -114,24 +127,39 @@ export function ChatArea() {
       }`}>
         {/* Header - Fixed at top */}
         <div className="flex-shrink-0 flex items-center justify-between p-2 sm:p-3 md:p-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg">
-          <div 
-            className="flex items-center space-x-2 sm:space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-1 sm:p-2 transition-colors"
-            onClick={handleGroupHeaderClick}
-          >
-            <div className="flex items-center justify-center w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-green-500 to-green-600/80 rounded-lg shadow-md">
-              <Hash className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
-            </div>
-            <div>
-              <h1 className="text-base sm:text-lg md:text-xl font-bold hover:text-primary transition-colors truncate">
-                {activeGroup.name}
-              </h1>
-              {activeGroup.description && (
-                <p className="text-xs sm:text-sm text-muted-foreground truncate">
-                  {activeGroup.description}
-                </p>
-              )}
+          <div className="flex items-center">
+            {/* Back button - only show on mobile */}
+            {isMobile && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleBackClick}
+                className="mr-2 h-8 w-8 p-0 flex-shrink-0"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </Button>
+            )}
+            
+            <div 
+              className="flex items-center space-x-2 sm:space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-1 sm:p-2 transition-colors"
+              onClick={handleGroupHeaderClick}
+            >
+              <div className="flex items-center justify-center w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-green-500 to-green-600/80 rounded-lg shadow-md">
+                <Hash className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
+              </div>
+              <div>
+                <h1 className="text-base sm:text-lg md:text-xl font-bold hover:text-primary transition-colors truncate">
+                  {activeGroup.name}
+                </h1>
+                {activeGroup.description && (
+                  <p className="text-xs sm:text-sm text-muted-foreground truncate">
+                    {activeGroup.description}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
+          
           <div className="flex items-center space-x-1 sm:space-x-3">
             {/* Sync Button */}
             <Button 

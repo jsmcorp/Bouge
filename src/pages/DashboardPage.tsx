@@ -17,8 +17,17 @@ export default function DashboardPage() {
     }
   }, [user?.id, fetchGroups]);
 
+  // On mobile, show full-screen sidebar when no group is selected
+  if (isMobile && !activeGroup) {
+    return (
+      <div className="h-screen w-screen bg-background overflow-hidden">
+        <Sidebar />
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen bg-background flex overflow-hidden">
+    <div className="h-screen w-screen bg-background flex overflow-hidden">
       {/* Show sidebar on desktop, or when no active group on mobile */}
       {(!isMobile || !activeGroup) && <Sidebar />}
       
@@ -27,14 +36,7 @@ export default function DashboardPage() {
         {activeGroup ? (
           <ChatArea />
         ) : (
-          !isMobile ? <WelcomeScreen /> : (
-            <div className="flex-1 flex items-center justify-center p-2 sm:p-3 md:p-4">
-              <div className="text-center">
-                <h2 className="text-lg sm:text-xl font-semibold mb-2">Select a group</h2>
-                <p className="text-sm text-muted-foreground">Choose a group from the list to start chatting</p>
-              </div>
-            </div>
-          )
+          <WelcomeScreen />
         )}
       </div>
     </div>

@@ -51,7 +51,7 @@ export default function ThreadViewPage() {
   };
 
   return (
-    <div className="h-screen bg-background flex flex-col">
+    <div className="h-screen w-screen bg-background flex flex-col">
       {/* Mobile Header */}
       <div className="flex-shrink-0 flex items-center p-2 sm:p-4 border-b border-border/50 bg-card/30 backdrop-blur-sm">
         <Button
