@@ -1,10 +1,11 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect, createContext } from 'react';
 import { useAuthStore, initializeAuthListener } from '@/store/authStore';
+import { useChatStore } from '@/store/chatStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { sqliteService } from '@/lib/sqliteService';
-import { useChatStore } from '@/store/chatStore';
 import { Capacitor } from '@capacitor/core';
+import { Network } from '@capacitor/network';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/theme-provider';
 
@@ -35,7 +36,11 @@ function App() {
     isInitialized,
     initializeAuth 
   } = useAuthStore();
-  const { setupNetworkListener, cleanupNetworkListener } = useChatStore();
+  const { 
+    setOnlineStatus, 
+    startOutboxProcessor, 
+    stopOutboxProcessor 
+  } = useChatStore();
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -49,12 +54,24 @@ function App() {
           try {
             await sqliteService.initialize();
             console.log('✅ SQLite initialized successfully');
-            
-            // Set up network listener for processing outbox messages
-            setupNetworkListener();
           } catch (error) {
             console.error('❌ SQLite initialization failed:', error);
             // Continue without SQLite - app should still work with remote data only
+          }
+          
+          // Initialize network status monitoring
+          try {
+            const status = await Network.getStatus();
+            setOnlineStatus(status.connected);
+            console.log('🌐 Initial network status:', status.connected ? 'online' : 'offline');
+            
+            // Listen for network status changes
+            Network.addListener('networkStatusChange', (status) => {
+              console.log('🌐 Network status changed:', status.connected ? 'online' : 'offline');
+              setOnlineStatus(status.connected);
+            });
+          } catch (error) {
+            console.error('❌ Network status setup failed:', error);
           }
         }
 
@@ -79,10 +96,25 @@ function App() {
     // Cleanup function for this component
     return () => {
       console.log('🧹 App unmounting, cleaning up...');
-      cleanupNetworkListener();
       cleanupPromise.then(cleanup => cleanup());
+      stopOutboxProcessor();
     };
   }, []); // Empty dependency array - only run once
+  
+  // Start outbox processor when user is authenticated
+  useEffect(() => {
+    if (user && isInitialized && !isLoading && Capacitor.isNativePlatform()) {
+      console.log('🚀 Starting outbox processor...');
+      startOutboxProcessor();
+      
+      return () => {
+        console.log('🛑 Stopping outbox processor...');
+        if (typeof stopOutboxProcessor === 'function') {
+          stopOutboxProcessor();
+        }
+      };
+    }
+  }, [user, isInitialized, isLoading, startOutboxProcessor, stopOutboxProcessor]);
 
   // Debug logging for render state
   useEffect(() => {

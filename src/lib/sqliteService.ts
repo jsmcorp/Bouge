@@ -261,7 +261,7 @@ class SQLiteService {
 
       /* indexes */
       CREATE INDEX IF NOT EXISTS idx_msg_group_date
-        ON messages(group_id, created_at DESC);
+        ON messages(group_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_outbox_retry
         ON outbox(next_retry_at);
     `;
@@ -319,7 +319,7 @@ class SQLiteService {
     const sql = `
       SELECT * FROM messages 
       WHERE group_id = ? 
-      ORDER BY created_at DESC 
+      ORDER BY created_at ASC 
       LIMIT ? OFFSET ?
     `;
 
@@ -466,9 +466,25 @@ class SQLiteService {
     
     console.log(`🔄 Syncing ${messages.length} messages for group ${groupId} to local storage`);
     
+    // Get the latest message timestamp we have locally
+    const latestLocalTimestamp = await this.getLatestMessageTimestamp(groupId);
+    console.log(`📊 Latest local message timestamp: ${new Date(latestLocalTimestamp).toISOString()}`);
+    
+    // Filter for new messages only to avoid duplicates
+    const newMessages = messages.filter(msg => {
+      const msgTimestamp = typeof msg.created_at === 'string' 
+        ? new Date(msg.created_at).getTime() 
+        : msg.created_at;
+      
+      // Keep messages that are newer than our latest local timestamp
+      return msgTimestamp > latestLocalTimestamp;
+    });
+    
+    console.log(`📥 Found ${newMessages.length} new messages to sync to local storage`);
+    
     let syncCount = 0;
     
-    for (const message of messages) {
+    for (const message of newMessages) {
       try {
         // Convert to local message format
         const localMessage: Omit<LocalMessage, 'local_id'> = {
@@ -499,7 +515,7 @@ class SQLiteService {
       last_sync_timestamp: now
     });
     
-    console.log(`✅ Successfully synced ${syncCount} messages to local storage`);
+    console.log(`✅ Successfully synced ${syncCount} new messages to local storage`);
     return syncCount;
   }
   

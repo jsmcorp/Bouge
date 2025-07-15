@@ -1,14 +1,21 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
+import { RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 
 export function MessageList() {
-  const { messages, isLoading, typingUsers } = useChatStore();
+  const { messages, isLoading, typingUsers, activeGroup, fetchMessages } = useChatStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [isPulling, setIsPulling] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const touchStartY = useRef(0);
+  const scrollTop = useRef(0);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -20,7 +27,58 @@ export function MessageList() {
     }
   }, [messages, typingUsers]);
 
-  if (isLoading) {
+  // Handle pull-to-refresh
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartY.current = e.touches[0].clientY;
+    if (scrollAreaRef.current) {
+      const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+      if (scrollContainer) {
+        scrollTop.current = scrollContainer.scrollTop;
+      }
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (scrollTop.current === 0) {
+      const touchY = e.touches[0].clientY;
+      const distance = touchY - touchStartY.current;
+      
+      if (distance > 5) {
+        setIsPulling(true);
+        setPullDistance(Math.min(distance * 0.5, 80)); // Limit max pull distance
+        e.preventDefault();
+      }
+    }
+  };
+
+  const handleTouchEnd = async () => {
+    if (isPulling && pullDistance > 60 && activeGroup) {
+      // Trigger refresh
+      setIsRefreshing(true);
+      setPullDistance(60); // Keep showing the refresh indicator
+      
+      try {
+        await fetchMessages(activeGroup.id);
+        toast.success('Messages refreshed');
+      } catch (error) {
+        console.error('Error refreshing messages:', error);
+        toast.error('Failed to refresh messages');
+      } finally {
+        // Reset pull state with a small delay to show completion
+        setTimeout(() => {
+          setIsRefreshing(false);
+          setIsPulling(false);
+          setPullDistance(0);
+        }, 500);
+      }
+    } else {
+      // Reset pull state immediately if not triggering refresh
+      setIsPulling(false);
+      setPullDistance(0);
+    }
+  };
+
+  if (isLoading && !isPulling && messages.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
@@ -31,7 +89,7 @@ export function MessageList() {
     );
   }
 
-  if (messages.length === 0 && typingUsers.length === 0) {
+  if (messages.length === 0 && typingUsers.length === 0 && !isPulling && !isRefreshing) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
@@ -45,7 +103,34 @@ export function MessageList() {
   }
 
   return (
-    <ScrollArea className="h-full" ref={scrollAreaRef}>
+    <ScrollArea 
+      className="h-full" 
+      ref={scrollAreaRef}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      {/* Pull-to-refresh indicator */}
+      {(isPulling || isRefreshing) && (
+        <div 
+          className="flex items-center justify-center py-4 transition-transform"
+          style={{ 
+            transform: `translateY(${pullDistance}px)`,
+            height: pullDistance > 0 ? `${pullDistance}px` : '0px'
+          }}
+        >
+          <RefreshCw 
+            className={`w-6 h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`} 
+            style={{ 
+              transform: `rotate(${pullDistance * 3}deg)` 
+            }}
+          />
+          <span className="ml-2 text-sm font-medium">
+            {isRefreshing ? 'Refreshing...' : 'Pull to refresh'}
+          </span>
+        </div>
+      )}
+
       <div className="p-4 space-y-4">
         <AnimatePresence initial={false}>
           {messages.map((message, index) => (

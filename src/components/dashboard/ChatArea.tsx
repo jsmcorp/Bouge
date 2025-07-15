@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Hash, Users, MoreHorizontal, Wifi, WifiOff } from 'lucide-react';
+import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import { toast } from 'sonner';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,6 +24,7 @@ export function ChatArea() {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const { 
     activeGroup, 
     fetchMessages, 
@@ -48,6 +50,22 @@ export function ChatArea() {
       cleanupRealtimeSubscription();
     };
   }, [cleanupRealtimeSubscription]);
+
+  const handleSyncMessages = async () => {
+    if (!activeGroup?.id) return;
+    
+    setIsSyncing(true);
+    try {
+      // Use the new forceMessageSync function for a more comprehensive sync
+      await useChatStore.getState().forceMessageSync(activeGroup.id);
+      toast.success('Messages synced successfully');
+    } catch (error) {
+      console.error('Error syncing messages:', error);
+      toast.error('Failed to sync messages');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   if (!activeGroup) return null;
 
@@ -115,6 +133,17 @@ export function ChatArea() {
             </div>
           </div>
           <div className="flex items-center space-x-3">
+            {/* Sync Button */}
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="rounded-full hover:bg-muted/50"
+              onClick={handleSyncMessages}
+              disabled={isSyncing}
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+            </Button>
+            
             {/* Connection Status Indicator */}
             <div className="flex items-center space-x-1">
               {connectionStatus === 'connected' ? (
@@ -145,6 +174,9 @@ export function ChatArea() {
                 </DropdownMenuItem>
                 <DropdownMenuItem>
                   Copy Invite Code
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={handleSyncMessages}>
+                  Sync Messages
                 </DropdownMenuItem>
                 <Separator />
                 <DropdownMenuItem className="text-destructive">

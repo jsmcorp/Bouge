@@ -124,6 +124,8 @@ interface ChatState {
   uploadingFile: boolean;
   isLoadingGroupDetails: boolean;
   messageReactions: Record<string, Reaction[]>;
+  online: boolean;
+  outboxProcessorInterval: NodeJS.Timeout | null;
   setGroups: (groups: Group[]) => void;
   setActiveGroup: (group: Group | null) => void;
   setMessages: (messages: Message[]) => void;
@@ -156,6 +158,7 @@ interface ChatState {
   addOrRemoveReaction: (messageId: string, emoji: string) => Promise<void>;
   fetchGroups: () => Promise<void>;
   fetchMessages: (groupId: string) => Promise<void>;
+  forceMessageSync: (groupId: string) => Promise<void>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
   fetchGroupMembers: (groupId: string) => Promise<void>;
@@ -182,6 +185,9 @@ interface ChatState {
   processOutbox: () => Promise<void>;
   setupNetworkListener: () => void;
   cleanupNetworkListener: () => void;
+  setOnlineStatus: (status: boolean) => void;
+  startOutboxProcessor: () => void;
+  stopOutboxProcessor: () => void;
 }
 
 // Helper function to compress images
@@ -238,6 +244,9 @@ const generateUniqueFileName = (originalName: string, userId: string): string =>
   return `${userId}/${timestamp}_${randomString}.${extension}`;
 };
 
+// Global variables for outbox processing
+let outboxProcessorInterval: NodeJS.Timeout | null = null;
+
 export const useChatStore = create<ChatState>((set, get) => ({
   groups: [],
   activeGroup: null,
@@ -259,6 +268,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   typingTimeout: null,
   showGroupDetailsPanel: false,
   groupMembers: [],
+  online: true, // Initialize the online property
+  outboxProcessorInterval: null,
   
   // Swipe gesture state
   activeSwipeMessageId: null,
@@ -942,6 +953,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   fetchMessages: async (groupId: string) => {
     try {
+      console.log('🔄 Fetching messages for group:', groupId);
       set({ isLoading: true });
       
       // Check if we're on a native platform with SQLite available
@@ -993,18 +1005,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             set({ messages, isLoading: false });
             console.log(`✅ Loaded ${messages.length} messages from local storage`);
             localDataLoaded = true;
-            
-            // After displaying local data, check if we should sync in background
-            const networkStatus = await Network.getStatus();
-            const isOnline = networkStatus.connected;
-            
-            if (!isOnline) {
-              // If offline, we're done
-              return;
-            }
-            
-            // Continue with background sync if online
-            console.log('🔄 Background syncing with Supabase...');
           }
         } catch (error) {
           console.error('❌ Error loading messages from local storage:', error);
@@ -1012,8 +1012,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       
       // If we've already loaded data from local storage, don't show loading indicator for remote fetch
-      if (!localDataLoaded) {
-        set({ isLoading: true });
+      if (localDataLoaded) {
+        set({ isLoading: false });
       }
       
       // Check network status
@@ -1122,14 +1122,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       }));
 
-      // Only update UI if we didn't already show local data
-      if (!localDataLoaded) {
-        set({ messages, isLoading: false });
-      }
-      
       // If SQLite is available, sync messages and user data to local storage
       if (isSqliteReady) {
         try {
+          console.log('🔄 Syncing messages from Supabase to local storage...');
+          
           // First, sync user data for message authors
           for (const msg of data || []) {
             if (!msg.is_ghost && msg.users) {
@@ -1141,7 +1138,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           
           // Also sync reply authors
-          for (const msg of data || []) {
+          for (const msg of messages) {
             if (msg.replies && msg.replies.length > 0) {
               for (const reply of msg.replies) {
                 if (!reply.is_ghost && reply.users) {
@@ -1155,16 +1152,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           
           // Then sync the messages
-          sqliteService.syncMessagesFromRemote(groupId, data || [])
-            .then(count => {
-              console.log(`🔄 Synced ${count} messages to local storage`);
-            })
-            .catch(error => {
-              console.error('❌ Error syncing messages to local storage:', error);
-            });
+          const syncCount = await sqliteService.syncMessagesFromRemote(groupId, data || []);
+          console.log(`🔄 Synced ${syncCount} messages from Supabase to local storage`);
+          
+          // If we synced new messages and already had local data loaded, refresh from local storage
+          if (syncCount > 0 && localDataLoaded) {
+            console.log('🔄 Refreshing UI with updated local data...');
+            
+            // Re-fetch from local storage to get the updated data
+            const updatedLocalMessages = await sqliteService.getMessages(groupId);
+            
+            if (updatedLocalMessages && updatedLocalMessages.length > 0) {
+              // Convert local messages to the format expected by the UI
+              const refreshedMessages = await Promise.all(updatedLocalMessages.map(async (msg) => {
+                // Get user info from local storage
+                let author = undefined;
+                if (!msg.is_ghost) {
+                  const user = await sqliteService.getUser(msg.user_id);
+                  if (user) {
+                    author = {
+                      display_name: user.display_name,
+                      avatar_url: null
+                    };
+                  }
+                }
+                
+                return {
+                  id: msg.id,
+                  group_id: msg.group_id,
+                  user_id: msg.user_id,
+                  content: msg.content,
+                  is_ghost: msg.is_ghost === 1,
+                  message_type: msg.message_type,
+                  created_at: new Date(msg.created_at).toISOString(),
+                  author: author,
+                  reply_count: 0,
+                  replies: [],
+                  delivery_status: 'delivered' as const,
+                  // Add missing properties required by Message type
+                  category: null,
+                  parent_id: null,
+                  image_url: null
+                };
+              }));
+              
+              // Update UI with refreshed data
+              set({ messages: refreshedMessages });
+              console.log(`✅ UI refreshed with ${refreshedMessages.length} messages from local storage`);
+            }
+          }
         } catch (error) {
           console.error('❌ Error syncing messages to local storage:', error);
         }
+      } else if (!localDataLoaded) {
+        // Only update UI with Supabase data if we didn't already load from local storage
+        set({ messages, isLoading: false });
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
@@ -2284,5 +2326,94 @@ export const useChatStore = create<ChatState>((set, get) => ({
     
     console.log('🧹 Cleaning up network status listener');
     Network.removeAllListeners();
-  }
+  },
+
+  setOnlineStatus: (status) => {
+    set({ online: status });
+  },
+  
+  startOutboxProcessor: () => {
+    const { processOutbox } = get();
+    
+    // Clear any existing interval
+    if (outboxProcessorInterval) {
+      clearInterval(outboxProcessorInterval);
+    }
+    
+    // Start processing outbox every 30 seconds
+    outboxProcessorInterval = setInterval(() => {
+      processOutbox();
+    }, 30000);
+    
+    // Process immediately
+    processOutbox();
+  },
+  
+  stopOutboxProcessor: () => {
+    if (outboxProcessorInterval) {
+      clearInterval(outboxProcessorInterval);
+      outboxProcessorInterval = null;
+    }
+  },
+
+  forceMessageSync: async (groupId: string) => {
+    try {
+      console.log('🔄 Forcing full message sync for group:', groupId);
+      
+      // Check if we're on a native platform with SQLite available
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+      
+      if (!isSqliteReady) {
+        console.log('❌ SQLite not available, cannot sync messages');
+        return;
+      }
+      
+      // Check network status
+      const networkStatus = await Network.getStatus();
+      const isOnline = networkStatus.connected;
+      
+      if (!isOnline) {
+        console.log('❌ Cannot sync messages while offline');
+        return;
+      }
+      
+      // Fetch messages from Supabase
+      const { data, error } = await supabase
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('group_id', groupId)
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+      
+      // Sync user data first
+      console.log(`🧑‍💼 Syncing user data for ${data?.length || 0} messages`);
+      for (const message of data || []) {
+        if (!message.is_ghost && message.users) {
+          await sqliteService.saveUser({
+            id: message.user_id,
+            display_name: message.users.display_name
+          });
+        }
+      }
+      
+      // Then sync messages
+      console.log(`📨 Syncing ${data?.length || 0} messages to local storage`);
+      const syncCount = await sqliteService.syncMessagesFromRemote(groupId, data || []);
+      
+      console.log(`✅ Force sync complete: ${syncCount} messages synced to local storage`);
+      
+      // Refresh the UI by re-fetching messages
+      await get().fetchMessages(groupId);
+      
+    } catch (error) {
+      console.error('❌ Error force syncing messages:', error);
+      throw error;
+    }
+  },
 }));
