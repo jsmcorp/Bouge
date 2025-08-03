@@ -158,7 +158,6 @@ interface ChatState {
   addOrRemoveReaction: (messageId: string, emoji: string) => Promise<void>;
   fetchGroups: () => Promise<void>;
   fetchMessages: (groupId: string) => Promise<void>;
-  forceMessageSync: (groupId: string) => Promise<void>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
   fetchGroupMembers: (groupId: string) => Promise<void>;
@@ -188,6 +187,8 @@ interface ChatState {
   setOnlineStatus: (status: boolean) => void;
   startOutboxProcessor: () => void;
   stopOutboxProcessor: () => void;
+  syncMessageRelatedData: (groupId: string, messages: any[]) => Promise<void>;
+  forceMessageSync: (groupId: string) => Promise<void>;
 }
 
 // Helper function to compress images
@@ -937,7 +938,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             await sqliteService.saveGroup({
               id: group.id,
               name: group.name,
-              last_sync_timestamp: Date.now()
+              description: group.description || null,
+              invite_code: group.invite_code || 'offline',
+              created_by: group.created_by || '',
+              created_at: new Date(group.created_at).getTime(),
+              last_sync_timestamp: Date.now(),
+              avatar_url: group.avatar_url || null,
+              is_archived: 0
             });
           }
           console.log(`🔄 Synced ${groups?.length || 0} groups to local storage`);
@@ -982,23 +989,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
               }
               
-              return {
+              // Build basic message object
+              const message: Message = {
                 id: msg.id,
                 group_id: msg.group_id,
                 user_id: msg.user_id,
                 content: msg.content,
                 is_ghost: msg.is_ghost === 1,
                 message_type: msg.message_type,
+                category: msg.category,
+                parent_id: msg.parent_id,
+                image_url: msg.image_url,
                 created_at: new Date(msg.created_at).toISOString(),
                 author: author,
                 reply_count: 0,
                 replies: [],
                 delivery_status: 'delivered' as const,
-                // Add missing properties required by Message type
-                category: null,
-                parent_id: null,
-                image_url: null
+                reactions: [],
+                poll: undefined
               };
+              
+              // Handle polls for poll messages
+              if (msg.message_type === 'poll') {
+                try {
+                  const polls = await sqliteService.getPolls([msg.id]);
+                  if (polls.length > 0) {
+                    const poll = polls[0];
+                    const votes = await sqliteService.getPollVotes([poll.id]);
+                    
+                    message.poll = {
+                      id: poll.id,
+                      message_id: poll.message_id,
+                      question: poll.question,
+                      options: JSON.parse(poll.options),
+                      created_at: new Date(poll.created_at).toISOString(),
+                      closes_at: new Date(poll.closes_at).toISOString(),
+                      vote_counts: [],
+                      total_votes: votes.length,
+                      user_vote: undefined,
+                      is_closed: new Date(poll.closes_at).getTime() < Date.now()
+                    };
+                  }
+                } catch (error) {
+                  console.error('Error loading poll from local storage:', error);
+                }
+              }
+              
+              return message;
             }));
             
             // Update UI with local data immediately
@@ -1132,7 +1169,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!msg.is_ghost && msg.users) {
               await sqliteService.saveUser({
                 id: msg.user_id,
-                display_name: msg.users.display_name
+                display_name: msg.users.display_name,
+                phone_number: msg.users.phone_number || null,
+                avatar_url: msg.users.avatar_url || null,
+                is_onboarded: 1,
+                created_at: new Date(msg.users.created_at).getTime()
               });
             }
           }
@@ -1144,7 +1185,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 if (!reply.is_ghost && reply.users) {
                   await sqliteService.saveUser({
                     id: reply.user_id,
-                    display_name: reply.users.display_name
+                    display_name: reply.users.display_name,
+                    phone_number: reply.users.phone_number || null,
+                    avatar_url: reply.users.avatar_url || null,
+                    is_onboarded: 1,
+                    created_at: new Date(reply.users.created_at).getTime()
                   });
                 }
               }
@@ -1154,6 +1199,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // Then sync the messages
           const syncCount = await sqliteService.syncMessagesFromRemote(groupId, data || []);
           console.log(`🔄 Synced ${syncCount} messages from Supabase to local storage`);
+
+          // Sync reactions, polls, and other related data
+          await get().syncMessageRelatedData(groupId, data || []);
           
           // If we synced new messages and already had local data loaded, refresh from local storage
           if (syncCount > 0 && localDataLoaded) {
@@ -1739,6 +1787,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             content,
             is_ghost: isGhost ? 1 : 0,
             message_type: messageType,
+            category: category || null,
+            parent_id: parentId || null,
+            image_url: imageUrl || null,
             created_at: Date.now()
           });
           
@@ -1746,17 +1797,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           await sqliteService.addToOutbox({
             group_id: groupId,
             user_id: user.id,
-            content: JSON.stringify({
-              id: messageId,
-              content,
-              is_ghost: isGhost,
-              message_type: messageType,
-              category,
-              parent_id: parentId,
-              image_url: imageUrl
-            }),
+            content: content,
             retry_count: 0,
-            next_retry_at: Date.now() + 60000 // Try in 1 minute
+            next_retry_at: Date.now() + 60000, // Try in 1 minute
+            message_type: messageType,
+            category: category,
+            parent_id: parentId,
+            image_url: imageUrl,
+            is_ghost: isGhost ? 1 : 0
           });
           
           // Update message status
@@ -1877,6 +1925,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             content: data.content,
             is_ghost: data.is_ghost ? 1 : 0,
             message_type: data.message_type,
+            category: null,
+            parent_id: null,
+            image_url: null,
             created_at: new Date(data.created_at).getTime()
           });
           
@@ -1884,7 +1935,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!data.is_ghost && data.users) {
             await sqliteService.saveUser({
               id: data.user_id,
-              display_name: data.users.display_name
+              display_name: data.users.display_name,
+              phone_number: data.users.phone_number || null,
+              avatar_url: data.users.avatar_url || null,
+              is_onboarded: 1,
+              created_at: new Date(data.users.created_at).getTime()
             });
           }
           
@@ -2356,6 +2411,111 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  syncMessageRelatedData: async (groupId: string, messages: any[]) => {
+    try {
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+      
+      if (!isSqliteReady) return;
+      
+      console.log(`📊 Syncing message-related data for group ${groupId}...`);
+      
+      // Sync group data
+      const { data: groupData } = await supabase
+        .from('groups')
+        .select('*')
+        .eq('id', groupId)
+        .single();
+      
+      if (groupData) {
+        await sqliteService.saveGroup({
+          id: groupData.id,
+          name: groupData.name,
+          description: groupData.description,
+          invite_code: groupData.invite_code,
+          created_by: groupData.created_by,
+          created_at: new Date(groupData.created_at).getTime(),
+          last_sync_timestamp: Date.now(),
+          avatar_url: groupData.avatar_url,
+          is_archived: 0
+        });
+      }
+
+      // Sync group members
+      const { data: members } = await supabase
+        .from('group_members')
+        .select('*, users!group_members_user_id_fkey(*)')
+        .eq('group_id', groupId);
+      
+      if (members) {
+        for (const member of members) {
+          await sqliteService.saveUser({
+            id: member.user_id,
+            display_name: member.users.display_name,
+            phone_number: member.users.phone_number,
+            avatar_url: member.users.avatar_url,
+            is_onboarded: member.users.is_onboarded ? 1 : 0,
+            created_at: new Date(member.users.created_at).getTime()
+          });
+          
+          await sqliteService.saveGroupMember({
+            group_id: groupId,
+            user_id: member.user_id,
+            role: member.role || 'participant',
+            joined_at: new Date(member.joined_at).getTime()
+          });
+        }
+      }
+      
+      // Sync reactions for all messages
+      const messageIds = messages.map(msg => msg.id);
+      if (messageIds.length > 0) {
+        const { data: reactions } = await supabase
+          .from('reactions')
+          .select('*')
+          .in('message_id', messageIds);
+        
+        if (reactions) {
+          for (const reaction of reactions) {
+            await sqliteService.saveReaction({
+              id: reaction.id,
+              message_id: reaction.message_id,
+              user_id: reaction.user_id,
+              emoji: reaction.emoji,
+              created_at: new Date(reaction.created_at).getTime()
+            });
+          }
+        }
+      }
+      
+      // Sync polls for poll messages
+      const pollMessages = messages.filter(msg => msg.message_type === 'poll');
+      if (pollMessages.length > 0) {
+        const { data: polls } = await supabase
+          .from('polls')
+          .select('*')
+          .in('message_id', pollMessages.map(msg => msg.id));
+        
+        if (polls) {
+          for (const poll of polls) {
+            await sqliteService.savePoll({
+              id: poll.id,
+              message_id: poll.message_id,
+              question: poll.question,
+              options: JSON.stringify(poll.options),
+              created_at: new Date(poll.created_at).getTime(),
+              closes_at: new Date(poll.closes_at).getTime()
+            });
+          }
+        }
+      }
+      
+      console.log(`✅ Message-related data synced for group ${groupId}`);
+    } catch (error) {
+      console.error('❌ Error syncing message-related data:', error);
+    }
+  },
+
   forceMessageSync: async (groupId: string) => {
     try {
       console.log('🔄 Forcing full message sync for group:', groupId);
@@ -2397,7 +2557,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!message.is_ghost && message.users) {
           await sqliteService.saveUser({
             id: message.user_id,
-            display_name: message.users.display_name
+            display_name: message.users.display_name,
+            phone_number: message.users.phone_number || null,
+            avatar_url: message.users.avatar_url || null,
+            is_onboarded: 1,
+            created_at: new Date(message.users.created_at).getTime()
           });
         }
       }
@@ -2405,6 +2569,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Then sync messages
       console.log(`📨 Syncing ${data?.length || 0} messages to local storage`);
       const syncCount = await sqliteService.syncMessagesFromRemote(groupId, data || []);
+      
+      // Sync reactions, polls, and other related data
+      await get().syncMessageRelatedData(groupId, data || []);
       
       console.log(`✅ Force sync complete: ${syncCount} messages synced to local storage`);
       

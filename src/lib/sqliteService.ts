@@ -10,19 +10,50 @@ export interface LocalMessage {
   content: string;
   is_ghost: number; // SQLite uses INTEGER for boolean
   message_type: string;
+  category: string | null;
+  parent_id: string | null;
+  image_url: string | null;
   created_at: number; // Unix timestamp
+  updated_at?: number;
+  deleted_at?: number;
   local_id?: number; // Auto-increment unique ID
+}
+
+export interface LocalPoll {
+  id: string;
+  message_id: string;
+  question: string;
+  options: string; // JSON string
+  created_at: number;
+  closes_at: number;
+}
+
+export interface LocalPollVote {
+  poll_id: string;
+  user_id: string;
+  option_index: number;
+  created_at: number;
 }
 
 export interface LocalGroup {
   id: string;
   name: string;
+  description: string | null;
+  invite_code: string;
+  created_by: string;
+  created_at: number;
   last_sync_timestamp: number;
+  avatar_url: string | null;
+  is_archived: number; // SQLite uses INTEGER for boolean
 }
 
 export interface LocalUser {
   id: string;
   display_name: string;
+  phone_number: string | null;
+  avatar_url: string | null;
+  is_onboarded: number; // SQLite uses INTEGER for boolean
+  created_at: number;
 }
 
 export interface OutboxMessage {
@@ -32,11 +63,45 @@ export interface OutboxMessage {
   content: string;
   retry_count: number;
   next_retry_at: number;
+  message_type?: string;
+  category?: string | null;
+  parent_id?: string | null;
+  image_url?: string | null;
+  is_ghost?: number;
 }
 
 export interface SyncState {
   key: string;
   value: string;
+}
+
+export interface LocalReaction {
+  id: string;
+  message_id: string;
+  user_id: string;
+  emoji: string;
+  created_at: number;
+}
+
+export interface LocalGroupMember {
+  group_id: string;
+  user_id: string;
+  role: 'admin' | 'participant';
+  joined_at: number;
+}
+
+export interface LocalUserPseudonym {
+  group_id: string;
+  user_id: string;
+  pseudonym: string;
+  created_at: number;
+}
+
+export interface LocalConfession {
+  id: string;
+  message_id: string;
+  confession_type: string;
+  is_anonymous: number;
 }
 
 class SQLiteService {
@@ -174,7 +239,11 @@ class SQLiteService {
       // Test user data
       const testUser: LocalUser = {
         id: 'test-user-id',
-        display_name: 'Test User'
+        display_name: 'Test User',
+        phone_number: '+1234567890',
+        avatar_url: null,
+        is_onboarded: 1,
+        created_at: Date.now()
       };
       
       // Save test user
@@ -199,6 +268,9 @@ class SQLiteService {
         content: 'Test message content',
         is_ghost: 0,
         message_type: 'text',
+        category: null,
+        parent_id: null,
+        image_url: null,
         created_at: Date.now()
       };
       
@@ -230,19 +302,34 @@ class SQLiteService {
         content TEXT NOT NULL,
         is_ghost INTEGER DEFAULT 0,
         message_type TEXT DEFAULT 'text',
+        category TEXT,
+        parent_id TEXT,
+        image_url TEXT,
         created_at INTEGER NOT NULL,
-        local_id INTEGER UNIQUE
+        local_id INTEGER UNIQUE,
+        updated_at INTEGER,
+        deleted_at INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        last_sync_timestamp INTEGER DEFAULT 0
+        description TEXT,
+        invite_code TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_sync_timestamp INTEGER DEFAULT 0,
+        avatar_url TEXT,
+        is_archived INTEGER DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL
+        display_name TEXT NOT NULL,
+        phone_number TEXT,
+        avatar_url TEXT,
+        is_onboarded INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS outbox (
@@ -251,7 +338,12 @@ class SQLiteService {
         user_id TEXT NOT NULL,
         content TEXT NOT NULL,
         retry_count INTEGER DEFAULT 0,
-        next_retry_at INTEGER NOT NULL
+        next_retry_at INTEGER NOT NULL,
+        message_type TEXT DEFAULT 'text',
+        category TEXT,
+        parent_id TEXT,
+        image_url TEXT,
+        is_ghost INTEGER DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS sync_state (
@@ -259,13 +351,94 @@ class SQLiteService {
         value TEXT NOT NULL
       );
 
+      /* Polls table */
+      CREATE TABLE IF NOT EXISTS polls (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        options TEXT NOT NULL, -- JSON string
+        created_at INTEGER NOT NULL,
+        closes_at INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      );
+
+      /* Poll votes table */
+      CREATE TABLE IF NOT EXISTS poll_votes (
+        poll_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        option_index INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (poll_id, user_id),
+        FOREIGN KEY (poll_id) REFERENCES polls(id)
+      );
+
+      /* Reactions table */
+      CREATE TABLE IF NOT EXISTS reactions (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        emoji TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      );
+
+      /* Group members table */
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT DEFAULT 'participant',
+        joined_at INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id),
+        FOREIGN KEY (group_id) REFERENCES groups(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
+      /* User pseudonyms for ghost messages */
+      CREATE TABLE IF NOT EXISTS user_pseudonyms (
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        pseudonym TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+      );
+
+      /* Confessions table for confession messages */
+      CREATE TABLE IF NOT EXISTS confessions (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        confession_type TEXT NOT NULL,
+        is_anonymous INTEGER DEFAULT 1,
+        FOREIGN KEY (message_id) REFERENCES messages(id)
+      );
+
       /* indexes */
       CREATE INDEX IF NOT EXISTS idx_msg_group_date_asc
         ON messages(group_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_msg_group_date_desc
         ON messages(group_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_msg_parent_id
+        ON messages(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_msg_type
+        ON messages(message_type);
+      CREATE INDEX IF NOT EXISTS idx_msg_category
+        ON messages(category);
       CREATE INDEX IF NOT EXISTS idx_outbox_retry
         ON outbox(next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_poll_message
+        ON polls(message_id);
+      CREATE INDEX IF NOT EXISTS idx_poll_vote_poll
+        ON poll_votes(poll_id);
+      CREATE INDEX IF NOT EXISTS idx_reactions_message
+        ON reactions(message_id);
+      CREATE INDEX IF NOT EXISTS idx_group_members_group
+        ON group_members(group_id);
+      CREATE INDEX IF NOT EXISTS idx_group_members_user
+        ON group_members(user_id);
+      CREATE INDEX IF NOT EXISTS idx_user_pseudonyms_group
+        ON user_pseudonyms(group_id);
+      CREATE INDEX IF NOT EXISTS idx_confessions_message
+        ON confessions(message_id);
     `;
 
     await connection.execute(sql);
@@ -295,22 +468,92 @@ class SQLiteService {
     }
   }
 
+  // Poll operations
+  public async savePoll(poll: Omit<LocalPoll, 'local_id'>): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO polls
+       (id, message_id, question, options, created_at, closes_at)
+       VALUES (?, ?, ?, ?, ?, ?);`,
+      [
+        poll.id,
+        poll.message_id,
+        poll.question,
+        poll.options,
+        poll.created_at,
+        poll.closes_at
+      ]
+    );
+  }
+
+  public async getPolls(messageIds: string[]): Promise<LocalPoll[]> {
+    await this.checkDatabaseReady();
+
+    if (messageIds.length === 0) return [];
+
+    const placeholders = messageIds.map(() => '?').join(',');
+    const sql = `
+      SELECT * FROM polls 
+      WHERE message_id IN (${placeholders})
+    `;
+
+    const result = await this.db!.query(sql, messageIds);
+    return result.values || [];
+  }
+
+  public async savePollVote(vote: Omit<LocalPollVote, 'local_id'>): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO poll_votes
+       (poll_id, user_id, option_index, created_at)
+       VALUES (?, ?, ?, ?);`,
+      [
+        vote.poll_id,
+        vote.user_id,
+        vote.option_index,
+        vote.created_at
+      ]
+    );
+  }
+
+  public async getPollVotes(pollIds: string[]): Promise<LocalPollVote[]> {
+    await this.checkDatabaseReady();
+
+    if (pollIds.length === 0) return [];
+
+    const placeholders = pollIds.map(() => '?').join(',');
+    const sql = `
+      SELECT * FROM poll_votes 
+      WHERE poll_id IN (${placeholders})
+    `;
+
+    const result = await this.db!.query(sql, pollIds);
+    return result.values || [];
+  }
+
   // Message operations
   public async saveMessage(message: Omit<LocalMessage, 'local_id'>): Promise<void> {
     await this.checkDatabaseReady();
 
     await this.db!.run(
       `INSERT OR REPLACE INTO messages
-       (id, group_id, user_id, content, is_ghost, message_type, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?);`,
+       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         message.id,
         message.group_id,
         message.user_id,
         message.content,
-        message.is_ghost ? 1 : 0,
+        message.is_ghost,
         message.message_type,
+        message.category,
+        message.parent_id,
+        message.image_url,
         message.created_at,
+        message.updated_at || null,
+        message.deleted_at || null
       ]
     );
   }
@@ -348,11 +591,21 @@ class SQLiteService {
     await this.checkDatabaseReady();
 
     const sql = `
-      INSERT OR REPLACE INTO groups (id, name, last_sync_timestamp)
-      VALUES (?, ?, ?)
+      INSERT OR REPLACE INTO groups (id, name, description, invite_code, created_by, created_at, last_sync_timestamp, avatar_url, is_archived)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    await this.db!.run(sql, [group.id, group.name, group.last_sync_timestamp]);
+    await this.db!.run(sql, [
+      group.id,
+      group.name,
+      group.description,
+      group.invite_code,
+      group.created_by,
+      group.created_at,
+      group.last_sync_timestamp,
+      group.avatar_url,
+      group.is_archived
+    ]);
   }
 
   public async getGroups(): Promise<LocalGroup[]> {
@@ -367,11 +620,18 @@ class SQLiteService {
     await this.checkDatabaseReady();
 
     const sql = `
-      INSERT OR REPLACE INTO users (id, display_name)
-      VALUES (?, ?)
+      INSERT OR REPLACE INTO users (id, display_name, phone_number, avatar_url, is_onboarded, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    await this.db!.run(sql, [user.id, user.display_name]);
+    await this.db!.run(sql, [
+      user.id,
+      user.display_name,
+      user.phone_number,
+      user.avatar_url,
+      user.is_onboarded,
+      user.created_at
+    ]);
   }
 
   public async getUser(userId: string): Promise<LocalUser | null> {
@@ -463,7 +723,12 @@ class SQLiteService {
     content: string;
     is_ghost: boolean;
     message_type: string;
+    category: string | null;
+    parent_id: string | null;
+    image_url: string | null;
     created_at: string | number;
+    updated_at?: string | number | null;
+    deleted_at?: string | number | null;
   }>): Promise<number> {
     await this.checkDatabaseReady();
     
@@ -489,6 +754,18 @@ class SQLiteService {
     
     for (const message of newMessages) {
       try {
+        // Ensure message_type is properly set based on the context
+        let messageType = message.message_type || 'text';
+        
+        // Handle special message types
+        if (message.parent_id) {
+          // This is a reply
+          messageType = 'reply';
+        } else if (message.category === 'confession') {
+          // This is a confession
+          messageType = 'confession';
+        }
+        
         // Convert to local message format
         const localMessage: Omit<LocalMessage, 'local_id'> = {
           id: message.id,
@@ -496,10 +773,19 @@ class SQLiteService {
           user_id: message.user_id,
           content: message.content,
           is_ghost: message.is_ghost ? 1 : 0,
-          message_type: message.message_type,
+          message_type: messageType,
+          category: message.category || null,
+          parent_id: message.parent_id || null,
+          image_url: message.image_url || null,
           created_at: typeof message.created_at === 'string' 
             ? new Date(message.created_at).getTime() 
-            : message.created_at
+            : message.created_at,
+          updated_at: message.updated_at ? (typeof message.updated_at === 'string' 
+            ? new Date(message.updated_at).getTime() 
+            : message.updated_at) : undefined,
+          deleted_at: message.deleted_at ? (typeof message.deleted_at === 'string' 
+            ? new Date(message.deleted_at).getTime() 
+            : message.deleted_at) : undefined
         };
         
         // Save to local storage
@@ -509,14 +795,6 @@ class SQLiteService {
         console.error(`❌ Error syncing message ${message.id}:`, error);
       }
     }
-    
-    // Update the last sync timestamp for this group
-    const now = Date.now();
-    await this.saveGroup({
-      id: groupId,
-      name: 'Group ' + groupId, // Default name if not provided
-      last_sync_timestamp: now
-    });
     
     console.log(`✅ Successfully synced ${syncCount} new messages to local storage`);
     return syncCount;
@@ -556,26 +834,158 @@ class SQLiteService {
     console.log('🗑️ All local data cleared');
   }
 
+  // Reactions operations
+  public async saveReaction(reaction: Omit<LocalReaction, 'local_id'>): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO reactions (id, message_id, user_id, emoji, created_at)
+       VALUES (?, ?, ?, ?, ?);`,
+      [
+        reaction.id,
+        reaction.message_id,
+        reaction.user_id,
+        reaction.emoji,
+        reaction.created_at
+      ]
+    );
+  }
+
+  public async getReactions(messageIds: string[]): Promise<LocalReaction[]> {
+    await this.checkDatabaseReady();
+
+    if (messageIds.length === 0) return [];
+
+    const placeholders = messageIds.map(() => '?').join(',');
+    const sql = `
+      SELECT * FROM reactions 
+      WHERE message_id IN (${placeholders})
+    `;
+
+    const result = await this.db!.query(sql, messageIds);
+    return result.values || [];
+  }
+
+  // Group members operations
+  public async saveGroupMember(member: LocalGroupMember): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO group_members (group_id, user_id, role, joined_at)
+       VALUES (?, ?, ?, ?);`,
+      [
+        member.group_id,
+        member.user_id,
+        member.role,
+        member.joined_at
+      ]
+    );
+  }
+
+  public async getGroupMembers(groupId: string): Promise<LocalGroupMember[]> {
+    await this.checkDatabaseReady();
+
+    const sql = `
+      SELECT * FROM group_members 
+      WHERE group_id = ?
+      ORDER BY joined_at ASC
+    `;
+
+    const result = await this.db!.query(sql, [groupId]);
+    return result.values || [];
+  }
+
+  // User pseudonyms operations
+  public async saveUserPseudonym(pseudonym: LocalUserPseudonym): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO user_pseudonyms (group_id, user_id, pseudonym, created_at)
+       VALUES (?, ?, ?, ?);`,
+      [
+        pseudonym.group_id,
+        pseudonym.user_id,
+        pseudonym.pseudonym,
+        pseudonym.created_at
+      ]
+    );
+  }
+
+  public async getUserPseudonyms(groupId: string): Promise<LocalUserPseudonym[]> {
+    await this.checkDatabaseReady();
+
+    const sql = `
+      SELECT * FROM user_pseudonyms 
+      WHERE group_id = ?
+    `;
+
+    const result = await this.db!.query(sql, [groupId]);
+    return result.values || [];
+  }
+
+  // Confessions operations
+  public async saveConfession(confession: LocalConfession): Promise<void> {
+    await this.checkDatabaseReady();
+
+    await this.db!.run(
+      `INSERT OR REPLACE INTO confessions (id, message_id, confession_type, is_anonymous)
+       VALUES (?, ?, ?, ?);`,
+      [
+        confession.id,
+        confession.message_id,
+        confession.confession_type,
+        confession.is_anonymous
+      ]
+    );
+  }
+
+  public async getConfessions(messageIds: string[]): Promise<LocalConfession[]> {
+    await this.checkDatabaseReady();
+
+    if (messageIds.length === 0) return [];
+
+    const placeholders = messageIds.map(() => '?').join(',');
+    const sql = `
+      SELECT * FROM confessions 
+      WHERE message_id IN (${placeholders})
+    `;
+
+    const result = await this.db!.query(sql, messageIds);
+    return result.values || [];
+  }
+
   public async getStorageStats(): Promise<{
     messageCount: number;
     groupCount: number;
     userCount: number;
     outboxCount: number;
+    pollCount: number;
+    reactionCount: number;
+    groupMemberCount: number;
+    confessionCount: number;
   }> {
     await this.checkDatabaseReady();
 
-    const [messages, groups, users, outbox] = await Promise.all([
+    const [messages, groups, users, outbox, polls, reactions, groupMembers, confessions] = await Promise.all([
       this.db!.query('SELECT COUNT(*) as count FROM messages'),
       this.db!.query('SELECT COUNT(*) as count FROM groups'),
       this.db!.query('SELECT COUNT(*) as count FROM users'),
-      this.db!.query('SELECT COUNT(*) as count FROM outbox')
+      this.db!.query('SELECT COUNT(*) as count FROM outbox'),
+      this.db!.query('SELECT COUNT(*) as count FROM polls'),
+      this.db!.query('SELECT COUNT(*) as count FROM reactions'),
+      this.db!.query('SELECT COUNT(*) as count FROM group_members'),
+      this.db!.query('SELECT COUNT(*) as count FROM confessions')
     ]);
 
     return {
       messageCount: messages.values?.[0]?.count || 0,
       groupCount: groups.values?.[0]?.count || 0,
       userCount: users.values?.[0]?.count || 0,
-      outboxCount: outbox.values?.[0]?.count || 0
+      outboxCount: outbox.values?.[0]?.count || 0,
+      pollCount: polls.values?.[0]?.count || 0,
+      reactionCount: reactions.values?.[0]?.count || 0,
+      groupMemberCount: groupMembers.values?.[0]?.count || 0,
+      confessionCount: confessions.values?.[0]?.count || 0
     };
   }
 
