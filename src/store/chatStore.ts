@@ -1076,7 +1076,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           users!messages_user_id_fkey(display_name, avatar_url)
         `)
         .eq('group_id', groupId)
-        .is('parent_id', null)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
