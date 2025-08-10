@@ -564,13 +564,25 @@ class SQLiteService {
     const sql = `
       SELECT * FROM messages 
       WHERE group_id = ? 
-      ORDER BY created_at DESC 
+      ORDER BY created_at ASC 
       LIMIT ? OFFSET ?
     `;
 
     const result = await this.db!.query(sql, [groupId, limit, offset]);
-    // Reverse the result to maintain chronological order (oldest to newest) for UI display
-    return result.values ? [...result.values].reverse() : [];
+    return result.values || [];
+  }
+
+  public async getAllMessagesForGroup(groupId: string): Promise<LocalMessage[]> {
+    await this.checkDatabaseReady();
+
+    const sql = `
+      SELECT * FROM messages 
+      WHERE group_id = ? 
+      ORDER BY created_at ASC
+    `;
+
+    const result = await this.db!.query(sql, [groupId]);
+    return result.values || [];
   }
 
   public async getLatestMessageTimestamp(groupId: string): Promise<number> {
@@ -734,37 +746,14 @@ class SQLiteService {
     
     console.log(`🔄 Syncing ${messages.length} messages for group ${groupId} to local storage`);
     
-    // Get the latest message timestamp we have locally
-    const latestLocalTimestamp = await this.getLatestMessageTimestamp(groupId);
-    console.log(`📊 Latest local message timestamp: ${new Date(latestLocalTimestamp).toISOString()}`);
-    
-    // Filter for new messages only to avoid duplicates
-    const newMessages = messages.filter(msg => {
-      const msgTimestamp = typeof msg.created_at === 'string' 
-        ? new Date(msg.created_at).getTime() 
-        : msg.created_at;
-      
-      // Keep messages that are newer than our latest local timestamp
-      return msgTimestamp > latestLocalTimestamp;
-    });
-    
-    console.log(`📥 Found ${newMessages.length} new messages to sync to local storage`);
-    
     let syncCount = 0;
     
-    for (const message of newMessages) {
+    // Sync ALL messages from remote, don't filter based on existing ones
+    // This ensures we have the complete and up-to-date dataset
+    for (const message of messages) {
       try {
-        // Ensure message_type is properly set based on the context
-        let messageType = message.message_type || 'text';
-        
-        // Handle special message types
-        if (message.parent_id) {
-          // This is a reply
-          messageType = 'reply';
-        } else if (message.category === 'confession') {
-          // This is a confession
-          messageType = 'confession';
-        }
+        // Use the original message_type, don't override it
+        const messageType = message.message_type || 'text';
         
         // Convert to local message format
         const localMessage: Omit<LocalMessage, 'local_id'> = {
@@ -788,7 +777,7 @@ class SQLiteService {
             : message.deleted_at) : undefined
         };
         
-        // Save to local storage
+        // Save to local storage - this will update existing messages too
         await this.saveMessage(localMessage);
         syncCount++;
       } catch (error) {
@@ -796,8 +785,45 @@ class SQLiteService {
       }
     }
     
-    console.log(`✅ Successfully synced ${syncCount} new messages to local storage`);
+    // Only clean up temp messages that are clearly temporary (not server IDs)
+    await this.cleanupTempMessages(groupId, messages.map(m => m.id));
+    
+    console.log(`✅ Successfully synced ${syncCount} messages to local storage`);
     return syncCount;
+  }
+
+  /**
+   * Cleans up temporary messages that have been replaced by server-generated ones
+   * @param groupId The group ID to clean up
+   * @param serverMessageIds The actual server message IDs
+   */
+  private async cleanupTempMessages(groupId: string, serverMessageIds: string[]): Promise<void> {
+    await this.checkDatabaseReady();
+    
+    try {
+      // Only clean up messages that are clearly temporary (start with temp- or are timestamp-based IDs)
+      const localMessages = await this.getMessages(groupId, 10000);
+      const tempMessages = localMessages.filter(msg => 
+        msg.id.startsWith('temp-') || 
+        (msg.id.includes('-') && msg.id.match(/^\d{13}-[a-z0-9]+$/)) // Timestamp-based temp IDs
+      );
+      
+      console.log(`🧹 Found ${tempMessages.length} temporary messages to potentially clean up`);
+      
+      for (const tempMsg of tempMessages) {
+        // Only remove temp messages if they're clearly temporary and not in server IDs
+        if (!serverMessageIds.includes(tempMsg.id)) {
+          try {
+            await this.db!.run('DELETE FROM messages WHERE id = ?', [tempMsg.id]);
+            console.log(`🧹 Cleaned up temp message: ${tempMsg.id}`);
+          } catch (error) {
+            console.error(`❌ Error cleaning up temp message ${tempMsg.id}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error cleaning up temp messages:', error);
+    }
   }
   
   /**
@@ -818,6 +844,24 @@ class SQLiteService {
     } catch (error) {
       console.error(`❌ Error getting last sync timestamp for group ${groupId}:`, error);
       return 0;
+    }
+  }
+
+  /**
+   * Updates the last sync timestamp for a group
+   * @param groupId The group ID to update
+   * @param timestamp The timestamp to set
+   */
+  public async updateLastSyncTimestamp(groupId: string, timestamp: number): Promise<void> {
+    await this.checkDatabaseReady();
+    
+    try {
+      await this.db!.run(
+        'UPDATE groups SET last_sync_timestamp = ? WHERE id = ?',
+        [timestamp, groupId]
+      );
+    } catch (error) {
+      console.error(`❌ Error updating last sync timestamp for group ${groupId}:`, error);
     }
   }
 
@@ -952,6 +996,18 @@ class SQLiteService {
 
     const result = await this.db!.query(sql, messageIds);
     return result.values || [];
+  }
+
+  public async deleteMessage(messageId: string): Promise<void> {
+    await this.checkDatabaseReady();
+    
+    try {
+      await this.db!.run('DELETE FROM messages WHERE id = ?', [messageId]);
+      console.log(`🗑️ Deleted message: ${messageId}`);
+    } catch (error) {
+      console.error(`❌ Error deleting message ${messageId}:`, error);
+      throw error;
+    }
   }
 
   public async getStorageStats(): Promise<{
