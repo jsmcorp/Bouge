@@ -2,7 +2,7 @@ import { supabase } from '@/lib/supabase';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
-import { Group, Message, Poll } from './types';
+import { Group, Message } from './types';
 import { structureMessagesWithReplies } from './utils';
 
 export interface FetchActions {

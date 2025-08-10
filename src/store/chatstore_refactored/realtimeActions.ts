@@ -124,7 +124,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
             if (messageData.parent_id) {
               // Check if reply already exists in parent's replies
               const parentMessage = state.messages.find((msg: Message) => msg.id === messageData.parent_id);
-              const replyExists = parentMessage?.replies?.some(reply => reply.id === messageData.id);
+              const replyExists = parentMessage?.replies?.some((reply: any) => reply.id === messageData.id);
 
               if (!replyExists) {
                 // Update parent message's reply count and inline replies
@@ -399,7 +399,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
     const typingUsers: TypingUser[] = [];
 
     Object.entries(presenceState).forEach(([userId, presences]) => {
-      const presence = presences[0] as any;
+      const presence = (presences as any[])[0] as any;
       if (presence?.is_typing) {
         // Get user info from our current user data or fetch it
         // For now, we'll use a simplified approach

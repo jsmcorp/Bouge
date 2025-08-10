@@ -1,4 +1,3 @@
-import { Json } from '@/lib/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 export interface Group {

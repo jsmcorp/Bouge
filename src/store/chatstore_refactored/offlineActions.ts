@@ -14,7 +14,7 @@ export interface OfflineActions {
   forceMessageSync: (groupId: string) => Promise<void>;
 }
 
-export const createOfflineActions = (set: any, get: any): OfflineActions => ({
+export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
   processOutbox: async () => {
     try {
       // Check if we're on a native platform with SQLite available

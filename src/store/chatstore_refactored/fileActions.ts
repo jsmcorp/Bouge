@@ -7,7 +7,7 @@ export interface FileActions {
   uploadFileToStorage: (file: File) => Promise<string>;
 }
 
-export const createFileActions = (set: any, get: any): FileActions => ({
+export const createFileActions = (_set: any, _get: any): FileActions => ({
   compressImage,
   generateUniqueFileName,
 
