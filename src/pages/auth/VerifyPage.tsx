@@ -141,7 +141,7 @@ export default function VerifyPage() {
   }, [code]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen w-full bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center p-4 relative overflow-hidden">
       {/* Background decorations */}
       <div className="absolute inset-0 overflow-hidden">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-primary/10 rounded-full blur-3xl"></div>
@@ -152,8 +152,7 @@ export default function VerifyPage() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6 }}
-        className="w-full max-w-md relative z-10"
-      >
+        className="w-full max-w-md relative z-10">
         <Button
           variant="ghost"
           onClick={() => navigate('/auth/login')}
@@ -202,12 +201,12 @@ export default function VerifyPage() {
                 onChange={setCode}
                 disabled={isLoading}
               >
-                <InputOTPGroup className="gap-3">
+                <InputOTPGroup className="gap-2 sm:gap-3">
                   {[0, 1, 2, 3, 4, 5].map((index) => (
                     <InputOTPSlot 
                       key={index}
                       index={index} 
-                      className="w-12 h-12 text-lg font-bold rounded-xl border-border/50 focus:border-primary/50 focus:ring-primary/20"
+                      className="w-10 h-10 sm:w-12 sm:h-12 text-base sm:text-lg font-bold rounded-lg sm:rounded-xl border-border/50 focus:border-primary/50 focus:ring-primary/20"
                     />
                   ))}
                 </InputOTPGroup>
