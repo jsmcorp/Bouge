@@ -27,6 +27,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         console.log('📱 Loading groups from local storage first (local-first approach)');
         try {
           const localGroups = await sqliteService.getGroups();
+          console.log(`📱 Found ${localGroups?.length || 0} groups in local storage`);
           if (localGroups && localGroups.length > 0) {
             // Convert LocalGroup to Group with proper data mapping
             const groups: Group[] = localGroups.map(lg => ({
@@ -35,7 +36,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               description: lg.description,
               invite_code: lg.invite_code,
               created_by: lg.created_by,
-              created_at: new Date(lg.created_at).toISOString(),
+              created_at: typeof lg.created_at === 'number' ? new Date(lg.created_at).toISOString() : lg.created_at,
               avatar_url: lg.avatar_url
             }));
 
@@ -49,15 +50,30 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             const isOnline = networkStatus.connected;
 
             if (!isOnline) {
-              // If offline, we're done
+              // If offline, we're done - but we already loaded local data
+              console.log('📵 Offline mode: Using local group data only');
               return;
             }
 
             // Continue with background sync if online
             console.log('🔄 Background syncing groups with Supabase...');
+          } else {
+            // No local groups found, but still set loading to false if offline
+            const networkStatus = await Network.getStatus();
+            if (!networkStatus.connected) {
+              set({ groups: [], isLoading: false });
+              console.log('📵 No local groups found and offline');
+              return;
+            }
           }
         } catch (error) {
           console.error('❌ Error loading groups from local storage:', error);
+          // If there's an error loading from local storage and we're offline, show empty state
+          const networkStatus = await Network.getStatus();
+          if (!networkStatus.connected) {
+            set({ groups: [], isLoading: false });
+            return;
+          }
         }
       }
 
@@ -108,10 +124,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       if (groupsError) throw groupsError;
 
-      // Always update UI with remote data and sync to local storage
-      set({ groups: groups || [], isLoading: false });
-
-      // If SQLite is available, sync groups to local storage
+      // If SQLite is available, sync groups to local storage first
       if (isSqliteReady) {
         try {
           for (const group of groups || []) {
@@ -129,24 +142,27 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           }
           console.log(`🔄 Synced ${groups?.length || 0} groups to local storage`);
 
-          // If we had local data, refresh the UI with the updated data
-          if (localDataLoaded) {
-            const updatedLocalGroups = await sqliteService.getGroups();
-            const updatedGroups: Group[] = updatedLocalGroups.map(lg => ({
-              id: lg.id,
-              name: lg.name,
-              description: lg.description,
-              invite_code: lg.invite_code,
-              created_by: lg.created_by,
-              created_at: new Date(lg.created_at).toISOString(),
-              avatar_url: lg.avatar_url
-            }));
-            set({ groups: updatedGroups });
-            console.log(`✅ UI refreshed with ${updatedGroups.length} synced groups`);
-          }
+          // Always refresh the UI with the updated data from local storage
+          const updatedLocalGroups = await sqliteService.getGroups();
+          const updatedGroups: Group[] = updatedLocalGroups.map(lg => ({
+            id: lg.id,
+            name: lg.name,
+            description: lg.description,
+            invite_code: lg.invite_code,
+            created_by: lg.created_by,
+            created_at: typeof lg.created_at === 'number' ? new Date(lg.created_at).toISOString() : lg.created_at,
+            avatar_url: lg.avatar_url
+          }));
+          set({ groups: updatedGroups, isLoading: false });
+          console.log(`✅ UI updated with ${updatedGroups.length} synced groups`);
         } catch (error) {
           console.error('❌ Error syncing groups to local storage:', error);
+          // Fallback to remote data if local sync fails
+          set({ groups: groups || [], isLoading: false });
         }
+      } else {
+        // No SQLite, just use remote data
+        set({ groups: groups || [], isLoading: false });
       }
     } catch (error) {
       console.error('Error fetching groups:', error);
@@ -174,7 +190,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Get all unique user IDs first to batch load users
             const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
             const userCache = new Map();
-            
+
             // Batch load all users
             for (const userId of userIds) {
               try {
