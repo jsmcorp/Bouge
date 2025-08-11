@@ -111,6 +111,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
           // Remove the temp message from local storage
           try {
             await sqliteService.deleteMessage(messageData.id);
+            console.log(`🗑️ Removed temp message ${messageData.id} after successful sync`);
           } catch (error) {
             console.error(`❌ Error removing temp message ${messageData.id}:`, error);
           }

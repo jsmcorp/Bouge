@@ -27,7 +27,7 @@ export default function GroupPage() {
       if (isMobile) {
         // Navigate first with replace to prevent history stacking
         navigate('/dashboard', { replace: true });
-        
+
         // Use setTimeout to clear the active group after navigation has started
         setTimeout(() => {
           useChatStore.getState().setActiveGroup(null);
@@ -36,7 +36,7 @@ export default function GroupPage() {
     };
 
     window.addEventListener('popstate', handlePopState);
-    
+
     return () => {
       window.removeEventListener('popstate', handlePopState);
     };

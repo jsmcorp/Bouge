@@ -302,7 +302,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       // Save message to local storage for offline access
       if (isSqliteReady) {
         try {
-          // Save message
+          // Save message with server ID
           await sqliteService.saveMessage({
             id: data.id,
             group_id: data.group_id,
@@ -328,7 +328,17 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
             });
           }
 
-          console.log('✅ Message synced to local storage');
+          // Remove the temporary message if it exists
+          if (messageId.startsWith('temp-') || messageId.includes('-')) {
+            try {
+              await sqliteService.deleteMessage(messageId);
+              console.log(`🗑️ Removed temp message ${messageId} after saving server message ${data.id}`);
+            } catch (error) {
+              console.error(`❌ Error removing temp message ${messageId}:`, error);
+            }
+          }
+
+          console.log(`✅ Message ${data.id} synced to local storage`);
         } catch (error) {
           console.error('❌ Error syncing message to local storage:', error);
         }

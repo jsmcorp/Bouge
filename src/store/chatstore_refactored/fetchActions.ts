@@ -182,6 +182,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     display_name: user.display_name,
                     avatar_url: user.avatar_url || null
                   };
+                } else {
+                  // Fallback if user data is not available
+                  author = {
+                    display_name: 'Unknown User',
+                    avatar_url: null
+                  };
                 }
               }
 
@@ -436,6 +442,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   author = {
                     display_name: user.display_name,
                     avatar_url: user.avatar_url || null
+                  };
+                } else {
+                  // Fallback if user data is not available
+                  author = {
+                    display_name: 'Unknown User',
+                    avatar_url: null
                   };
                 }
               }
