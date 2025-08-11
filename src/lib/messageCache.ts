@@ -62,7 +62,7 @@ class MessageCacheManager {
     const now = Date.now();
     
     // Only cache the most recent messages to save memory
-    const recentMessages = messages
+    const recentMessages = [...messages]
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, this.RECENT_MESSAGES_COUNT);
 

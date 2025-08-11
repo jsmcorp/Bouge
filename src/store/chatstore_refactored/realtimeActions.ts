@@ -162,7 +162,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               // Update in-memory cache for this group's recent messages so openings stay instant
               try {
                 const latestMessages = get().messages;
-                messageCache.setCachedMessages(groupId, latestMessages);
+                // Pass a shallow copy to avoid any accidental mutations by downstream code
+                messageCache.setCachedMessages(groupId, [...latestMessages]);
                 console.log(`📦 MessageCache: Updated cache for group ${groupId} after realtime insert`);
               } catch (err) {
                 console.error('❌ Failed updating message cache on realtime insert:', err);

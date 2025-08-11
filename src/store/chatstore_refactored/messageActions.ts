@@ -191,14 +191,45 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
             is_ghost: isGhost ? 1 : 0
           });
 
-          // Keep optimistic message in 'sending' state until outbox sync succeeds
+          // Update message status
+          const updatedMessage = { ...optimisticMessage, delivery_status: 'sent' as const };
+
+          if (parentId) {
+            const state = get();
+            const updatedMessages = state.messages.map((msg: Message) => {
+              if (msg.id === parentId) {
+                return {
+                  ...msg,
+                  replies: (msg.replies || []).map(reply =>
+                    reply.id === messageId ? updatedMessage : reply
+                  ),
+                  reply_count: (msg.reply_count || 0) + 1,
+                };
+              }
+              return msg;
+            });
+            set({ messages: updatedMessages });
+
+            if (state.activeThread?.id === parentId) {
+              const updatedReplies = state.threadReplies.map((reply: Message) =>
+                reply.id === messageId ? updatedMessage : reply
+              );
+              set({ threadReplies: updatedReplies });
+            }
+          } else {
+            const state = get();
+            const updatedMessages = state.messages.map((msg: Message) =>
+              msg.id === messageId ? updatedMessage : msg
+            );
+            set({ messages: updatedMessages });
+          }
 
           // Clear reply state if not in thread
           if (!get().activeThread) {
             set({ replyingTo: null });
           }
 
-          console.log('✅ Message saved to local storage and queued in outbox (waiting to sync)');
+          console.log('✅ Message saved to local storage and outbox');
           return;
         } catch (error) {
           console.error('❌ Error saving offline message:', error);
