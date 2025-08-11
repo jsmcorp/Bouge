@@ -1,5 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { sqliteService } from '@/lib/sqliteService';
+import { messageCache } from '@/lib/messageCache';
+import { preloadingService } from '@/lib/preloadingService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
@@ -10,6 +12,7 @@ export interface FetchActions {
   fetchMessages: (groupId: string) => Promise<void>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
+  preloadTopGroupMessages: () => Promise<void>;
 }
 
 export const createFetchActions = (set: any, get: any): FetchActions => ({
@@ -178,10 +181,49 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const isNative = Capacitor.isNativePlatform();
       const isSqliteReady = isNative && await sqliteService.isReady();
 
-      // ALWAYS load from local storage first if SQLite is available
+      // FIRST: Try to load from in-memory cache for instant display
+      const cachedMessages = messageCache.getCachedMessages(groupId);
+      if (cachedMessages && cachedMessages.length > 0) {
+        console.log('⚡ INSTANT: Loading messages from in-memory cache');
+        
+        // Structure messages with nested replies
+        const structuredMessages = structureMessagesWithReplies(cachedMessages);
+        
+        // Extract polls and user votes
+        const polls = cachedMessages
+          .filter(msg => msg.poll)
+          .map(msg => msg.poll!)
+          .filter(poll => poll);
+
+        const userVotesMap: Record<string, number | null> = {};
+        polls.forEach(poll => {
+          if (poll.user_vote !== null && poll.user_vote !== undefined) {
+            userVotesMap[poll.id] = poll.user_vote;
+          }
+        });
+
+        // Update UI instantly with cached data
+        set({ 
+          messages: structuredMessages, 
+          polls: polls,
+          userVotes: userVotesMap
+        });
+        
+        console.log(`⚡ INSTANT: Displayed ${structuredMessages.length} cached messages instantly`);
+        
+        // Continue with background refresh to ensure data is up to date
+        setTimeout(() => {
+          console.log('🔄 Background: Refreshing messages from SQLite to ensure cache is current');
+          // Continue with SQLite fetch in background
+        }, 50);
+      }
+
+      // SECOND: Load from SQLite (either as primary source or background refresh)
       let localDataLoaded = false;
       if (isSqliteReady) {
-        console.log('📱 Loading recent messages from local storage instantly');
+        const loadingMessage = cachedMessages ? 'Background refresh from SQLite' : 'Loading from SQLite';
+        console.log(`📱 ${loadingMessage}`);
+        
         try {
           // Load only 10 recent messages for instant UI
           const localMessages = await sqliteService.getRecentMessages(groupId, 10);
@@ -317,13 +359,26 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               }
             });
 
-            // Update UI with local data immediately - no loading state
-            set({ 
-              messages: structuredMessages, 
-              polls: polls,
-              userVotes: userVotesMap
-            });
-            console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls instantly`);
+            // Update cache with fresh SQLite data
+            messageCache.setCachedMessages(groupId, messages);
+            
+            // Update UI with local data (only if we didn't already show cached data)
+            if (!cachedMessages) {
+              set({ 
+                messages: structuredMessages, 
+                polls: polls,
+                userVotes: userVotesMap
+              });
+              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
+            } else {
+              // Silently update the UI with fresh data from SQLite
+              set({ 
+                messages: structuredMessages, 
+                polls: polls,
+                userVotes: userVotesMap
+              });
+              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite`);
+            }
             localDataLoaded = true;
 
             // Load remaining messages in background
@@ -445,6 +500,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     }
                   });
 
+                  // Update cache with all messages (only recent 10 will be cached)
+                  messageCache.setCachedMessages(groupId, allMessages);
+
                   // Update with all messages silently
                   set({ 
                     messages: allStructuredMessages, 
@@ -463,8 +521,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         }
       }
 
-      // If we've already loaded data from local storage, don't show loading indicator
-      if (!localDataLoaded) {
+      // If we've already loaded data from cache or local storage, don't show loading indicator
+      if (!cachedMessages && !localDataLoaded) {
         set({ isLoading: true });
       }
 
@@ -472,10 +530,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
 
-      // If offline and we couldn't load from local storage, show empty state
+      // If offline and we couldn't load from cache or local storage, show empty state
       if (!isOnline) {
         console.log('📵 Offline and no local data available');
-        if (!localDataLoaded) {
+        if (!cachedMessages && !localDataLoaded) {
           set({ messages: [], isLoading: false });
         }
         return;
@@ -630,8 +688,13 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         }
       }
 
-      // Only update UI with Supabase data if we didn't already load from local storage
-      if (!localDataLoaded) {
+      // Update cache with fresh Supabase data
+      if (messages && messages.length > 0) {
+        messageCache.setCachedMessages(groupId, messages);
+      }
+
+      // Only update UI with Supabase data if we didn't already load from cache or local storage
+      if (!cachedMessages && !localDataLoaded) {
         set({ messages: structuredMessages, isLoading: false });
       }
     } catch (error) {
@@ -689,6 +752,21 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
     } catch (error) {
       console.error('Error fetching replies:', error);
       return [];
+    }
+  },
+
+  preloadTopGroupMessages: async () => {
+    try {
+      const { groups } = get();
+      if (!groups || groups.length === 0) {
+        console.log('🚀 Preloader: No groups available for preloading');
+        return;
+      }
+
+      console.log('🚀 Preloader: Starting preload for top groups while on dashboard');
+      await preloadingService.preloadTopGroups(groups);
+    } catch (error) {
+      console.error('🚀 Preloader: Error during preload:', error);
     }
   },
 });

@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase';
+import { messageCache } from '@/lib/messageCache';
 import { Message, Poll, TypingUser } from './types';
 
 export interface RealtimeActions {
@@ -156,6 +157,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               } else {
                 // Update delivery status if message exists
                 get().updateMessage(messageData.id, { delivery_status: 'delivered' });
+              }
+
+              // Update in-memory cache for this group's recent messages so openings stay instant
+              try {
+                const latestMessages = get().messages;
+                messageCache.setCachedMessages(groupId, latestMessages);
+                console.log(`📦 MessageCache: Updated cache for group ${groupId} after realtime insert`);
+              } catch (err) {
+                console.error('❌ Failed updating message cache on realtime insert:', err);
               }
             }
           }

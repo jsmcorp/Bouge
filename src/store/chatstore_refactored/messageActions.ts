@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { sqliteService } from '@/lib/sqliteService';
+import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Message } from './types';
@@ -348,6 +349,10 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       if (!get().activeThread) {
         set({ replyingTo: null });
       }
+
+      // Invalidate cache for this group since we added a new message
+      messageCache.invalidateCache(groupId);
+      console.log(`📦 MessageCache: Invalidated cache for group ${groupId} after sending message`);
     } catch (error) {
       console.error('Error sending message:', error);
 

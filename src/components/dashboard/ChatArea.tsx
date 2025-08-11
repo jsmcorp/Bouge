@@ -40,7 +40,13 @@ export function ChatArea() {
 
   useEffect(() => {
     if (activeGroup?.id) {
-      fetchMessages(activeGroup.id);
+      console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
+      const startTime = performance.now();
+      
+      fetchMessages(activeGroup.id).then(() => {
+        const endTime = performance.now();
+        console.log(`💬 ChatArea: Messages loaded in ${(endTime - startTime).toFixed(2)}ms`);
+      });
     }
   }, [activeGroup?.id, fetchMessages]);
 

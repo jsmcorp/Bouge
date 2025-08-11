@@ -9,6 +9,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Network } from '@capacitor/network';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/theme-provider';
+import { CacheStatus } from '@/components/debug/CacheStatus';
 
 // Create context for mobile detection
 export const MobileContext = createContext(false);
@@ -82,6 +83,17 @@ function AppContent() {
             setTimeout(() => {
               setupRealtimeSubscription(currentActiveGroup.id);
             }, 1000); // Small delay to ensure app is fully active
+          }
+
+          // If user is on dashboard, kick off a background preload of top groups
+          const currentPath = window.location.pathname;
+          if (currentPath === '/dashboard') {
+            try {
+              console.log('🚀 App resumed on dashboard: triggering background preload');
+              useChatStore.getState().preloadTopGroupMessages();
+            } catch (error) {
+              console.error('❌ Failed to trigger preload on resume:', error);
+            }
           }
         }
       };
@@ -345,6 +357,7 @@ function App() {
       >
         <AppContent />
         <Toaster />
+        <CacheStatus />
       </Router>
     </ThemeProvider>
   );
