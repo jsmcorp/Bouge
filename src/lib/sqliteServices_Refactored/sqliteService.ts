@@ -86,6 +86,10 @@ class SQLiteService {
     return this.messageOps.getAllMessagesForGroup(groupId);
   }
 
+  public async getRecentMessages(groupId: string, limit = 10): Promise<LocalMessage[]> {
+    return this.messageOps.getRecentMessages(groupId, limit);
+  }
+
   public async getLatestMessageTimestamp(groupId: string): Promise<number> {
     return this.messageOps.getLatestMessageTimestamp(groupId);
   }

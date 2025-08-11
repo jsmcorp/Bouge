@@ -56,7 +56,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             }
 
             // Continue with background sync if online
-            console.log('🔄 Background syncing groups with Supabase...');
+            console.log('� B ackground syncing groups with Supabase...');
           } else {
             // No local groups found, but still set loading to false if offline
             const networkStatus = await Network.getStatus();
@@ -173,7 +173,6 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   fetchMessages: async (groupId: string) => {
     try {
       console.log('🔄 Fetching messages for group:', groupId);
-      set({ isLoading: true });
 
       // Check if we're on a native platform with SQLite available
       const isNative = Capacitor.isNativePlatform();
@@ -182,9 +181,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // ALWAYS load from local storage first if SQLite is available
       let localDataLoaded = false;
       if (isSqliteReady) {
-        console.log('📱 Loading messages from local storage first (local-first approach)');
+        console.log('📱 Loading recent messages from local storage instantly');
         try {
-          const localMessages = await sqliteService.getAllMessagesForGroup(groupId);
+          // Load only 10 recent messages for instant UI
+          const localMessages = await sqliteService.getRecentMessages(groupId, 10);
 
           if (localMessages && localMessages.length > 0) {
             // Get all unique user IDs first to batch load users
@@ -210,8 +210,19 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
             const pollMessageIds = pollMessages.map(msg => msg.id);
             
-            // Get current user for vote checking
-            const { data: { user } } = await supabase.auth.getUser();
+            // Get current user for vote checking (with timeout to prevent hanging)
+            let user = null;
+            try {
+              const userPromise = supabase.auth.getUser();
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Auth timeout')), 3000)
+              );
+              const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
+              user = data?.user || null;
+            } catch (error) {
+              console.warn('⚠️ Could not get current user for poll data, continuing without user context:', error);
+              user = null;
+            }
             
             // Fetch poll data for poll messages
             let pollsData: any[] = [];
@@ -292,19 +303,169 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Structure messages with nested replies
             const structuredMessages = structureMessagesWithReplies(messages);
 
-            // Update UI with local data immediately
-            set({ messages: structuredMessages, isLoading: false });
-            console.log(`✅ Loaded ${structuredMessages.length} parent messages from local storage`);
+            // Extract polls from messages and add to store
+            const polls = messages
+              .filter(msg => msg.poll)
+              .map(msg => msg.poll!)
+              .filter(poll => poll); // Remove any null/undefined polls
+
+            // Update user votes from polls
+            const userVotesMap: Record<string, number | null> = {};
+            polls.forEach(poll => {
+              if (poll.user_vote !== null && poll.user_vote !== undefined) {
+                userVotesMap[poll.id] = poll.user_vote;
+              }
+            });
+
+            // Update UI with local data immediately - no loading state
+            set({ 
+              messages: structuredMessages, 
+              polls: polls,
+              userVotes: userVotesMap
+            });
+            console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls instantly`);
             localDataLoaded = true;
+
+            // Load remaining messages in background
+            setTimeout(async () => {
+              try {
+                console.log('🔄 Loading remaining messages in background...');
+                const allLocalMessages = await sqliteService.getAllMessagesForGroup(groupId);
+                
+                if (allLocalMessages && allLocalMessages.length > localMessages.length) {
+                  // Process all messages the same way
+                  const userIds = [...new Set(allLocalMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+                  const userCache = new Map();
+
+                  for (const userId of userIds) {
+                    try {
+                      const user = await sqliteService.getUser(userId);
+                      if (user) {
+                        userCache.set(userId, {
+                          display_name: user.display_name,
+                          avatar_url: user.avatar_url || null
+                        });
+                      }
+                    } catch (error) {
+                      console.error(`Error loading user ${userId}:`, error);
+                    }
+                  }
+
+                  const pollMessages = allLocalMessages.filter(msg => msg.message_type === 'poll');
+                  const pollMessageIds = pollMessages.map(msg => msg.id);
+                  
+                  let user = null;
+                  try {
+                    const { data } = await supabase.auth.getUser();
+                    user = data?.user || null;
+                  } catch (error) {
+                    console.warn('⚠️ Could not get current user for poll data');
+                    user = null;
+                  }
+                  
+                  let pollsData: any[] = [];
+                  let pollVotesData: any[] = [];
+                  if (pollMessageIds.length > 0) {
+                    try {
+                      pollsData = await sqliteService.getPolls(pollMessageIds);
+                      const pollIds = pollsData.map(poll => poll.id);
+                      if (pollIds.length > 0) {
+                        pollVotesData = await sqliteService.getPollVotes(pollIds);
+                      }
+                    } catch (error) {
+                      console.error('Error loading poll data:', error);
+                    }
+                  }
+
+                  const pollDataMap = new Map();
+                  pollsData.forEach(poll => {
+                    const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
+                    const pollOptions = JSON.parse(poll.options);
+                    const voteCounts = new Array(pollOptions.length).fill(0);
+                    
+                    pollVotes.forEach(vote => {
+                      if (vote.option_index < voteCounts.length) {
+                        voteCounts[vote.option_index]++;
+                      }
+                    });
+
+                    const userVote = pollVotes.find(vote => vote.user_id === user?.id);
+
+                    pollDataMap.set(poll.message_id, {
+                      ...poll,
+                      options: pollOptions,
+                      vote_counts: voteCounts,
+                      total_votes: pollVotes.length,
+                      user_vote: userVote?.option_index ?? null,
+                      is_closed: new Date(poll.closes_at) < new Date(),
+                    });
+                  });
+
+                  const allMessages: Message[] = allLocalMessages.map((msg) => {
+                    let author = undefined;
+                    if (!msg.is_ghost) {
+                      author = userCache.get(msg.user_id) || {
+                        display_name: 'Unknown User',
+                        avatar_url: null
+                      };
+                    }
+
+                    const pollData = msg.message_type === 'poll' ? pollDataMap.get(msg.id) : undefined;
+
+                    return {
+                      id: msg.id,
+                      group_id: msg.group_id,
+                      user_id: msg.user_id,
+                      content: msg.content,
+                      is_ghost: msg.is_ghost === 1,
+                      message_type: msg.message_type,
+                      category: msg.category,
+                      parent_id: msg.parent_id,
+                      image_url: msg.image_url,
+                      created_at: new Date(msg.created_at).toISOString(),
+                      author: author,
+                      reply_count: 0,
+                      replies: [],
+                      delivery_status: 'delivered' as const,
+                      reactions: [],
+                      poll: pollData
+                    };
+                  });
+
+                  const allStructuredMessages = structureMessagesWithReplies(allMessages);
+                  const allPolls = allMessages
+                    .filter(msg => msg.poll)
+                    .map(msg => msg.poll!)
+                    .filter(poll => poll);
+
+                  const allUserVotesMap: Record<string, number | null> = {};
+                  allPolls.forEach(poll => {
+                    if (poll.user_vote !== null && poll.user_vote !== undefined) {
+                      allUserVotesMap[poll.id] = poll.user_vote;
+                    }
+                  });
+
+                  // Update with all messages silently
+                  set({ 
+                    messages: allStructuredMessages, 
+                    polls: allPolls,
+                    userVotes: allUserVotesMap
+                  });
+                  console.log(`🔄 Background loaded ${allStructuredMessages.length} total messages`);
+                }
+              } catch (error) {
+                console.error('❌ Error loading background messages:', error);
+              }
+            }, 100); // Load background messages after 100ms
           }
         } catch (error) {
           console.error('❌ Error loading messages from local storage:', error);
         }
       }
 
-      // If we've already loaded data from local storage, don't show loading indicator for remote fetch
-      if (localDataLoaded) {
-        set({ isLoading: false });
+      // If we've already loaded data from local storage, don't show loading indicator
+      if (!localDataLoaded) {
+        set({ isLoading: true });
       }
 
       // Check network status

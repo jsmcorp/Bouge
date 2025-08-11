@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
@@ -8,7 +7,7 @@ import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
 export function MessageList() {
-  const { messages, isLoading, typingUsers, activeGroup, fetchMessages } = useChatStore();
+  const { messages, typingUsers, activeGroup, fetchMessages } = useChatStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isPulling, setIsPulling] = useState(false);
@@ -17,13 +16,16 @@ export function MessageList() {
   const touchStartY = useRef(0);
   const scrollTop = useRef(0);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive - instant scroll
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ 
-        behavior: 'smooth',
-        block: 'end'
-      });
+    if (messagesEndRef.current && messages.length > 0) {
+      // Use setTimeout to ensure DOM is updated
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ 
+          behavior: 'instant',
+          block: 'end'
+        });
+      }, 0);
     }
   }, [messages, typingUsers]);
 
@@ -78,16 +80,7 @@ export function MessageList() {
     }
   };
 
-  if (isLoading && !isPulling && messages.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center">
-          <div className="animate-spin w-8 h-8 border-2 border-green-500 border-t-transparent rounded-full mx-auto mb-2"></div>
-          <p className="text-sm text-muted-foreground">Loading messages...</p>
-        </div>
-      </div>
-    );
-  }
+  // Remove loading screen - messages should load instantly from local storage
 
   if (messages.length === 0 && typingUsers.length === 0 && !isPulling && !isRefreshing) {
     return (
@@ -132,48 +125,18 @@ export function MessageList() {
       )}
 
       <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-4">
-        <AnimatePresence initial={false}>
-          {messages.map((message, index) => (
-            <motion.div
-              key={message.id}
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
-              animate={{ 
-                opacity: 1, 
-                y: 0, 
-                scale: 1,
-                transition: {
-                  type: "spring",
-                  stiffness: 500,
-                  damping: 30,
-                  delay: index * 0.02
-                }
-              }}
-              exit={{ 
-                opacity: 0, 
-                y: -20, 
-                scale: 0.95,
-                transition: { duration: 0.2 }
-              }}
-              layout
-            >
-              <MessageBubble message={message} />
-            </motion.div>
-          ))}
-        </AnimatePresence>
+        {messages.map((message) => (
+          <div key={message.id}>
+            <MessageBubble message={message} />
+          </div>
+        ))}
 
         {/* Typing Indicator */}
-        <AnimatePresence>
-          {typingUsers.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.2 }}
-            >
-              <TypingIndicator typingUsers={typingUsers} />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {typingUsers.length > 0 && (
+          <div>
+            <TypingIndicator typingUsers={typingUsers} />
+          </div>
+        )}
 
         {/* Invisible element to scroll to */}
         <div ref={messagesEndRef} className="h-1" />

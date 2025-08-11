@@ -19,11 +19,11 @@ export function ThreadPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when new replies arrive
+  // Auto-scroll to bottom when new replies arrive - instant scroll
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ 
-        behavior: 'smooth',
+        behavior: 'instant',
         block: 'end'
       });
     }

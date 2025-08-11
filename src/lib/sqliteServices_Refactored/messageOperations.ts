@@ -36,11 +36,26 @@ export class MessageOperations {
     const sql = `
       SELECT * FROM messages 
       WHERE group_id = ? 
-      ORDER BY created_at ASC 
+      ORDER BY created_at DESC 
       LIMIT ? OFFSET ?
     `;
 
     const result = await db.query(sql, [groupId, limit, offset]);
+    return result.values || [];
+  }
+
+  public async getRecentMessages(groupId: string, limit = 10): Promise<LocalMessage[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `
+      SELECT * FROM messages 
+      WHERE group_id = ? 
+      ORDER BY created_at DESC 
+      LIMIT ?
+    `;
+
+    const result = await db.query(sql, [groupId, limit]);
     return result.values || [];
   }
 

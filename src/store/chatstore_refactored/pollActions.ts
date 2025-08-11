@@ -227,6 +227,25 @@ export const createPollActions = (set: any, get: any): PollActions => ({
         throw error;
       }
 
+      // Save vote to local storage for offline access
+      try {
+        const { sqliteService } = await import('@/lib/sqliteService');
+        const { Capacitor } = await import('@capacitor/core');
+        
+        if (Capacitor.isNativePlatform() && await sqliteService.isReady()) {
+          await sqliteService.savePollVote({
+            poll_id: pollId,
+            user_id: user.id,
+            option_index: optionIndex,
+            created_at: Date.now()
+          });
+          console.log('✅ Poll vote saved to local storage');
+        }
+      } catch (localError) {
+        console.error('❌ Error saving poll vote to local storage:', localError);
+        // Don't throw - the vote was successful on the server
+      }
+
     } catch (error) {
       console.error('Error voting on poll:', error);
       throw error;
