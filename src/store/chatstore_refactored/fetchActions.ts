@@ -206,7 +206,55 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               }
             }
 
-            // Convert local messages to the format expected by the UI (without async operations)
+            // Get poll messages to fetch poll data
+            const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
+            const pollMessageIds = pollMessages.map(msg => msg.id);
+            
+            // Get current user for vote checking
+            const { data: { user } } = await supabase.auth.getUser();
+            
+            // Fetch poll data for poll messages
+            let pollsData: any[] = [];
+            let pollVotesData: any[] = [];
+            if (pollMessageIds.length > 0) {
+              try {
+                pollsData = await sqliteService.getPolls(pollMessageIds);
+                const pollIds = pollsData.map(poll => poll.id);
+                if (pollIds.length > 0) {
+                  pollVotesData = await sqliteService.getPollVotes(pollIds);
+                }
+              } catch (error) {
+                console.error('Error loading poll data from local storage:', error);
+              }
+            }
+
+            // Create poll data map for quick lookup
+            const pollDataMap = new Map();
+            pollsData.forEach(poll => {
+              const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
+              const pollOptions = JSON.parse(poll.options);
+              const voteCounts = new Array(pollOptions.length).fill(0);
+              
+              pollVotes.forEach(vote => {
+                if (vote.option_index < voteCounts.length) {
+                  voteCounts[vote.option_index]++;
+                }
+              });
+
+              // Check current user's vote
+              const userVote = pollVotes.find(vote => vote.user_id === user?.id);
+
+              pollDataMap.set(poll.message_id, {
+                ...poll,
+                options: pollOptions,
+                vote_counts: voteCounts,
+                total_votes: pollVotes.length,
+                user_vote: userVote?.option_index ?? null,
+                is_closed: new Date(poll.closes_at) < new Date(),
+              });
+            });
+
+            // Convert local messages to the format expected by the UI
             const messages: Message[] = localMessages.map((msg) => {
               // Get user info from cache
               let author = undefined;
@@ -216,6 +264,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   avatar_url: null
                 };
               }
+
+              // Get poll data if this is a poll message
+              const pollData = msg.message_type === 'poll' ? pollDataMap.get(msg.id) : undefined;
 
               // Build basic message object
               return {
@@ -234,7 +285,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 replies: [],
                 delivery_status: 'delivered' as const,
                 reactions: [],
-                poll: undefined
+                poll: pollData
               };
             });
 
