@@ -277,6 +277,27 @@ export class DatabaseManager {
     `;
 
     await this.db!.execute(sql);
+    
+    // Add missing columns to existing tables
+    await this.migrateDatabase();
+  }
+
+  private async migrateDatabase(): Promise<void> {
+    try {
+      // Add missing columns to messages table
+      await this.db!.execute('ALTER TABLE messages ADD COLUMN updated_at INTEGER;').catch(() => {});
+      await this.db!.execute('ALTER TABLE messages ADD COLUMN deleted_at INTEGER;').catch(() => {});
+      
+      // Add missing columns to groups table
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN description TEXT;').catch(() => {});
+      
+      // Add missing columns to users table
+      await this.db!.execute('ALTER TABLE users ADD COLUMN phone_number TEXT;').catch(() => {});
+      
+      console.log('✅ Database migration completed');
+    } catch (error) {
+      console.error('❌ Database migration failed:', error);
+    }
   }
 
   private async testLocalStorage(): Promise<void> {
