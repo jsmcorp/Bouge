@@ -171,28 +171,38 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           const localMessages = await sqliteService.getAllMessagesForGroup(groupId);
 
           if (localMessages && localMessages.length > 0) {
-            // Convert local messages to the format expected by the UI
-            const messages = await Promise.all(localMessages.map(async (msg) => {
-              // Get user info from local storage
-              let author = undefined;
-              if (!msg.is_ghost) {
-                const user = await sqliteService.getUser(msg.user_id);
+            // Get all unique user IDs first to batch load users
+            const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+            const userCache = new Map();
+            
+            // Batch load all users
+            for (const userId of userIds) {
+              try {
+                const user = await sqliteService.getUser(userId);
                 if (user) {
-                  author = {
+                  userCache.set(userId, {
                     display_name: user.display_name,
                     avatar_url: user.avatar_url || null
-                  };
-                } else {
-                  // Fallback if user data is not available
-                  author = {
-                    display_name: 'Unknown User',
-                    avatar_url: null
-                  };
+                  });
                 }
+              } catch (error) {
+                console.error(`Error loading user ${userId}:`, error);
+              }
+            }
+
+            // Convert local messages to the format expected by the UI (without async operations)
+            const messages: Message[] = localMessages.map((msg) => {
+              // Get user info from cache
+              let author = undefined;
+              if (!msg.is_ghost) {
+                author = userCache.get(msg.user_id) || {
+                  display_name: 'Unknown User',
+                  avatar_url: null
+                };
               }
 
               // Build basic message object
-              const message: Message = {
+              return {
                 id: msg.id,
                 group_id: msg.group_id,
                 user_id: msg.user_id,
@@ -210,46 +220,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 reactions: [],
                 poll: undefined
               };
-
-              // Handle polls for poll messages
-              if (msg.message_type === 'poll') {
-                try {
-                  const polls = await sqliteService.getPolls([msg.id]);
-                  if (polls.length > 0) {
-                    const poll = polls[0];
-                    const votes = await sqliteService.getPollVotes([poll.id]);
-
-                    const { data: { user } } = await supabase.auth.getUser();
-                    const userVote = votes.find(v => v.user_id === user?.id);
-
-                    const pollOptions = JSON.parse(poll.options);
-                    const voteCounts = new Array(pollOptions.length).fill(0);
-                    votes.forEach(vote => {
-                      if (vote.option_index < voteCounts.length) {
-                        voteCounts[vote.option_index]++;
-                      }
-                    });
-
-                    message.poll = {
-                      id: poll.id,
-                      message_id: poll.message_id,
-                      question: poll.question,
-                      options: pollOptions,
-                      created_at: new Date(poll.created_at).toISOString(),
-                      closes_at: new Date(poll.closes_at).toISOString(),
-                      vote_counts: voteCounts,
-                      total_votes: votes.length,
-                      user_vote: userVote?.option_index ?? null,
-                      is_closed: new Date(poll.closes_at).getTime() < Date.now()
-                    };
-                  }
-                } catch (error) {
-                  console.error('Error loading poll from local storage:', error);
-                }
-              }
-
-              return message;
-            }));
+            });
 
             // Structure messages with nested replies
             const structuredMessages = structureMessagesWithReplies(messages);
@@ -425,105 +396,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           // Sync reactions, polls, and other related data
           await get().syncMessageRelatedData(groupId, data || []);
 
-          // Always refresh UI with updated local data after sync
-          console.log('🔄 Refreshing UI with updated local data...');
-
-          // Re-fetch from local storage to get the updated data
-          const updatedLocalMessages = await sqliteService.getAllMessagesForGroup(groupId);
-
-          if (updatedLocalMessages && updatedLocalMessages.length > 0) {
-            // Convert local messages to the format expected by the UI
-            const refreshedMessages = await Promise.all(updatedLocalMessages.map(async (msg) => {
-              // Get user info from local storage
-              let author = undefined;
-              if (!msg.is_ghost) {
-                const user = await sqliteService.getUser(msg.user_id);
-                if (user) {
-                  author = {
-                    display_name: user.display_name,
-                    avatar_url: user.avatar_url || null
-                  };
-                } else {
-                  // Fallback if user data is not available
-                  author = {
-                    display_name: 'Unknown User',
-                    avatar_url: null
-                  };
-                }
-              }
-
-              // Build complete message object
-              const message: Message = {
-                id: msg.id,
-                group_id: msg.group_id,
-                user_id: msg.user_id,
-                content: msg.content,
-                is_ghost: msg.is_ghost === 1,
-                message_type: msg.message_type,
-                category: msg.category,
-                parent_id: msg.parent_id,
-                image_url: msg.image_url,
-                created_at: new Date(msg.created_at).toISOString(),
-                author: author,
-                reply_count: 0,
-                replies: [],
-                delivery_status: 'delivered' as const,
-                reactions: [],
-                poll: undefined
-              };
-
-              // Handle polls for poll messages
-              if (msg.message_type === 'poll') {
-                try {
-                  const polls = await sqliteService.getPolls([msg.id]);
-                  if (polls.length > 0) {
-                    const poll = polls[0];
-                    const votes = await sqliteService.getPollVotes([poll.id]);
-
-                    const { data: { user } } = await supabase.auth.getUser();
-                    const userVote = votes.find(v => v.user_id === user?.id);
-
-                    const pollOptions = JSON.parse(poll.options);
-                    const voteCounts = new Array(pollOptions.length).fill(0);
-                    votes.forEach(vote => {
-                      if (vote.option_index < voteCounts.length) {
-                        voteCounts[vote.option_index]++;
-                      }
-                    });
-
-                    message.poll = {
-                      id: poll.id,
-                      message_id: poll.message_id,
-                      question: poll.question,
-                      options: pollOptions,
-                      created_at: new Date(poll.created_at).toISOString(),
-                      closes_at: new Date(poll.closes_at).toISOString(),
-                      vote_counts: voteCounts,
-                      total_votes: votes.length,
-                      user_vote: userVote?.option_index ?? null,
-                      is_closed: new Date(poll.closes_at).getTime() < Date.now()
-                    };
-                  }
-                } catch (error) {
-                  console.error('Error loading poll from local storage:', error);
-                }
-              }
-
-              return message;
-            }));
-
-            // Structure the refreshed messages with nested replies
-            const structuredRefreshedMessages = structureMessagesWithReplies(refreshedMessages);
-
-            // Update UI with refreshed data
-            set({ messages: structuredRefreshedMessages });
-            console.log(`✅ UI refreshed with ${structuredRefreshedMessages.length} parent messages from local storage`);
-          }
+          console.log('✅ Background sync completed');
         } catch (error) {
           console.error('❌ Error syncing messages to local storage:', error);
         }
-      } else if (!localDataLoaded) {
-        // Only update UI with Supabase data if we didn't already load from local storage
+      }
+
+      // Only update UI with Supabase data if we didn't already load from local storage
+      if (!localDataLoaded) {
         set({ messages: structuredMessages, isLoading: false });
       }
     } catch (error) {
