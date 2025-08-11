@@ -290,9 +290,17 @@ export class DatabaseManager {
       
       // Add missing columns to groups table
       await this.db!.execute('ALTER TABLE groups ADD COLUMN description TEXT;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN invite_code TEXT;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN created_by TEXT;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN created_at INTEGER;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN last_sync_timestamp INTEGER DEFAULT 0;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN avatar_url TEXT;').catch(() => {});
+      await this.db!.execute('ALTER TABLE groups ADD COLUMN is_archived INTEGER DEFAULT 0;').catch(() => {});
       
       // Add missing columns to users table
       await this.db!.execute('ALTER TABLE users ADD COLUMN phone_number TEXT;').catch(() => {});
+      await this.db!.execute('ALTER TABLE users ADD COLUMN is_onboarded INTEGER DEFAULT 0;').catch(() => {});
+      await this.db!.execute('ALTER TABLE users ADD COLUMN created_at INTEGER;').catch(() => {});
       
       console.log('✅ Database migration completed');
     } catch (error) {
