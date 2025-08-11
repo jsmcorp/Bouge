@@ -175,6 +175,10 @@ export function ChatInput({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Keep the keyboard open by ensuring the textarea retains focus immediately on submit
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
     if ((!message.trim() && !selectedImage) || !activeGroup || isLoading || uploadingFile) return;
 
     setIsLoading(true);
@@ -201,7 +205,7 @@ export function ChatInput({
       setCategory('');
       clearSelectedImage();
       
-      // Focus back to textarea
+      // Focus back to textarea after sending
       if (textareaRef.current) {
         textareaRef.current.focus();
       }
@@ -528,6 +532,7 @@ export function ChatInput({
           {/* Send Button */}
           <Button
             type="submit"
+            onPointerDown={(e) => e.preventDefault()}
             disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || connectionStatus === 'disconnected'}
             className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full`}
           >
