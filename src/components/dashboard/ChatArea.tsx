@@ -108,14 +108,11 @@ export function ChatArea() {
 
   const handleBackClick = () => {
     if (isMobile) {
-      // Navigate first with replace to prevent history stacking
+      // Clear active group first
+      useChatStore.getState().setActiveGroup(null);
+      // Use window.history to ensure immediate navigation
+      window.history.replaceState(null, '', '/dashboard');
       navigate('/dashboard', { replace: true });
-      
-      // Use setTimeout to clear the active group after navigation has started
-      // This prevents the component from re-rendering before navigation completes
-      setTimeout(() => {
-        useChatStore.getState().setActiveGroup(null);
-      }, 0);
     }
   };
 

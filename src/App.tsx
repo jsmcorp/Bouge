@@ -5,6 +5,7 @@ import { useChatStore } from '@/store/chatStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import { Network } from '@capacitor/network';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/theme-provider';
@@ -47,37 +48,42 @@ function AppContent() {
 
   // Handle hardware back button on mobile
   useEffect(() => {
-    if (Capacitor.isNativePlatform() && isMobile) {
+    if (Capacitor.isNativePlatform()) {
       const handleBackButton = () => {
         const currentPath = window.location.pathname;
         
         // If we're in a group chat, navigate to dashboard
         if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details')) {
-          // Navigate first with replace to avoid history stacking
+          // Clear active group first
+          useChatStore.getState().setActiveGroup(null);
+          // Use window.history to ensure immediate navigation
+          window.history.replaceState(null, '', '/dashboard');
           navigate('/dashboard', { replace: true });
-          
-          // Use setTimeout to clear the active group after navigation has started
-          setTimeout(() => {
-            useChatStore.getState().setActiveGroup(null);
-          }, 0);
-          
-          return true; // Prevent default back action
         }
-        
-        // If we're at dashboard, let the default back action happen (exit app)
-        return false;
+        // For other pages (not dashboard), navigate back in history
+        else if (currentPath !== '/dashboard') {
+          navigate(-1);
+        }
+        // If we're at dashboard, let the app exit
+        else {
+          CapacitorApp.exitApp();
+        }
       };
 
-      document.addEventListener('ionBackButton', (ev) => {
-        (ev as any).detail.register(10, handleBackButton);
+      let listenerHandle: any;
+      
+      CapacitorApp.addListener('backButton', handleBackButton).then(handle => {
+        listenerHandle = handle;
       });
       
       // Cleanup
       return () => {
-        document.removeEventListener('ionBackButton', () => {});
+        if (listenerHandle) {
+          listenerHandle.remove();
+        }
       };
     }
-  }, [navigate, isMobile]);
+  }, []);
 
   useEffect(() => {
     console.log('🚀 App mounted, setting up auth...');
