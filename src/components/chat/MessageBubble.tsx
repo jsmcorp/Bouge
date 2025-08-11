@@ -525,7 +525,7 @@ export function MessageBubble({
                     </div>
                     {message.content && message.content !== 'Image' && (
                       <div className={cn(
-                        "whitespace-pre-wrap break-words text-foreground/90",
+                        "whitespace-pre-wrap break-words break-all text-foreground/90 overflow-x-hidden",
                         isThreadReply ? "text-sm" : "text-sm"
                       )}>
                         {message.content}
@@ -534,7 +534,7 @@ export function MessageBubble({
                   </div>
                 ) : (
                   <div className={cn(
-                    "whitespace-pre-wrap break-words text-foreground/90",
+                    "whitespace-pre-wrap break-words break-all text-foreground/90 overflow-x-hidden",
                     isThreadReply ? "text-sm" : "text-sm"
                   )}>
                     {message.content}

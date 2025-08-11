@@ -55,6 +55,7 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const maxLines = 6;
   
   const { 
     activeGroup, 
@@ -93,6 +94,22 @@ export function ChatInput({
       sendTypingStatus(false, isGhost);
     }, 1000);
   };
+
+  // Autosize textarea up to maxLines
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const adjust = () => {
+      el.style.height = 'auto';
+      const style = window.getComputedStyle(el);
+      const lineHeight = parseFloat(style.lineHeight || '20');
+      const maxHeight = lineHeight * maxLines;
+      const newHeight = Math.min(el.scrollHeight, maxHeight);
+      el.style.height = `${newHeight}px`;
+      el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    };
+    requestAnimationFrame(adjust);
+  }, [message]);
 
   const handleTypingStop = () => {
     if (typingTimeoutRef.current) {
@@ -494,6 +511,7 @@ export function ChatInput({
             maxLength={2000}
             disabled={connectionStatus === 'disconnected' || uploadingFile}
             rows={1}
+            style={{ height: 'auto' }}
           />
 
           {/* Image Button */}

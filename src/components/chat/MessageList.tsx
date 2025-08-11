@@ -5,9 +5,11 @@ import { MessageBubble } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
 import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAuthStore } from '@/store/authStore';
 
 export function MessageList() {
   const { messages, typingUsers, activeGroup, fetchMessages } = useChatStore();
+  const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isPulling, setIsPulling] = useState(false);
@@ -97,7 +99,7 @@ export function MessageList() {
 
   return (
     <ScrollArea 
-      className="h-full" 
+      className="h-full overflow-x-hidden" 
       ref={scrollAreaRef}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
@@ -124,17 +126,17 @@ export function MessageList() {
         </div>
       )}
 
-      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-4">
+      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-4 overflow-x-hidden">
         {messages.map((message) => (
           <div key={message.id}>
             <MessageBubble message={message} />
           </div>
         ))}
 
-        {/* Typing Indicator */}
-        {typingUsers.length > 0 && (
+        {/* Typing Indicator (hide self) */}
+        {typingUsers.filter(u => u.user_id !== user?.id).length > 0 && (
           <div>
-            <TypingIndicator typingUsers={typingUsers} />
+            <TypingIndicator typingUsers={typingUsers.filter(u => u.user_id !== user?.id)} />
           </div>
         )}
 
