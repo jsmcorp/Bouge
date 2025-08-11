@@ -3,6 +3,7 @@ import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
+import type { Message } from './types';
 
 export interface OfflineActions {
   processOutbox: () => Promise<void>;
@@ -115,6 +116,19 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
           } catch (error) {
             console.error(`❌ Error removing temp message ${messageData.id}:`, error);
           }
+
+          // Update in-memory optimistic message to 'sent' and swap temp ID if present
+          const state = get();
+          const updateDelivery = (list: Message[]): Message[] => list.map((m): Message => {
+            if (m.id === messageData.id) {
+              return { ...m, id: data.id, delivery_status: 'sent' } as Message;
+            }
+            if (m.replies && m.replies.length) {
+              return { ...m, replies: updateDelivery(m.replies) } as Message;
+            }
+            return m;
+          });
+          _set({ messages: updateDelivery(state.messages as Message[]) });
 
           // Save user info if not ghost
           if (!data.is_ghost && data.users) {
