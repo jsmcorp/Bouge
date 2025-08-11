@@ -41,12 +41,13 @@ function AppContent() {
   const { 
     setOnlineStatus, 
     startOutboxProcessor, 
-    stopOutboxProcessor
+    stopOutboxProcessor,
+    setupRealtimeSubscription
   } = useChatStore();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
 
-  // Handle hardware back button on mobile
+  // Handle hardware back button and app state changes on mobile
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
       const handleBackButton = () => {
@@ -70,20 +71,43 @@ function AppContent() {
         }
       };
 
-      let listenerHandle: any;
+      const handleAppStateChange = ({ isActive }: { isActive: boolean }) => {
+        console.log('📱 App state changed:', isActive ? 'active' : 'inactive');
+        
+        if (isActive) {
+          // App came to foreground - reconnect realtime if we have an active group
+          const currentActiveGroup = useChatStore.getState().activeGroup;
+          if (currentActiveGroup) {
+            console.log('🔄 App resumed, reconnecting realtime for group:', currentActiveGroup.id);
+            setTimeout(() => {
+              setupRealtimeSubscription(currentActiveGroup.id);
+            }, 1000); // Small delay to ensure app is fully active
+          }
+        }
+      };
+
+      let backButtonHandle: any;
+      let appStateHandle: any;
       
       CapacitorApp.addListener('backButton', handleBackButton).then(handle => {
-        listenerHandle = handle;
+        backButtonHandle = handle;
+      });
+
+      CapacitorApp.addListener('appStateChange', handleAppStateChange).then(handle => {
+        appStateHandle = handle;
       });
       
       // Cleanup
       return () => {
-        if (listenerHandle) {
-          listenerHandle.remove();
+        if (backButtonHandle) {
+          backButtonHandle.remove();
+        }
+        if (appStateHandle) {
+          appStateHandle.remove();
         }
       };
     }
-  }, []);
+  }, [setupRealtimeSubscription]);
 
   useEffect(() => {
     console.log('🚀 App mounted, setting up auth...');
