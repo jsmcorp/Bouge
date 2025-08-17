@@ -123,16 +123,40 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   
   // Centralized entry points to coalesce reconnect logic
   onAppResume: () => {
-    const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, reconnectTimer } = get();
+    const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, reconnectTimer, ensureAuthBeforeSubscribe } = get() as any;
     if (activeGroup?.id) {
       // Cancel any pending reconnect timer and do a single clean reconnect
       if (reconnectTimer) {
         clearTimeout(reconnectTimer as any);
         set({ reconnectTimer: null });
       }
-      cleanupRealtimeSubscription();
-      set({ connectionStatus: 'connecting' });
-      setupRealtimeSubscription(activeGroup.id);
+      // Ensure auth is valid before subscribing on resume
+      (async () => {
+        set({ connectionStatus: 'connecting' });
+        console.log('[realtime] auth_check: started (resume)');
+        const auth = await ensureAuthBeforeSubscribe({ timeoutMs: 3000 });
+        if (!auth.ok) {
+          console.warn(`[realtime] auth_check: failed reason=${auth.reason}`);
+          set({ connectionStatus: 'disconnected' });
+          return;
+        }
+        cleanupRealtimeSubscription();
+        // Record subscribe attempt timestamp and start short watchdog
+        const now = Date.now();
+        set({ lastSubscribeAttemptAt: now } as any);
+        setupRealtimeSubscription(activeGroup.id);
+        const t = setTimeout(() => {
+          const subsAt = (get() as any).subscribedAt as number | null;
+          if (!subsAt || (Date.now() - subsAt) > 10000) {
+            console.warn('[realtime] subscribe_watchdog fired');
+            console.log('[connection] forceReconnect invoked reason=subscribe_watchdog');
+            cleanupRealtimeSubscription();
+            set({ connectionStatus: 'reconnecting' });
+            setTimeout(() => setupRealtimeSubscription(activeGroup.id), 300);
+          }
+        }, 10000);
+        set({ subscribeTimeoutId: t } as any);
+      })();
     }
   },
   onNetworkOnline: () => {
