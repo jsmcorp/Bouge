@@ -45,7 +45,6 @@ function AppContent() {
     stopOutboxProcessor,
     setupRealtimeSubscription,
     setConnectionStatus,
-    processOutbox,
     cleanupRealtimeSubscription,
     onAppResume,
     onNetworkOnline
@@ -226,20 +225,8 @@ function AppContent() {
   // Push notification integration points (FCM/APNs)
   // NOTE: Implement platform-specific registration in a separate service and call back into the store for catch-up sync
   useEffect(() => {
-    // Placeholder hooks: wire FCM/APNs registration here
-    // On notification tap/wake, trigger a catch-up sync
-    const handlePushWake = async () => {
-      try {
-        const activeGroup = useChatStore.getState().activeGroup;
-        if (activeGroup?.id) {
-          await useChatStore.getState().forceMessageSync(activeGroup.id);
-        }
-      } catch (e) {
-        console.error('❌ Push wake catch-up sync failed:', e);
-      }
-    };
-
-    // TODO: register and return unsubscribe when real push is wired
+    // TODO: register FCM/APNs listeners and, on wake/tap, call:
+    // const g = useChatStore.getState(); if (g.activeGroup?.id) g.forceMessageSync(g.activeGroup.id);
     return () => {};
   }, []);
 

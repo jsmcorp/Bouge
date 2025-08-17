@@ -800,8 +800,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // Merge into current state and update message cache
       const existing = get().messages || [];
-      const merged = [...existing];
-      const seen = new Set(existing.map(m => m.id));
+      const merged: Message[] = [...existing];
+      const seen = new Set(existing.map((m: Message) => m.id));
       for (const m of formatted) {
         if (!seen.has(m.id)) {
           merged.push(m);
