@@ -121,4 +121,8 @@ export interface ChatState {
   online: boolean;
   outboxProcessorInterval: NodeJS.Timeout | null;
   activeSwipeMessageId: string | null;
+  // Reconnection control
+  reconnectAttempt: number;
+  reconnectTimer: NodeJS.Timeout | null;
+  isReconnecting: boolean;
 }

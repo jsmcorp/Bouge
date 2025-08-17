@@ -46,7 +46,9 @@ function AppContent() {
     setupRealtimeSubscription,
     setConnectionStatus,
     processOutbox,
-    cleanupRealtimeSubscription
+    cleanupRealtimeSubscription,
+    onAppResume,
+    onNetworkOnline
   } = useChatStore();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -79,14 +81,8 @@ function AppContent() {
         console.log('📱 App state changed:', isActive ? 'active' : 'inactive');
         
         if (isActive) {
-          // App came to foreground - reconnect realtime if we have an active group
-          const currentActiveGroup = useChatStore.getState().activeGroup;
-          if (currentActiveGroup) {
-            console.log('🔄 App resumed, reconnecting realtime for group:', currentActiveGroup.id);
-            setTimeout(() => {
-              setupRealtimeSubscription(currentActiveGroup.id);
-            }, 1000); // Small delay to ensure app is fully active
-          }
+          // App came to foreground - delegate to connection manager
+          setTimeout(() => { onAppResume(); }, 500);
 
           // If user is on dashboard, kick off a background preload of top groups
           const currentPath = window.location.pathname;
@@ -146,13 +142,10 @@ function AppContent() {
             setOnlineStatus(status.connected);
             console.log('🌐 Initial network status:', status.connected ? 'online' : 'offline');
 
-            // Reflect connection banner and realtime on initial state
-            const currentActiveGroup = useChatStore.getState().activeGroup;
+            // Reflect connection banner and realtime on initial state via connection manager
             if (status.connected) {
               setConnectionStatus('connecting');
-              if (currentActiveGroup) {
-                setupRealtimeSubscription(currentActiveGroup.id);
-              }
+              onAppResume();
             } else {
               setConnectionStatus('disconnected');
               cleanupRealtimeSubscription();
@@ -165,16 +158,9 @@ function AppContent() {
             Network.addListener('networkStatusChange', async (status) => {
               console.log('🌐 Network status changed:', status.connected ? 'online' : 'offline');
               setOnlineStatus(status.connected);
-              const activeGroup = useChatStore.getState().activeGroup;
               if (status.connected) {
-                setConnectionStatus('reconnecting');
-                if (activeGroup) {
-                  // Avoid duplicate subscriptions by cleaning up first
-                  cleanupRealtimeSubscription();
-                  await setupRealtimeSubscription(activeGroup.id);
-                }
-                // Immediately process any queued messages
-                try { await processOutbox(); } catch (e) { console.error('Outbox process error:', e); }
+                // Delegate to centralized connection manager
+                onNetworkOnline();
               } else {
                 setConnectionStatus('disconnected');
                 cleanupRealtimeSubscription();

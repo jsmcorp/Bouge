@@ -9,8 +9,6 @@ let isProcessingOutbox = false;
 
 export interface OfflineActions {
   processOutbox: () => Promise<void>;
-  setupNetworkListener: () => void;
-  cleanupNetworkListener: () => void;
   startOutboxProcessor: () => void;
   stopOutboxProcessor: () => void;
   syncMessageRelatedData: (groupId: string, messages: any[]) => Promise<void>;
@@ -70,9 +68,16 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         return;
       }
 
+      const now = Date.now();
       for (const outboxItem of outboxMessages) {
         try {
           const messageData = JSON.parse(outboxItem.content);
+
+          // Respect next_retry_at; skip until it's due
+          if (outboxItem.next_retry_at && outboxItem.next_retry_at > now) {
+            console.log(`⏭️ Skipping outbox ${outboxItem.id} until ${new Date(outboxItem.next_retry_at).toISOString()}`);
+            continue;
+          }
 
           const { data, error } = await supabase
             .from('messages')
@@ -95,10 +100,14 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
 
           if (error) {
             console.error(`❌ Error sending outbox message ${outboxItem.id}:`, error);
-            const nextRetry = Date.now() + (outboxItem.retry_count + 1) * 60000;
+            // Exponential backoff with jitter: min(2^n * 5s, 5m) + 0-1s
+            const attempt = (outboxItem.retry_count || 0) + 1;
+            const base = Math.min(Math.pow(2, attempt) * 5000, 5 * 60 * 1000);
+            const jitter = Math.floor(Math.random() * 1000);
+            const nextRetry = Date.now() + base + jitter;
             await sqliteService.updateOutboxRetry(
               outboxItem.id!,
-              outboxItem.retry_count + 1,
+              attempt,
               nextRetry
             );
             continue;
@@ -180,30 +189,21 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       if (state.activeGroup && outboxMessages.length > 0) {
         console.log('🔄 Refreshing messages after outbox processing...');
         await get().fetchMessages(state.activeGroup.id);
+        // If a thread is open, refresh its replies too
+        if (state.activeThread?.id) {
+          try {
+            const replies = await get().fetchReplies(state.activeThread.id);
+            _set({ threadReplies: replies });
+          } catch (e) {
+            console.error('❌ Error refreshing thread replies after outbox:', e);
+          }
+        }
       }
     } catch (error) {
       console.error('❌ Error processing outbox:', error);
     } finally {
       isProcessingOutbox = false;
     }
-  },
-
-  setupNetworkListener: () => {
-    if (!Capacitor.isNativePlatform()) return;
-    console.log('🔌 Setting up network status listener');
-    Network.addListener('networkStatusChange', async ({ connected }) => {
-      console.log(`🌐 Network status changed: ${connected ? 'online' : 'offline'}`);
-      if (connected) {
-        console.log('🔄 Network is back online, processing outbox...');
-        await get().processOutbox();
-      }
-    });
-  },
-
-  cleanupNetworkListener: () => {
-    if (!Capacitor.isNativePlatform()) return;
-    console.log('🧹 Cleaning up network status listener');
-    Network.removeAllListeners();
   },
 
   startOutboxProcessor: () => {

@@ -14,10 +14,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
     console.log('🔄 Setting up realtime subscription for group:', groupId);
 
     try {
+      // Ensure we have a user BEFORE setting connecting, otherwise banner can get stuck
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        console.warn('⚠️ No authenticated user found; skipping realtime subscription');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
 
-      // Cleanup existing subscription
+      // Cleanup existing subscription before creating a new one
       get().cleanupRealtimeSubscription();
 
       set({ connectionStatus: 'connecting' });
@@ -338,18 +343,52 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
             } catch (e) {
               console.error('❌ Background refresh after subscribe failed:', e);
             }
+
+            // Reset reconnection tracking
+            set({ reconnectAttempt: 0, isReconnecting: false });
           } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
             set({ connectionStatus: 'disconnected' });
             console.error('❌ Channel subscription error');
 
-            // Attempt to reconnect after 3 seconds
-            setTimeout(() => {
-              console.log('🔄 Attempting to reconnect...');
+            // Attempt to reconnect with backoff
+            const attempt = get().reconnectAttempt || 0;
+            const nextAttempt = Math.min(attempt + 1, 6); // cap attempts growth
+            const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000); // 1s,2s,4s,... cap 30s
+            const jitter = Math.floor(Math.random() * 500); // 0-500ms jitter
+            const delay = baseDelay + jitter;
+
+            // Coalesce concurrent reconnects
+            const existingTimer = get().reconnectTimer;
+            if (existingTimer) {
+              clearTimeout(existingTimer);
+            }
+            set({ isReconnecting: true, reconnectAttempt: nextAttempt });
+            const timer = setTimeout(() => {
+              console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
               get().setupRealtimeSubscription(groupId);
-            }, 3000);
+            }, delay);
+            set({ reconnectTimer: timer });
           } else if (status === 'TIMED_OUT') {
+            // Show reconnecting banner and schedule a retry with backoff
+            console.warn('⏰ Subscription timed out; scheduling reconnect with backoff');
             set({ connectionStatus: 'reconnecting' });
-            console.warn('⏰ Subscription timed out, reconnecting...');
+
+            const attempt = get().reconnectAttempt || 0;
+            const nextAttempt = Math.min(attempt + 1, 6);
+            const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
+            const jitter = Math.floor(Math.random() * 500);
+            const delay = baseDelay + jitter;
+
+            const existingTimer = get().reconnectTimer;
+            if (existingTimer) {
+              clearTimeout(existingTimer);
+            }
+            set({ isReconnecting: true, reconnectAttempt: nextAttempt });
+            const timer = setTimeout(() => {
+              console.log(`🔄 Reconnecting after timeout (attempt ${nextAttempt})...`);
+              get().setupRealtimeSubscription(groupId);
+            }, delay);
+            set({ reconnectTimer: timer });
           }
         });
 
@@ -360,7 +399,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
   },
 
   cleanupRealtimeSubscription: () => {
-    const { realtimeChannel, typingTimeout } = get();
+    const { realtimeChannel, typingTimeout, reconnectTimer } = get();
 
     if (typingTimeout) {
       clearTimeout(typingTimeout);
@@ -375,6 +414,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
         typingUsers: [],
         typingTimeout: null
       });
+    }
+
+    // Clear any pending reconnect timer
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      set({ reconnectTimer: null, isReconnecting: false });
     }
   },
 

@@ -28,6 +28,9 @@ export interface StateActions {
   setLoadingGroupDetails: (loading: boolean) => void;
   setUploadingFile: (uploading: boolean) => void;
   setOnlineStatus: (status: boolean) => void;
+  // Connection manager facade
+  onAppResume: () => void;
+  onNetworkOnline: () => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -117,6 +120,40 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   setLoadingGroupDetails: (loading) => set({ isLoadingGroupDetails: loading }),
   setUploadingFile: (uploading) => set({ uploadingFile: uploading }),
   setOnlineStatus: (status) => set({ online: status }),
+  
+  // Centralized entry points to coalesce reconnect logic
+  onAppResume: () => {
+    const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, reconnectTimer } = get();
+    if (activeGroup?.id) {
+      // Cancel any pending reconnect timer and do a single clean reconnect
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer as any);
+        set({ reconnectTimer: null });
+      }
+      cleanupRealtimeSubscription();
+      set({ connectionStatus: 'connecting' });
+      setupRealtimeSubscription(activeGroup.id);
+    }
+  },
+  onNetworkOnline: () => {
+    const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, processOutbox, reconnectTimer } = get();
+    // Cancel pending timers, clean, and reconnect once
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer as any);
+      set({ reconnectTimer: null });
+    }
+    if (activeGroup?.id) {
+      set({ connectionStatus: 'reconnecting' });
+      cleanupRealtimeSubscription();
+      setupRealtimeSubscription(activeGroup.id);
+    } else {
+      set({ connectionStatus: 'reconnecting' });
+    }
+    // Kick the outbox regardless of active group
+    if (typeof processOutbox === 'function') {
+      processOutbox().catch((e: any) => console.error('Outbox process error:', e));
+    }
+  },
   
   closeGroupDetailsPanel: () => {
     set({ showGroupDetailsPanel: false });

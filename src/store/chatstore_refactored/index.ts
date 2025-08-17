@@ -71,6 +71,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     isLoadingGroupDetails: false,
     uploadingFile: false,
     messageReactions: {},
+    reconnectAttempt: 0,
+    reconnectTimer: null,
+    isReconnecting: false,
 
     // Combine all actions
     ...stateActions,
