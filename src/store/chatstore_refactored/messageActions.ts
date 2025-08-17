@@ -3,6 +3,7 @@ import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
+import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
 
 export interface MessageActions {
@@ -11,17 +12,59 @@ export interface MessageActions {
 
 export const createMessageActions = (set: any, get: any): MessageActions => ({
   sendMessage: async (groupId: string, content: string, isGhost: boolean, messageType = 'text', category: string | null = null, parentId: string | null = null, _pollId: string | null = null, imageFile: File | null = null) => {
+    console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType, isOnline: 'checking...' });
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      // Check network status first
+      const networkStatus = await Network.getStatus();
+      const isOnline = networkStatus.connected;
+      console.log('🌐 Network status:', { isOnline, connectionType: networkStatus.connectionType });
 
       // Check if we're on a native platform with SQLite available
       const isNative = Capacitor.isNativePlatform();
       const isSqliteReady = isNative && await sqliteService.isReady();
 
-      // Check network status
-      const networkStatus = await Network.getStatus();
-      const isOnline = networkStatus.connected;
+      // Get user - handle offline case gracefully
+      console.log('🔐 Getting user authentication...');
+      let user;
+      
+      if (!isOnline) {
+        // When offline, get user from auth store (no network calls)
+        console.log('📵 Offline: Getting user from auth store');
+        try {
+          const authStore = useAuthStore.getState();
+          user = authStore.user;
+          console.log('📱 Got user from auth store:', !!user, user?.id);
+        } catch (error) {
+          console.log('❌ Failed to get user from auth store:', error instanceof Error ? error.message : String(error));
+          user = null;
+        }
+      } else {
+        // When online, try server auth first
+        try {
+          const { data: { user: authUser } } = await supabase.auth.getUser();
+          user = authUser;
+          console.log('✅ Got user from server:', !!user);
+        } catch (error) {
+          console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
+          // Fallback to local session even when online
+          try {
+            console.log('🔄 Falling back to local session...');
+            const session = await supabase.auth.getSession();
+            user = session.data.session?.user || null;
+            console.log('📱 Got user from local session fallback:', !!user);
+          } catch (sessionError) {
+            console.log('❌ Local session fallback failed:', sessionError instanceof Error ? sessionError.message : String(sessionError));
+            throw error; // Throw original error
+          }
+        }
+      }
+
+      if (!user) {
+        console.log('❌ No user found, throwing authentication error');
+        throw new Error('Not authenticated');
+      }
+      
+      console.log('✅ User authenticated, proceeding with message send');
 
       let imageUrl: string | null = null;
 
@@ -126,6 +169,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       };
 
       // Add optimistic message to UI
+      console.log('📤 Adding optimistic message to UI:', { messageId, content, parentId });
       if (parentId) {
         const state = get();
         const updatedMessages = state.messages.map((msg: Message) => {
@@ -139,102 +183,112 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           return msg;
         });
         set({ messages: updatedMessages });
+        console.log('📤 Added reply to parent message');
 
         if (state.activeThread?.id === parentId) {
           set({ threadReplies: [...state.threadReplies, optimisticMessage] });
         }
       } else {
         get().addMessage(optimisticMessage);
+        console.log('📤 Added new message to chat');
       }
 
       // Stop typing indicator
       get().sendTypingStatus(false, isGhost);
 
-      // If offline, save to local storage and outbox
-      if (!isOnline && isSqliteReady) {
-        try {
-          console.log('📵 Offline mode: Saving message to local storage and outbox');
+      // If offline, handle message appropriately
+      if (!isOnline) {
+        if (isSqliteReady) {
+          try {
+            console.log('📵 Offline mode: Saving message to local storage and outbox');
 
-          // Save message to local storage
-          await sqliteService.saveMessage({
-            id: messageId,
-            group_id: groupId,
-            user_id: user.id,
-            content,
-            is_ghost: isGhost ? 1 : 0,
-            message_type: messageType,
-            category: category || null,
-            parent_id: parentId || null,
-            image_url: imageUrl || null,
-            created_at: Date.now()
-          });
-
-          // Add to outbox for later sync
-          await sqliteService.addToOutbox({
-            group_id: groupId,
-            user_id: user.id,
-            content: JSON.stringify({
+            // Save message to local storage
+            await sqliteService.saveMessage({
               id: messageId,
+              group_id: groupId,
+              user_id: user.id,
               content,
-              is_ghost: isGhost,
+              is_ghost: isGhost ? 1 : 0,
+              message_type: messageType,
+              category: category || null,
+              parent_id: parentId || null,
+              image_url: imageUrl || null,
+              created_at: Date.now()
+            });
+
+            // Add to outbox for later sync
+            await sqliteService.addToOutbox({
+              group_id: groupId,
+              user_id: user.id,
+              content: JSON.stringify({
+                id: messageId,
+                content,
+                is_ghost: isGhost,
+                message_type: messageType,
+                category: category,
+                parent_id: parentId,
+                image_url: imageUrl
+              }),
+              retry_count: 0,
+              next_retry_at: Date.now() + 60000, // Try in 1 minute
               message_type: messageType,
               category: category,
               parent_id: parentId,
-              image_url: imageUrl
-            }),
-            retry_count: 0,
-            next_retry_at: Date.now() + 60000, // Try in 1 minute
-            message_type: messageType,
-            category: category,
-            parent_id: parentId,
-            image_url: imageUrl,
-            is_ghost: isGhost ? 1 : 0
-          });
-
-          // Update message status
-          const updatedMessage = { ...optimisticMessage, delivery_status: 'sent' as const };
-
-          if (parentId) {
-            const state = get();
-            const updatedMessages = state.messages.map((msg: Message) => {
-              if (msg.id === parentId) {
-                return {
-                  ...msg,
-                  replies: (msg.replies || []).map(reply =>
-                    reply.id === messageId ? updatedMessage : reply
-                  ),
-                  reply_count: (msg.reply_count || 0) + 1,
-                };
-              }
-              return msg;
+              image_url: imageUrl,
+              is_ghost: isGhost ? 1 : 0
             });
-            set({ messages: updatedMessages });
 
-            if (state.activeThread?.id === parentId) {
-              const updatedReplies = state.threadReplies.map((reply: Message) =>
-                reply.id === messageId ? updatedMessage : reply
-              );
-              set({ threadReplies: updatedReplies });
-            }
-          } else {
-            const state = get();
-            const updatedMessages = state.messages.map((msg: Message) =>
-              msg.id === messageId ? updatedMessage : msg
-            );
-            set({ messages: updatedMessages });
+            console.log('✅ Message saved to local storage and outbox');
+          } catch (error) {
+            console.error('❌ Error saving offline message:', error);
+            // Don't throw error, just log it and continue with optimistic UI update
           }
-
-          // Clear reply state if not in thread
-          if (!get().activeThread) {
-            set({ replyingTo: null });
-          }
-
-          console.log('✅ Message saved to local storage and outbox');
-          return;
-        } catch (error) {
-          console.error('❌ Error saving offline message:', error);
-          throw error;
+        } else {
+          console.log('📵 Offline mode: SQLite not available, showing optimistic message only');
         }
+
+        // Update message status - keep as 'sending' when offline to show clock icon
+        const updatedMessage = { 
+          ...optimisticMessage, 
+          delivery_status: 'sending' as const 
+        };
+
+        if (parentId) {
+          const state = get();
+          const updatedMessages = state.messages.map((msg: Message) => {
+            if (msg.id === parentId) {
+              return {
+                ...msg,
+                replies: (msg.replies || []).map(reply =>
+                  reply.id === messageId ? updatedMessage : reply
+                ),
+                reply_count: (msg.reply_count || 0) + 1,
+              };
+            }
+            return msg;
+          });
+          set({ messages: updatedMessages });
+
+          if (state.activeThread?.id === parentId) {
+            const updatedReplies = state.threadReplies.map((reply: Message) =>
+              reply.id === messageId ? updatedMessage : reply
+            );
+            set({ threadReplies: updatedReplies });
+          }
+        } else {
+          const state = get();
+          const updatedMessages = state.messages.map((msg: Message) =>
+            msg.id === messageId ? updatedMessage : msg
+          );
+          set({ messages: updatedMessages });
+        }
+
+        // Clear reply state if not in thread
+        if (!get().activeThread) {
+          set({ replyingTo: null });
+        }
+
+        return;
       }
 
       // If online, send to Supabase

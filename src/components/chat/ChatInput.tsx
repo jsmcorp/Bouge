@@ -175,20 +175,26 @@ export function ChatInput({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    console.log('📤 Send button clicked, processing message...', { message: message.trim(), activeGroup: !!activeGroup, isLoading, uploadingFile });
+    
     // Keep the keyboard open by ensuring the textarea retains focus immediately on submit
     if (textareaRef.current) {
       textareaRef.current.focus();
     }
-    if ((!message.trim() && !selectedImage) || !activeGroup || isLoading || uploadingFile) return;
+    if ((!message.trim() && !selectedImage) || !activeGroup || isLoading || uploadingFile) {
+      console.log('❌ Send blocked:', { hasMessage: !!message.trim(), hasImage: !!selectedImage, hasActiveGroup: !!activeGroup, isLoading, uploadingFile });
+      return;
+    }
 
     setIsLoading(true);
     handleTypingStop(); // Stop typing indicator immediately
     
+    const isGhost = messageType === 'confession' ? true : currentGhostMode;
+    const messageContent = selectedImage ? (message.trim() || 'Image') : message.trim();
+    
+    console.log('📤 About to send message:', { messageContent, isGhost, connectionStatus });
+    
     try {
-      const isGhost = messageType === 'confession' ? true : currentGhostMode;
-      
-      const messageContent = selectedImage ? (message.trim() || 'Image') : message.trim();
-      
       await sendMessage(
         activeGroup.id,
         messageContent,
@@ -200,6 +206,8 @@ export function ChatInput({
         selectedImage
       );
       
+      console.log('✅ Message sent successfully, clearing input');
+      // Clear input on successful send
       setMessage('');
       setMessageType('text');
       setCategory('');
@@ -210,7 +218,24 @@ export function ChatInput({
         textareaRef.current.focus();
       }
     } catch (error) {
-      toast.error('Failed to send message. Please try again.');
+      console.error('❌ Send message error:', error);
+      
+      // Always clear input since optimistic message should have been added
+      console.log('📝 Clearing input after error (optimistic message should be visible)');
+      setMessage('');
+      setMessageType('text');
+      setCategory('');
+      clearSelectedImage();
+      
+      // Focus back to textarea
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+      
+      // Only show error toast when online and there's a real error
+      if (connectionStatus !== 'disconnected') {
+        toast.error('Failed to send message. Please try again.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -510,10 +535,10 @@ export function ChatInput({
             onFocus={handleTextareaFocus}
             placeholder={getPlaceholderText()}
             className={`flex-1 min-h-0 ${isInThread ? 'h-7 sm:h-8' : 'h-8 sm:h-10'} py-1 sm:py-2 px-2 sm:px-4 rounded-3xl resize-none overflow-hidden ${isInThread ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none ${
-              connectionStatus !== 'connected' || uploadingFile ? 'opacity-75' : ''
+              uploadingFile ? 'opacity-75' : ''
             }`}
             maxLength={2000}
-            disabled={connectionStatus === 'disconnected' || uploadingFile}
+            disabled={uploadingFile}
             rows={1}
             style={{ height: 'auto' }}
           />
@@ -523,7 +548,7 @@ export function ChatInput({
             type="button"
             variant="ghost"
             onClick={handleImageButtonClick}
-            disabled={uploadingFile}
+            disabled={uploadingFile || connectionStatus === 'disconnected'}
             className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
           >
             <Image className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
@@ -532,8 +557,7 @@ export function ChatInput({
           {/* Send Button */}
           <Button
             type="submit"
-            onPointerDown={(e) => e.preventDefault()}
-            disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || connectionStatus === 'disconnected'}
+            disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || (connectionStatus === 'disconnected' && !!selectedImage)}
             className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full`}
           >
             <Send className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
