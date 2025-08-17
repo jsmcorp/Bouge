@@ -13,6 +13,8 @@ export interface FetchActions {
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
   preloadTopGroupMessages: () => Promise<void>;
+  // Delta sync: fetch only new messages since cursor
+  deltaSyncSince: (groupId: string, sinceIso: string) => Promise<void>;
 }
 
 export const createFetchActions = (set: any, get: any): FetchActions => ({
@@ -767,6 +769,55 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       await preloadingService.preloadTopGroups(groups);
     } catch (error) {
       console.error('🚀 Preloader: Error during preload:', error);
+    }
+  },
+
+  // Delta sync implementation
+  deltaSyncSince: async (groupId: string, sinceIso: string) => {
+    try {
+      // Fetch only messages created after the given ISO timestamp
+      const { data, error } = await supabase
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('group_id', groupId)
+        .gt('created_at', sinceIso)
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+
+      if (!data || data.length === 0) return;
+
+      const formatted = data.map((msg) => ({
+        ...msg,
+        author: msg.is_ghost ? undefined : msg.users,
+        reply_count: 0,
+        replies: [],
+        delivery_status: 'delivered' as const,
+      }));
+
+      // Merge into current state and update message cache
+      const existing = get().messages || [];
+      const merged = [...existing];
+      const seen = new Set(existing.map(m => m.id));
+      for (const m of formatted) {
+        if (!seen.has(m.id)) {
+          merged.push(m);
+          seen.add(m.id);
+        }
+      }
+      // Sort after merge
+      merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      set({ messages: merged });
+
+      try {
+        const { messageCache } = await import('@/lib/messageCache');
+        messageCache.setCachedMessages(groupId, merged);
+      } catch (e) {}
+    } catch (e) {
+      console.error('❌ Delta sync failed:', e);
     }
   },
 });

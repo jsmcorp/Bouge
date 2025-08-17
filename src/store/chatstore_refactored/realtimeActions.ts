@@ -36,6 +36,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
         },
       });
 
+      // Helper to record activity
+      const bumpActivity = () => set({ lastActivityAt: Date.now() });
+      // Add an explicit ping/pong listener layer using presence heartbeat
+      let lastPongAt = Date.now();
+      const markPong = () => { lastPongAt = Date.now(); };
+
       // Subscribe to message inserts
       channel
         .on(
@@ -47,6 +53,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
             filter: `group_id=eq.${groupId}`,
           },
           async (payload) => {
+            bumpActivity();
             console.log('📨 New message received:', payload.new);
 
             // Fetch the complete message with author info
@@ -185,6 +192,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
             table: 'polls',
           },
           async (payload) => {
+            bumpActivity();
             console.log('📊 New poll received:', payload.new);
 
             // Fetch complete poll data with vote counts
@@ -259,6 +267,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
             table: 'poll_votes',
           },
           async (payload) => {
+            bumpActivity();
             console.log('🗳️ New vote received:', payload.new);
 
             const vote = payload.new;
@@ -312,18 +321,25 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
           }
         )
         .on('presence', { event: 'sync' }, () => {
+          bumpActivity();
+          markPong();
           get().handlePresenceSync();
         })
         .on('presence', { event: 'join' }, ({ key, newPresences }) => {
+          bumpActivity();
+          markPong();
           console.log('👋 User joined:', key, newPresences);
           get().handlePresenceSync();
         })
         .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+          bumpActivity();
+          markPong();
           console.log('👋 User left:', key, leftPresences);
           get().handlePresenceSync();
         })
         .subscribe(async (status) => {
           console.log('📡 Subscription status:', status);
+          bumpActivity();
 
           if (status === 'SUBSCRIBED') {
             set({
@@ -344,8 +360,55 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               console.error('❌ Background refresh after subscribe failed:', e);
             }
 
-            // Reset reconnection tracking
-            set({ reconnectAttempt: 0, isReconnecting: false });
+            // Reset reconnection tracking and backoff on ONLINE
+            set({ reconnectAttempt: 0, isReconnecting: false, lastActivityAt: Date.now() });
+            // Clear any reconnect watchdog
+            const existingWatchdog = get().reconnectWatchdogTimer;
+            if (existingWatchdog) {
+              clearTimeout(existingWatchdog as any);
+              set({ reconnectWatchdogTimer: null });
+            }
+            // Start heartbeat + watchdog
+            const existingHeartbeat = get().heartbeatTimer;
+            if (existingHeartbeat) clearInterval(existingHeartbeat as any);
+            const hb = setInterval(() => {
+              try {
+                const { realtimeChannel, lastActivityAt, connectionStatus } = get();
+                if (!realtimeChannel) return;
+                // Heartbeat: use presence track as ping; server ignores if unchanged
+                realtimeChannel.track({ heartbeat: Date.now() });
+                // Expect a pong (presence event). If no pong for > 20s, force reconnect
+                const sincePongMs = Date.now() - lastPongAt;
+                if (sincePongMs > 20000) {
+                  console.warn('🛎️ Pong timeout: forcing reconnect');
+                  get().cleanupRealtimeSubscription();
+                  const attempt = get().reconnectAttempt || 0;
+                  const nextAttempt = Math.min(attempt + 1, 6);
+                  set({ reconnectAttempt: nextAttempt, connectionStatus: 'reconnecting' });
+                  get().setupRealtimeSubscription(groupId);
+                  return;
+                }
+                // Watchdog: if no activity for > 30s while connected, trigger reconnect
+                const idleMs = Date.now() - (lastActivityAt || 0);
+                if (connectionStatus === 'connected' && idleMs > 30000) {
+                  console.warn('🛟 Watchdog: idle too long, forcing reconnect');
+                  get().cleanupRealtimeSubscription();
+                  // Kick a guarded reconnect
+                  const attempt = get().reconnectAttempt || 0;
+                  const nextAttempt = Math.min(attempt + 1, 6);
+                  set({ reconnectAttempt: nextAttempt, connectionStatus: 'reconnecting' });
+                  get().setupRealtimeSubscription(groupId);
+                }
+              } catch (e) {
+                console.error('❌ Heartbeat error, forcing immediate reconnect:', e);
+                get().cleanupRealtimeSubscription();
+                const attempt = get().reconnectAttempt || 0;
+                const nextAttempt = Math.min(attempt + 1, 6);
+                set({ reconnectAttempt: nextAttempt, connectionStatus: 'reconnecting' });
+                get().setupRealtimeSubscription(groupId);
+              }
+            }, 10000); // heartbeat every 10s
+            set({ heartbeatTimer: hb });
           } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
             set({ connectionStatus: 'disconnected' });
             console.error('❌ Channel subscription error');
@@ -368,6 +431,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               get().setupRealtimeSubscription(groupId);
             }, delay);
             set({ reconnectTimer: timer });
+
+            // Reconnect watchdog: if still not connected after 45s, force full re-init
+            const existingWatchdog = get().reconnectWatchdogTimer;
+            if (existingWatchdog) clearTimeout(existingWatchdog as any);
+            const watchdog = setTimeout(() => {
+              const { connectionStatus } = get();
+              if (connectionStatus !== 'connected') {
+                console.warn('🛟 Reconnect watchdog fired: forcing full re-initialize');
+                get().cleanupRealtimeSubscription();
+                set({ reconnectAttempt: 0, connectionStatus: 'reconnecting' });
+                get().setupRealtimeSubscription(groupId);
+              }
+            }, 45000);
+            set({ reconnectWatchdogTimer: watchdog });
           } else if (status === 'TIMED_OUT') {
             // Show reconnecting banner and schedule a retry with backoff
             console.warn('⏰ Subscription timed out; scheduling reconnect with backoff');
@@ -389,6 +466,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               get().setupRealtimeSubscription(groupId);
             }, delay);
             set({ reconnectTimer: timer });
+
+            // Reconnect watchdog as above
+            const existingWatchdog = get().reconnectWatchdogTimer;
+            if (existingWatchdog) clearTimeout(existingWatchdog as any);
+            const watchdog = setTimeout(() => {
+              const { connectionStatus } = get();
+              if (connectionStatus !== 'connected') {
+                console.warn('🛟 Reconnect watchdog fired (timeout path): forcing re-init');
+                get().cleanupRealtimeSubscription();
+                set({ reconnectAttempt: 0, connectionStatus: 'reconnecting' });
+                get().setupRealtimeSubscription(groupId);
+              }
+            }, 45000);
+            set({ reconnectWatchdogTimer: watchdog });
           }
         });
 
@@ -399,7 +490,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
   },
 
   cleanupRealtimeSubscription: () => {
-    const { realtimeChannel, typingTimeout, reconnectTimer } = get();
+    const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer } = get();
 
     if (typingTimeout) {
       clearTimeout(typingTimeout);
@@ -420,6 +511,16 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       set({ reconnectTimer: null, isReconnecting: false });
+    }
+    // Clear heartbeat
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer as any);
+      set({ heartbeatTimer: null });
+    }
+    // Clear reconnect watchdog
+    if (reconnectWatchdogTimer) {
+      clearTimeout(reconnectWatchdogTimer as any);
+      set({ reconnectWatchdogTimer: null });
     }
   },
 

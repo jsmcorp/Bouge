@@ -131,6 +131,7 @@ export interface Database {
           category: string | null;
           parent_id: string | null;
           image_url: string | null;
+          dedupe_key: string | null;
           created_at: string;
         };
         Insert: {
@@ -143,6 +144,7 @@ export interface Database {
           category?: string | null;
           parent_id?: string | null;
           image_url?: string | null;
+          dedupe_key?: string | null;
           created_at?: string;
         };
         Update: {
@@ -155,6 +157,30 @@ export interface Database {
           category?: string | null;
           parent_id?: string | null;
           image_url?: string | null;
+          dedupe_key?: string | null;
+          created_at?: string;
+        };
+      };
+      message_receipts: {
+        Row: {
+          message_id: string;
+          user_id: string;
+          delivered_at: string | null;
+          read_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          message_id: string;
+          user_id: string;
+          delivered_at?: string | null;
+          read_at?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          message_id?: string;
+          user_id?: string;
+          delivered_at?: string | null;
+          read_at?: string | null;
           created_at?: string;
         };
       };

@@ -77,6 +77,8 @@ export interface Message {
   reply_count?: number;
   delivery_status?: 'sending' | 'sent' | 'delivered' | 'failed';
   poll?: Poll;
+  // Client idempotency key used for server upsert and ACK mapping
+  dedupe_key?: string | null;
 }
 
 export interface Reaction {
@@ -125,4 +127,8 @@ export interface ChatState {
   reconnectAttempt: number;
   reconnectTimer: NodeJS.Timeout | null;
   isReconnecting: boolean;
+  // Heartbeat/watchdog
+  heartbeatTimer: NodeJS.Timeout | null;
+  reconnectWatchdogTimer: NodeJS.Timeout | null;
+  lastActivityAt: number;
 }

@@ -143,11 +143,12 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       set({ reconnectTimer: null });
     }
     if (activeGroup?.id) {
-      set({ connectionStatus: 'reconnecting' });
+      // Reset backoff immediately on online
+      set({ connectionStatus: 'reconnecting', reconnectAttempt: 0 });
       cleanupRealtimeSubscription();
       setupRealtimeSubscription(activeGroup.id);
     } else {
-      set({ connectionStatus: 'reconnecting' });
+      set({ connectionStatus: 'reconnecting', reconnectAttempt: 0 });
     }
     // Kick the outbox regardless of active group
     if (typeof processOutbox === 'function') {

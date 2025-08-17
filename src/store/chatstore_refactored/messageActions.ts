@@ -144,10 +144,10 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         throw new Error('Cannot upload images when offline');
       }
 
-      // Generate a unique ID for the message (use temp- prefix for offline messages)
-      const messageId = isOnline ?
-        `${Date.now()}-${Math.random().toString(36).substring(2, 15)}` :
-        `temp-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+      // Generate client ids: client-visible temp id, plus dedupe_key for server idempotency
+      const clientMsgId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+      const messageId = isOnline ? clientMsgId : `temp-${clientMsgId}`;
+      const dedupeKey = `d:${user.id}:${groupId}:${clientMsgId}`;
 
       // Create optimistic message
       const optimisticMessage: Message = {
@@ -166,6 +166,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         replies: [],
         reactions: [],
         delivery_status: 'sending',
+        dedupe_key: dedupeKey,
       };
 
       // Add optimistic message to UI
@@ -196,47 +197,37 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       // Stop typing indicator
       get().sendTypingStatus(false, isGhost);
 
+      // Persist draft immediately for guaranteed recovery (even online, for durability)
+      try {
+        await get().markMessageAsDraft({
+          id: messageId,
+          group_id: groupId,
+          user_id: user.id,
+          content,
+          is_ghost: isGhost,
+          message_type: messageType,
+          category: category || null,
+          parent_id: parentId || null,
+          image_url: imageUrl || null,
+          created_at: Date.now()
+        });
+      } catch (_) {}
+
       // If offline, handle message appropriately
       if (!isOnline) {
         if (isSqliteReady) {
           try {
-            console.log('📵 Offline mode: Saving message to local storage and outbox');
-
-            // Save message to local storage
-            await sqliteService.saveMessage({
+            console.log('📵 Offline mode: Enqueueing message to outbox');
+            await get().enqueueOutbox({
               id: messageId,
               group_id: groupId,
               user_id: user.id,
               content,
-              is_ghost: isGhost ? 1 : 0,
+              is_ghost: isGhost,
               message_type: messageType,
               category: category || null,
               parent_id: parentId || null,
-              image_url: imageUrl || null,
-              created_at: Date.now()
-            });
-
-            // Add to outbox for later sync
-            await sqliteService.addToOutbox({
-              group_id: groupId,
-              user_id: user.id,
-              content: JSON.stringify({
-                id: messageId,
-                content,
-                is_ghost: isGhost,
-                message_type: messageType,
-                category: category,
-                parent_id: parentId,
-                image_url: imageUrl
-              }),
-              retry_count: 0,
-              // Process immediately on reconnect; backoff will be applied only on failures
-              next_retry_at: Date.now(),
-              message_type: messageType,
-              category: category,
-              parent_id: parentId,
-              image_url: imageUrl,
-              is_ghost: isGhost ? 1 : 0
+              image_url: imageUrl || null
             });
 
             console.log('✅ Message saved to local storage and outbox');
@@ -292,10 +283,10 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         return;
       }
 
-      // If online, send to Supabase
+      // If online, send to Supabase with idempotent upsert using dedupe_key
       const { data, error } = await supabase
         .from('messages')
-        .insert({
+        .upsert({
           group_id: groupId,
           user_id: user.id,
           content,
@@ -304,7 +295,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           category,
           parent_id: parentId,
           image_url: imageUrl,
-        })
+          dedupe_key: dedupeKey,
+        }, { onConflict: 'dedupe_key' })
         .select(`
           *,
           reactions(*),

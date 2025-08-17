@@ -13,6 +13,16 @@ export interface OfflineActions {
   stopOutboxProcessor: () => void;
   syncMessageRelatedData: (groupId: string, messages: any[]) => Promise<void>;
   forceMessageSync: (groupId: string) => Promise<void>;
+  // New lifecycle helpers for guaranteed delivery
+  markMessageAsDraft: (msg: {
+    id: string; group_id: string; user_id: string; content: string; is_ghost: boolean;
+    message_type: string; category: string | null; parent_id: string | null;
+    image_url: string | null; created_at: number;
+  }) => Promise<void>;
+  enqueueOutbox: (msg: {
+    id: string; group_id: string; user_id: string; content: string; is_ghost: boolean;
+    message_type: string; category: string | null; parent_id: string | null; image_url: string | null;
+  }) => Promise<void>;
 }
 
 // 🔁 Helpers to remove duplicate code
@@ -39,6 +49,59 @@ async function saveUserFromSupabase(user: any) {
 }
 
 export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
+  // Draft stage: persist local message immediately for guaranteed recovery
+  markMessageAsDraft: async (msg) => {
+    try {
+      const isNative = Capacitor.isNativePlatform();
+      const ready = isNative && await sqliteService.isReady();
+      if (!ready) return;
+      await sqliteService.saveMessage({
+        id: msg.id,
+        group_id: msg.group_id,
+        user_id: msg.user_id,
+        content: msg.content,
+        is_ghost: msg.is_ghost ? 1 : 0,
+        message_type: msg.message_type,
+        category: msg.category || null,
+        parent_id: msg.parent_id || null,
+        image_url: msg.image_url || null,
+        created_at: msg.created_at
+      });
+    } catch (e) {
+      console.error('❌ markMessageAsDraft failed:', e);
+    }
+  },
+
+  // Outbox stage: persist retry metadata so retries survive restarts
+  enqueueOutbox: async (msg) => {
+    try {
+      const isNative = Capacitor.isNativePlatform();
+      const ready = isNative && await sqliteService.isReady();
+      if (!ready) return;
+      await sqliteService.addToOutbox({
+        group_id: msg.group_id,
+        user_id: msg.user_id,
+        content: JSON.stringify({
+          id: msg.id,
+          content: msg.content,
+          is_ghost: msg.is_ghost,
+          message_type: msg.message_type,
+          category: msg.category,
+          parent_id: msg.parent_id,
+          image_url: msg.image_url
+        }),
+        retry_count: 0,
+        next_retry_at: Date.now(),
+        message_type: msg.message_type,
+        category: msg.category,
+        parent_id: msg.parent_id,
+        image_url: msg.image_url,
+        is_ghost: msg.is_ghost ? 1 : 0
+      });
+    } catch (e) {
+      console.error('❌ enqueueOutbox failed:', e);
+    }
+  },
   processOutbox: async () => {
     try {
       if (isProcessingOutbox) {

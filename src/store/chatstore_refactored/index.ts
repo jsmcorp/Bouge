@@ -74,6 +74,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     reconnectAttempt: 0,
     reconnectTimer: null,
     isReconnecting: false,
+    heartbeatTimer: null,
+    reconnectWatchdogTimer: null,
+    lastActivityAt: Date.now(),
 
     // Combine all actions
     ...stateActions,
