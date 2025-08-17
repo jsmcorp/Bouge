@@ -4,6 +4,9 @@ import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
 
+// Concurrency guard to prevent duplicate processing runs
+let isProcessingOutbox = false;
+
 export interface OfflineActions {
   processOutbox: () => Promise<void>;
   setupNetworkListener: () => void;
@@ -40,6 +43,11 @@ async function saveUserFromSupabase(user: any) {
 export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
   processOutbox: async () => {
     try {
+      if (isProcessingOutbox) {
+        console.log('⏳ Outbox processing already in progress; skipping concurrent run');
+        return;
+      }
+      isProcessingOutbox = true;
       if (!await checkSqliteReady()) return;
       if (!await checkOnline()) {
         console.log('📵 Cannot process outbox while offline');
@@ -107,7 +115,12 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
                   ...msg,
                   replies: (msg.replies || []).map((reply: any) =>
                     reply.id === messageData.id 
-                      ? { ...reply, delivery_status: 'sent', id: data.id }
+                      ? { 
+                          ...reply, 
+                          delivery_status: 'delivered', 
+                          id: data.id,
+                          created_at: data.created_at
+                        }
                       : reply
                   ),
                 };
@@ -119,15 +132,16 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
             if (state.activeThread?.id === messageData.parent_id) {
               const updatedReplies = state.threadReplies.map((reply: any) =>
                 reply.id === messageData.id 
-                  ? { ...reply, delivery_status: 'sent', id: data.id }
+                  ? { ...reply, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
                   : reply
               );
               _set({ threadReplies: updatedReplies });
             }
           } else {
+            // Update the optimistic message to the real ID and delivered status
             const updatedMessages = state.messages.map((msg: any) =>
               msg.id === messageData.id 
-                ? { ...msg, delivery_status: 'sent', id: data.id }
+                ? { ...msg, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
                 : msg
             );
             _set({ messages: updatedMessages });
@@ -169,6 +183,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       }
     } catch (error) {
       console.error('❌ Error processing outbox:', error);
+    } finally {
+      isProcessingOutbox = false;
     }
   },
 

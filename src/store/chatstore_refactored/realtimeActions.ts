@@ -22,7 +22,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
 
       set({ connectionStatus: 'connecting' });
 
-      // Create new channel for this group
+      // Create new channel for this group (unique name per group)
       const channel = supabase.channel(`group-${groupId}`, {
         config: {
           presence: {
@@ -326,7 +326,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => ({
               realtimeChannel: channel
             });
             console.log('✅ Successfully subscribed to realtime updates');
-          } else if (status === 'CHANNEL_ERROR') {
+            
+            // To prevent duplicate banners, collapse any transient reconnecting state here
+            // and perform a single light refresh
+            try {
+              // Kick a quick background refresh to ensure any messages sent while reconnecting update ticks
+              const { fetchMessages } = get();
+              if (typeof fetchMessages === 'function') {
+                fetchMessages(groupId);
+              }
+            } catch (e) {
+              console.error('❌ Background refresh after subscribe failed:', e);
+            }
+          } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
             set({ connectionStatus: 'disconnected' });
             console.error('❌ Channel subscription error');
 

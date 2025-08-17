@@ -43,7 +43,10 @@ function AppContent() {
     setOnlineStatus, 
     startOutboxProcessor, 
     stopOutboxProcessor,
-    setupRealtimeSubscription
+    setupRealtimeSubscription,
+    setConnectionStatus,
+    processOutbox,
+    cleanupRealtimeSubscription
   } = useChatStore();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -142,11 +145,40 @@ function AppContent() {
             const status = await Network.getStatus();
             setOnlineStatus(status.connected);
             console.log('🌐 Initial network status:', status.connected ? 'online' : 'offline');
+
+            // Reflect connection banner and realtime on initial state
+            const currentActiveGroup = useChatStore.getState().activeGroup;
+            if (status.connected) {
+              setConnectionStatus('connecting');
+              if (currentActiveGroup) {
+                setupRealtimeSubscription(currentActiveGroup.id);
+              }
+            } else {
+              setConnectionStatus('disconnected');
+              cleanupRealtimeSubscription();
+            }
             
+            // Ensure a single network listener (remove older listeners first)
+            Network.removeAllListeners();
+
             // Listen for network status changes
-            Network.addListener('networkStatusChange', (status) => {
+            Network.addListener('networkStatusChange', async (status) => {
               console.log('🌐 Network status changed:', status.connected ? 'online' : 'offline');
               setOnlineStatus(status.connected);
+              const activeGroup = useChatStore.getState().activeGroup;
+              if (status.connected) {
+                setConnectionStatus('reconnecting');
+                if (activeGroup) {
+                  // Avoid duplicate subscriptions by cleaning up first
+                  cleanupRealtimeSubscription();
+                  await setupRealtimeSubscription(activeGroup.id);
+                }
+                // Immediately process any queued messages
+                try { await processOutbox(); } catch (e) { console.error('Outbox process error:', e); }
+              } else {
+                setConnectionStatus('disconnected');
+                cleanupRealtimeSubscription();
+              }
             });
           } catch (error) {
             console.error('❌ Network status setup failed:', error);

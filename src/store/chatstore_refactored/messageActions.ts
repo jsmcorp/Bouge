@@ -230,7 +230,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
                 image_url: imageUrl
               }),
               retry_count: 0,
-              next_retry_at: Date.now() + 60000, // Try in 1 minute
+              // Process immediately on reconnect; backoff will be applied only on failures
+              next_retry_at: Date.now(),
               message_type: messageType,
               category: category,
               parent_id: parentId,
