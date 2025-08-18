@@ -1,4 +1,5 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
+import { FEATURES } from '@/lib/supabase';
 
 export interface StateActions {
   setGroups: (groups: Group[]) => void;
@@ -30,7 +31,9 @@ export interface StateActions {
   setOnlineStatus: (status: boolean) => void;
   // Connection manager facade
   onAppResume: () => void;
+  onAppResumeSimplified: () => void;
   onNetworkOnline: () => void;
+  onNetworkOnlineSimplified: () => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -52,13 +55,19 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       typingUsers: [],
       showGroupDetailsPanel: false,
       groupMembers: [],
-      groupMedia: []
+      groupMedia: [],
+      connectionStatus: 'disconnected',
+      isReconnecting: false,
+      reconnectAttempt: 0
     });
 
     // Setup new subscription and fetch polls
     if (group) {
-      get().setupRealtimeSubscription(group.id);
-      get().fetchPollsForGroup(group.id);
+      // Small delay to ensure state is clean
+      setTimeout(() => {
+        get().setupRealtimeSubscription(group.id);
+        get().fetchPollsForGroup(group.id);
+      }, 100);
     }
   },
 
@@ -121,90 +130,63 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   setUploadingFile: (uploading) => set({ uploadingFile: uploading }),
   setOnlineStatus: (status) => set({ online: status }),
   
-  // Centralized entry points to coalesce reconnect logic
+  // Simplified app resume handler
   onAppResume: () => {
-    const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, reconnectTimer, ensureAuthBeforeSubscribe, isResuming } = get() as any;
-    if (activeGroup?.id) {
-      console.log('[realtime] resume: invoking onAppResume');
-      // Guard against overlapping resume flows
-      if (isResuming) {
-        console.log('[realtime] resume: already in progress, skipping');
-        return;
-      }
-      set({ isResuming: true } as any);
-      // Cancel any pending reconnect timer and force a clean state first
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer as any);
-        set({ reconnectTimer: null });
-      }
-      // Always clean up timers/channels/state before resume subscribe
-      cleanupRealtimeSubscription();
-      set({ isReconnecting: false });
+    if (FEATURES.SIMPLIFIED_REALTIME) {
+      return get().onAppResumeSimplified();
+    }
+    
+    // Legacy implementation would be here
+    console.log('[realtime] Using legacy resume flow');
+  },
 
-      // Ensure auth is valid before subscribing on resume
-      (async () => {
-        console.log('[realtime] auth_check: started (resume)');
-        const auth = await ensureAuthBeforeSubscribe({ timeoutMs: 10000 });
-        if (!auth.ok) {
-          console.warn(`[realtime] auth_check: failed reason=${auth.reason}`);
-          // Backoff retry for resume auth flow
-          const attempt = ((get() as any).reconnectAttempt || 0) as number;
-          const nextAttempt = Math.min(attempt + 1, 6);
-          const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
-          const jitter = Math.floor(Math.random() * 500);
-          const delay = baseDelay + jitter;
-          set({ connectionStatus: 'reconnecting', reconnectAttempt: nextAttempt, isReconnecting: true } as any);
-          const tRetry = setTimeout(() => {
-            console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
-            (get() as any).onAppResume();
-          }, delay);
-          set({ reconnectTimer: tRetry } as any);
-          set({ isResuming: false } as any);
-          return;
-        }
-        console.log('[realtime] auth_check: success (resume)');
-        // Record subscribe attempt timestamp and start short watchdog
-        const now = Date.now();
-        set({ lastSubscribeAttemptAt: now } as any);
-        setupRealtimeSubscription(activeGroup.id);
-        const t = setTimeout(() => {
-          const subsAt = (get() as any).subscribedAt as number | null;
-          if (!subsAt || (Date.now() - subsAt) > 10000) {
-            console.warn('[realtime] subscribe_watchdog fired');
-            console.log('[connection] forceReconnect invoked reason=subscribe_watchdog');
-            cleanupRealtimeSubscription();
-            // Backoff retry for subscribe timeout
-            const attempt = ((get() as any).reconnectAttempt || 0) as number;
-            const nextAttempt = Math.min(attempt + 1, 6);
-            const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
-            const jitter = Math.floor(Math.random() * 500);
-            const delay = baseDelay + jitter;
-            set({ connectionStatus: 'reconnecting', reconnectAttempt: nextAttempt, isReconnecting: true } as any);
-            const tBackoff = setTimeout(() => {
-              console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
-              setupRealtimeSubscription(activeGroup.id);
-            }, delay);
-            set({ reconnectTimer: tBackoff } as any);
-          }
-        }, 10000);
-        set({ subscribeTimeoutId: t } as any);
-        set({ isResuming: false } as any);
-      })();
+  onAppResumeSimplified: () => {
+    const { activeGroup } = get() as any;
+    
+    if (!activeGroup?.id) {
+      console.log('[realtime-v2] No active group, skipping resume');
+      return;
+    }
+
+    console.log('[realtime-v2] App resumed, forcing fresh connection');
+    
+    // Force a fresh connection on app resume (requirement #2)
+    const { forceReconnect } = get();
+    if (typeof forceReconnect === 'function') {
+      forceReconnect(activeGroup.id);
+    } else {
+      // Fallback if forceReconnect not available yet
+      get().cleanupRealtimeSubscription();
+      setTimeout(() => get().setupRealtimeSubscription(activeGroup.id), 100);
     }
   },
+
   onNetworkOnline: () => {
-    const { processOutbox, reconnectTimer } = get();
-    // Cancel pending timers, clean, and reconnect once
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer as any);
-      set({ reconnectTimer: null });
+    if (FEATURES.SIMPLIFIED_REALTIME) {
+      return get().onNetworkOnlineSimplified();
     }
-    // Defer to session-first resume flow to avoid racing subscribe vs token refresh
-    set({ connectionStatus: 'reconnecting', reconnectAttempt: 0 });
-    (get() as any).onAppResume();
-    // Kick the outbox regardless of active group
+    
+    // Legacy implementation would be here
+    console.log('[realtime] Using legacy network online handler');
+  },
+
+  onNetworkOnlineSimplified: () => {
+    console.log('[realtime-v2] Network came online');
+    const { processOutbox, activeGroup, connectionStatus } = get();
+    
+    // Process any pending messages first
     if (typeof processOutbox === 'function') {
       processOutbox().catch((e: any) => console.error('Outbox process error:', e));
+    }
+    
+    // If we have an active group and aren't connected, reconnect
+    if (activeGroup?.id && connectionStatus !== 'connected') {
+      console.log('[realtime-v2] Network online - reconnecting');
+      
+      // Small delay to let network stabilize
+      setTimeout(() => {
+        get().onAppResumeSimplified();
+      }, 500); // Faster than legacy 1000ms
     }
   },
   

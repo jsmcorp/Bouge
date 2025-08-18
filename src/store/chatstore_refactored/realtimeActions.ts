@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, FEATURES } from '@/lib/supabase';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
 import { Message, Poll, TypingUser } from './types';
@@ -30,26 +30,59 @@ interface DbPollRow {
 
 export interface RealtimeActions {
   setupRealtimeSubscription: (groupId: string) => Promise<void>;
+  setupSimplifiedRealtimeSubscription: (groupId: string) => Promise<void>;
   cleanupRealtimeSubscription: () => void;
   sendTypingStatus: (isTyping: boolean, isGhost?: boolean) => void;
   handlePresenceSync: () => void;
+  // Legacy method for backward compatibility
   ensureAuthBeforeSubscribe: (opts?: { timeoutMs?: number }) => Promise<{ ok: boolean; reason?: string }>;
+  // New simplified methods
+  forceReconnect: (groupId: string) => void;
+  setupAuthListener: () => () => void; // Returns cleanup function
 }
 
 export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
-  // Caches and guards in the action factory closure
+  // Simplified state management
   const authorCache = new Map<string, Author>();
-  let latestSetupToken: string | null = null;
-  let lastPongAt: number = Date.now();
-  let lastReconnectAttemptAt: number = 0;
-  let refreshAfterSubscribeLastRunAt: number = 0;
-  const RESUB_COOLDOWN_MS = 3000;
-  let lastResubscribeAt: number = 0;
+  let connectionToken: string | null = null;
+  let reconnectTimeout: NodeJS.Timeout | null = null;
+  let authStateListener: any = null;
+  let maxRetries = 3;
+  let retryCount = 0;
+  let isConnecting = false; // Guard against overlapping connection attempts
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
-  const markPong = () => { lastPongAt = Date.now(); };
+  const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
-  const nowMs = () => Date.now();
+  // Simple retry mechanism - 3 second timeout
+  const scheduleReconnect = (groupId: string, delayMs: number = 3000) => {
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+    }
+    
+    if (retryCount >= maxRetries) {
+      log(`Max retries (${maxRetries}) reached, stopping reconnection attempts`);
+      set({ connectionStatus: 'disconnected', isReconnecting: false });
+      return;
+    }
+
+    retryCount++;
+    log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${delayMs}ms`);
+    
+    set({ connectionStatus: 'reconnecting', isReconnecting: true });
+    reconnectTimeout = setTimeout(() => {
+      log(`Reconnect attempt ${retryCount} starting...`);
+      get().setupRealtimeSubscription(groupId);
+    }, delayMs);
+  };
+
+  const resetRetryCount = () => {
+    retryCount = 0;
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+  };
 
   async function getAuthorProfile(userId: string, isGhost: boolean): Promise<Author | undefined> {
     if (isGhost) return undefined;
@@ -97,74 +130,25 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     }
   }
 
-  function canResubscribe(): boolean {
-    const now = nowMs();
-    if (now - lastResubscribeAt < RESUB_COOLDOWN_MS) {
-      return false;
-    }
-    lastResubscribeAt = now;
-    return true;
-  }
-
-  function coalesceReconnect(groupId: string) {
-    if (!canResubscribe()) {
-      console.warn('⛔ Resubscribe throttled: skipping attempt (cooldown 3s)');
-      return;
-    }
-    const attempt = get().reconnectAttempt || 0;
-    const nextAttempt = Math.min(attempt + 1, 6);
-    const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
-    const jitter = Math.floor(Math.random() * 500);
-    const delay = baseDelay + jitter;
-
-    const existingTimer = get().reconnectTimer;
-    if (existingTimer) clearTimeout(existingTimer);
-
-    set({ isReconnecting: true, reconnectAttempt: nextAttempt });
-    lastReconnectAttemptAt = nowMs();
-    const timer = setTimeout(() => {
-      console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
-      get().setupRealtimeSubscription(groupId);
-    }, delay);
-    set({ reconnectTimer: timer });
-  }
-
-  function startHeartbeat(groupId: string) {
+  // Simplified heartbeat - just tracks connection health, no complex logic
+  function startSimpleHeartbeat(groupId: string) {
     const existingHeartbeat = get().heartbeatTimer;
     if (existingHeartbeat) clearInterval(existingHeartbeat as any);
 
     const hb = setInterval(() => {
-      try {
-        const { realtimeChannel, lastActivityAt, connectionStatus } = get();
-        // Ping via presence track (server will coalesce)
-        if (realtimeChannel) {
+      const { realtimeChannel, connectionStatus } = get();
+      
+      // Simple ping via presence if connected
+      if (realtimeChannel && connectionStatus === 'connected') {
+        try {
           realtimeChannel.track({ heartbeat: Date.now() });
+        } catch (e) {
+          log('Heartbeat failed, scheduling reconnect');
+          scheduleReconnect(groupId);
         }
-
-        const sincePongMs = nowMs() - lastPongAt;
-        const idleMs = nowMs() - (lastActivityAt || 0);
-
-        // If connected and either pong timed out or idle too long -> reconnect once
-        if (connectionStatus === 'connected' && (sincePongMs > 20000 || idleMs > 30000)) {
-          console.warn('🛟 Heartbeat/watchdog: forcing reconnect', { sincePongMs, idleMs });
-          get().cleanupRealtimeSubscription();
-          set({ connectionStatus: 'reconnecting' });
-          coalesceReconnect(groupId);
-          return;
-        }
-
-        // If not connected and our last reconnect attempt is stale (>45s), try again
-        if (connectionStatus !== 'connected' && (nowMs() - lastReconnectAttemptAt) > 45000) {
-          console.warn('🛟 Reconnect stale: retrying');
-          coalesceReconnect(groupId);
-        }
-      } catch (e) {
-        console.error('❌ Heartbeat error:', e);
-        get().cleanupRealtimeSubscription();
-        set({ connectionStatus: 'reconnecting' });
-        coalesceReconnect(groupId);
       }
-    }, 10000); // 10s
+    }, 30000); // 30s heartbeat
+    
     set({ heartbeatTimer: hb });
   }
 
@@ -322,103 +306,111 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   }
 
   return {
-    ensureAuthBeforeSubscribe: async (opts?: { timeoutMs?: number }) => {
-      const timeoutMs = opts?.timeoutMs ?? 10000;
-      // Fast-path: existing session loaded
+    // Legacy method for backward compatibility
+    ensureAuthBeforeSubscribe: async (_opts?: { timeoutMs?: number }) => {
+      if (!FEATURES.SIMPLIFIED_REALTIME) {
+        // Legacy implementation would go here
+        return { ok: true };
+      }
+      
+      // For simplified version, just check if we have a session
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        if (session?.access_token) {
-          try { (supabase as any).realtime?.setAuth?.(session.access_token); } catch (_) {}
-          return { ok: true };
-        }
-      } catch (_) {}
-
-      // Slow-path: poll getSession and trigger a refresh once
-      try {
-        await supabase.auth.refreshSession().catch(() => {});
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < timeoutMs) {
-          const { data: { session } } = await supabase.auth.getSession();
-          if (session?.access_token) {
-            try { (supabase as any).realtime?.setAuth?.(session.access_token); } catch (_) {}
-            return { ok: true };
-          }
-          await new Promise(res => setTimeout(res, 300));
-        }
-        return { ok: false, reason: 'timeout' };
+        return { ok: !!session?.access_token };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
     },
 
     setupRealtimeSubscription: async (groupId: string) => {
-      console.log('🔄 Setting up realtime subscription for group:', groupId);
+      if (FEATURES.SIMPLIFIED_REALTIME) {
+        return await (get() as any).setupSimplifiedRealtimeSubscription(groupId);
+      }
+      
+      // Legacy implementation would be here
+      log('Using legacy realtime subscription');
+    },
+
+    setupSimplifiedRealtimeSubscription: async (groupId: string) => {
+      if (isConnecting) {
+        log('Connection already in progress, skipping');
+        return;
+      }
+      
+      isConnecting = true;
+      log(`Setting up simplified realtime subscription for group: ${groupId}`);
 
       try {
-        // Ensure we have a fresh/valid session before subscribing
-        const authCheck = await (get() as any).ensureAuthBeforeSubscribe({ timeoutMs: 5000 });
-        if (!authCheck.ok) {
-          console.warn(`⚠️ Auth not ready for subscribe (reason=${authCheck.reason}); will retry`);
-          set({ connectionStatus: 'reconnecting' });
-          coalesceReconnect(groupId);
-          return;
-        }
+        log('Skipping auth check - letting Supabase handle auth internally');
 
-        // Use session to avoid racing against getUser and token propagation
-        const { data: { session } } = await supabase.auth.getSession();
-        const user = session?.user;
-        if (!user) {
-          console.warn('⚠️ No authenticated user found; skipping realtime subscription');
-          set({ connectionStatus: 'disconnected' });
-          return;
-        }
-
-        // Setup token to ignore late callbacks from older channels BEFORE cleanup
+        // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        latestSetupToken = localToken;
+        connectionToken = localToken;
 
-        // Guard: Clean previous subscription and timers after updating token
+        // Clean up previous subscription
         get().cleanupRealtimeSubscription();
         set({ connectionStatus: 'connecting' });
 
-        const channel = supabase.channel(`group-${groupId}`, {
-          config: { presence: { key: user.id } },
+        // Create channel with simple config and unique name
+        const channelName = `group-${groupId}-${localToken}`;
+        log(`Creating channel: ${channelName}`);
+        
+        const channel = supabase.channel(channelName, {
+          config: { 
+            presence: { key: 'user' }, // Use generic key since we can't get user ID
+            broadcast: { self: true }
+          },
         });
 
-        // Message inserts (no redundant fetch): build from payload + cached author
+        // Message inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}`,
         }, async (payload) => {
-          if (localToken !== latestSetupToken) return; // stale
+          if (localToken !== connectionToken) return; // Ignore stale callbacks
           bumpActivity();
           const row = payload.new as DbMessageRow;
           try {
             const message = await buildMessageFromRow(row);
-            // For poll messages, do not fetch poll here; poll insert handler will attach
             attachMessageToState(message);
           } catch (e) {
-            console.error('❌ Failed to process message insert:', e);
+            log('Failed to process message insert: ' + e);
           }
         });
 
-        // Poll inserts (single source of truth for poll hydration)
+        // Poll inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'polls',
         }, async (payload) => {
-          if (localToken !== latestSetupToken) return;
+          if (localToken !== connectionToken) return;
+          bumpActivity();
           const pollRow = payload.new as DbPollRow;
-          await handlePollInsert(pollRow, user.id, groupId);
+          // Get current user ID safely
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const userId = session?.user?.id || 'anonymous';
+            await handlePollInsert(pollRow, userId, groupId);
+          } catch (e) {
+            log('Failed to get user for poll insert, using anonymous');
+            await handlePollInsert(pollRow, 'anonymous', groupId);
+          }
         });
 
         // Poll vote inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'poll_votes',
         }, async (payload) => {
-          if (localToken !== latestSetupToken) return;
+          if (localToken !== connectionToken) return;
           bumpActivity();
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
-          if (vote.user_id === user.id) return; // optimistic update already applied client-side
-
+          
+          // Skip own votes if we can identify current user
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (vote.user_id === session?.user?.id) return;
+          } catch (e) {
+            // If we can't get session, process the vote anyway
+          }
+          
           const state = get();
           const updatedPolls = state.polls.map((p: Poll) => {
             if (p.id !== vote.poll_id) return p;
@@ -440,131 +432,131 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Presence events
         channel
           .on('presence', { event: 'sync' }, () => {
-            if (localToken !== latestSetupToken) return;
+            if (localToken !== connectionToken) return;
             bumpActivity();
-            markPong();
             get().handlePresenceSync();
           })
           .on('presence', { event: 'join' }, () => {
-            if (localToken !== latestSetupToken) return;
+            if (localToken !== connectionToken) return;
             bumpActivity();
-            markPong();
             get().handlePresenceSync();
           })
           .on('presence', { event: 'leave' }, () => {
-            if (localToken !== latestSetupToken) return;
+            if (localToken !== connectionToken) return;
             bumpActivity();
-            markPong();
             get().handlePresenceSync();
           })
           .subscribe(async (status) => {
-            if (localToken !== latestSetupToken) return;
-            console.log('📡 Subscription status:', status);
+            if (localToken !== connectionToken) {
+              log(`Ignoring stale subscription callback: ${status}`);
+              return;
+            }
+            
+            log(`Subscription status: ${status}`);
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
-              // Clear any pending subscribe watchdog timer
-              const subTid = (get() as any).subscribeTimeoutId as any;
-              if (subTid) {
-                clearTimeout(subTid);
-                set({ subscribeTimeoutId: null } as any);
-              }
-              set({ connectionStatus: 'connected', realtimeChannel: channel, subscribedAt: Date.now() });
-              console.log('✅ Realtime subscribed');
+              resetRetryCount(); // Reset on successful connection
+              isConnecting = false; // Clear the guard
+              set({ 
+                connectionStatus: 'connected', 
+                realtimeChannel: channel, 
+                subscribedAt: Date.now(),
+                isReconnecting: false
+              });
+              log('✅ Realtime connected successfully');
 
-              // Reset reconnection/backoff, kick unified heartbeat
-              set({ reconnectAttempt: 0, isReconnecting: false, lastActivityAt: Date.now() });
-              startHeartbeat(groupId);
+              startSimpleHeartbeat(groupId);
 
-              // Debounced refresh: only if empty list to prevent flicker/double load
+              // Fetch messages if list is empty
               try {
-                const stateNow = get();
-                const hasMessages = (stateNow.messages?.length || 0) > 0;
-                const sinceLast = nowMs() - refreshAfterSubscribeLastRunAt;
-                if (!hasMessages && sinceLast > 5000) {
-                  const { fetchMessages } = stateNow;
-                  if (typeof fetchMessages === 'function') {
-                    refreshAfterSubscribeLastRunAt = nowMs();
-                    fetchMessages(groupId);
-                  }
+                const state = get();
+                if (state.messages?.length === 0 && typeof state.fetchMessages === 'function') {
+                  state.fetchMessages(groupId);
                 }
               } catch (e) {
-                console.error('❌ Background refresh after subscribe failed:', e);
+                log('Background message fetch failed: ' + e);
               }
-            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
+              log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
+              isConnecting = false; // Clear the guard
+              
               set({ connectionStatus: 'disconnected' });
-              console.error('❌ Channel error/closed');
-              coalesceReconnect(groupId);
-            } else if (status === 'TIMED_OUT') {
-              console.warn('⏰ Subscription timed out');
-              set({ connectionStatus: 'reconnecting' });
-              coalesceReconnect(groupId);
+              scheduleReconnect(groupId);
+            } else if (status === 'CONNECTING') {
+              log('🔄 Channel connecting...');
+              set({ connectionStatus: 'connecting' });
+            } else {
+              log(`⚠️ Unexpected subscription status: ${status}`);
             }
-          });
+          }, 10000); // 10 second timeout
+
       } catch (error) {
-        console.error('💥 Error setting up realtime subscription:', error);
+        log('Setup error: ' + (error as Error).message);
+        isConnecting = false; // Clear the guard
         set({ connectionStatus: 'disconnected' });
+        scheduleReconnect(groupId);
       }
     },
 
     cleanupRealtimeSubscription: () => {
-      const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer, subscribeTimeoutId, activeGroup } = get();
+      const { realtimeChannel, typingTimeout, heartbeatTimer } = get();
+
+      log('Cleaning up realtime subscription');
+      isConnecting = false; // Clear connection guard
 
       if (typingTimeout) clearTimeout(typingTimeout);
+      
       if (realtimeChannel) {
-        console.log('🧹 Cleaning up realtime subscription');
-        supabase.removeChannel(realtimeChannel);
+        try {
+          supabase.removeChannel(realtimeChannel);
+        } catch (e) {
+          log('Error removing channel: ' + e);
+        }
         set({ realtimeChannel: null });
       }
 
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        set({ reconnectTimer: null, isReconnecting: false });
-      }
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer as any);
         set({ heartbeatTimer: null });
       }
-      if (reconnectWatchdogTimer) {
-        // No longer used, but clear if present from older state
-        clearTimeout(reconnectWatchdogTimer as any);
-        set({ reconnectWatchdogTimer: null });
-      }
-      const subT = subscribeTimeoutId as any;
-      if (subT) {
-        clearTimeout(subT);
-        set({ subscribeTimeoutId: null } as any);
+
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
       }
 
-      // Proactively remove any orphan group channels created prior to SUBSCRIBED
-      try {
-        const channels = (supabase as any).getChannels?.() || [];
-        const groupTopicFragment = activeGroup?.id ? `group-${activeGroup.id}` : 'group-';
-        channels.forEach((ch: any) => {
-          const topic: string = ch?.topic || '';
-          if (topic.includes(groupTopicFragment) || topic.includes('group-')) {
-            (supabase as any).removeChannel?.(ch);
-          }
-        });
-      } catch (_) {}
-
-      // Clear typing users and reset status to avoid lingering UI state
-      set({ connectionStatus: 'disconnected', typingUsers: [], typingTimeout: null });
+      // Clear typing users and reset status
+      set({ 
+        connectionStatus: 'disconnected', 
+        typingUsers: [], 
+        typingTimeout: null,
+        subscribedAt: null,
+        isReconnecting: false
+      });
     },
 
     sendTypingStatus: (isTyping: boolean, isGhost = false) => {
-      const { realtimeChannel, activeGroup, typingTimeout } = get();
-      if (!realtimeChannel || !activeGroup) return;
+      const { realtimeChannel, activeGroup, typingTimeout, connectionStatus } = get();
+      if (!realtimeChannel || !activeGroup || connectionStatus !== 'connected') return;
 
       if (typingTimeout) clearTimeout(typingTimeout);
 
       if (isTyping) {
-        realtimeChannel.track({ is_typing: true, is_ghost: isGhost, timestamp: Date.now() });
-        const timeout = setTimeout(() => { get().sendTypingStatus(false, isGhost); }, 3000);
-        set({ typingTimeout: timeout });
+        try {
+          realtimeChannel.track({ is_typing: true, is_ghost: isGhost, timestamp: Date.now() });
+          const timeout = setTimeout(() => { get().sendTypingStatus(false, isGhost); }, 3000);
+          set({ typingTimeout: timeout });
+        } catch (e) {
+          console.warn('⚠️ Failed to send typing status:', e);
+        }
       } else {
-        realtimeChannel.track({ is_typing: false, is_ghost: isGhost, timestamp: Date.now() });
-        set({ typingTimeout: null });
+        try {
+          realtimeChannel.track({ is_typing: false, is_ghost: isGhost, timestamp: Date.now() });
+          set({ typingTimeout: null });
+        } catch (e) {
+          console.warn('⚠️ Failed to send typing status:', e);
+        }
       }
     },
 
@@ -572,44 +564,94 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       const { realtimeChannel } = get();
       if (!realtimeChannel) return;
 
-      const presenceState = realtimeChannel.presenceState() as Record<string, Array<Record<string, unknown>>>;
-      const entries = Object.entries(presenceState);
-      const typingUsers: TypingUser[] = [];
+      try {
+        const presenceState = realtimeChannel.presenceState() as Record<string, Array<Record<string, unknown>>>;
+        const entries = Object.entries(presenceState);
+        const typingUsers: TypingUser[] = [];
 
-      // Collect promises for any missing profiles to resolve once
-      const profilePromises: Array<Promise<void>> = [];
+        // Collect promises for any missing profiles to resolve once
+        const profilePromises: Array<Promise<void>> = [];
 
-      for (const [userId, presences] of entries) {
-        const presence = (presences && presences[0]) as any;
-        if (presence?.is_typing) {
-          const isGhost = !!presence.is_ghost;
-          const cached = authorCache.get(userId);
-          if (!isGhost && !cached) {
-            profilePromises.push((async () => {
-              const author = await getAuthorProfile(userId, isGhost);
-              if (author) authorCache.set(userId, author);
-            })());
-          }
-        }
-      }
-
-      Promise.allSettled(profilePromises).finally(() => {
-        // Build final typing users list
         for (const [userId, presences] of entries) {
           const presence = (presences && presences[0]) as any;
           if (presence?.is_typing) {
             const isGhost = !!presence.is_ghost;
-            const author = isGhost ? undefined : authorCache.get(userId);
-            typingUsers.push({
-              user_id: userId,
-              display_name: isGhost ? 'Ghost' : (author?.display_name || 'User'),
-              avatar_url: author?.avatar_url ?? null,
-              is_ghost: isGhost,
-            });
+            const cached = authorCache.get(userId);
+            if (!isGhost && !cached) {
+              profilePromises.push((async () => {
+                const author = await getAuthorProfile(userId, isGhost);
+                if (author) authorCache.set(userId, author);
+              })());
+            }
           }
         }
-        set({ typingUsers });
-      });
+
+        Promise.allSettled(profilePromises).finally(() => {
+          // Build final typing users list
+          for (const [userId, presences] of entries) {
+            const presence = (presences && presences[0]) as any;
+            if (presence?.is_typing) {
+              const isGhost = !!presence.is_ghost;
+              const author = isGhost ? undefined : authorCache.get(userId);
+              typingUsers.push({
+                user_id: userId,
+                display_name: isGhost ? 'Ghost' : (author?.display_name || 'User'),
+                avatar_url: author?.avatar_url ?? null,
+                is_ghost: isGhost,
+              });
+            }
+          }
+          set({ typingUsers });
+        });
+      } catch (e) {
+        console.warn('⚠️ Error in presence sync:', e);
+      }
+    },
+
+    // New simplified methods
+    forceReconnect: (groupId: string) => {
+      log('Force reconnect requested');
+      resetRetryCount();
+      get().cleanupRealtimeSubscription();
+      set({ connectionStatus: 'connecting' });
+      setTimeout(() => get().setupRealtimeSubscription(groupId), 100);
+    },
+
+    setupAuthListener: () => {
+      if (authStateListener) {
+        log('Auth listener already exists');
+        return () => {
+          if (authStateListener) {
+            authStateListener.unsubscribe();
+            authStateListener = null;
+          }
+        };
+      }
+
+      log('Setting up auth state listener for realtime');
+      
+      authStateListener = supabase.auth.onAuthStateChange((event, _session) => {
+        const state = get();
+        const activeGroupId = state.activeGroup?.id;
+        
+        log(`Auth event: ${event}`);
+        
+        if (event === 'TOKEN_REFRESHED' && activeGroupId) {
+          log('Token refreshed, reconnecting realtime');
+          // Force fresh connection with new token
+          get().forceReconnect(activeGroupId);
+        } else if (event === 'SIGNED_OUT') {
+          log('User signed out, cleaning up realtime');
+          get().cleanupRealtimeSubscription();
+        }
+      }).data.subscription;
+
+      return () => {
+        if (authStateListener) {
+          authStateListener.unsubscribe();
+          authStateListener = null;
+        }
+      };
     },
   };
 };

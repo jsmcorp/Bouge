@@ -39,23 +39,41 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           user = null;
         }
       } else {
-        // When online, try server auth first
+        // When online, try auth store first (fast), then server if needed
         try {
-          const { data: { user: authUser } } = await supabase.auth.getUser();
-          user = authUser;
-          console.log('✅ Got user from server:', !!user);
-        } catch (error) {
-          console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
-          // Fallback to local session even when online
-          try {
-            console.log('🔄 Falling back to local session...');
-            const session = await supabase.auth.getSession();
-            user = session.data.session?.user || null;
-            console.log('📱 Got user from local session fallback:', !!user);
-          } catch (sessionError) {
-            console.log('❌ Local session fallback failed:', sessionError instanceof Error ? sessionError.message : String(sessionError));
-            throw error; // Throw original error
+          console.log('🔄 Getting user from auth store first...');
+          const authStore = useAuthStore.getState();
+          user = authStore.user;
+          console.log('📱 Got user from auth store:', !!user, user?.id);
+          
+          // If no user in auth store, try server with timeout
+          if (!user) {
+            console.log('🔄 Auth store empty, trying server with timeout...');
+            const authPromise = supabase.auth.getUser();
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Auth timeout')), 3000)
+            );
+            
+            try {
+              const { data: { user: authUser } } = await Promise.race([authPromise, timeoutPromise]) as any;
+              user = authUser;
+              console.log('✅ Got user from server:', !!user);
+            } catch (timeoutError) {
+              console.log('⏰ Server auth timed out, using local session...');
+              // Quick fallback to local session
+              try {
+                const session = await supabase.auth.getSession();
+                user = session.data.session?.user || null;
+                console.log('📱 Got user from local session fallback:', !!user);
+              } catch (sessionError) {
+                console.log('❌ All auth methods failed');
+                throw new Error('Authentication failed');
+              }
+            }
           }
+        } catch (error) {
+          console.log('❌ Failed to get user:', error instanceof Error ? error.message : String(error));
+          throw error;
         }
       }
 

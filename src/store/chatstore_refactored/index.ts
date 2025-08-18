@@ -10,6 +10,7 @@ import { createFetchActions } from './fetchActions';
 import { createRealtimeActions } from './realtimeActions';
 import { createMessageActions } from './messageActions';
 import { createOfflineActions } from './offlineActions';
+import { FEATURES } from '@/lib/supabase';
 
 // Export all types for external use
 export * from './types';
@@ -41,6 +42,16 @@ export const useChatStore = create<ChatStore>((set, get) => {
   const realtimeActions = createRealtimeActions(set, get);
   const messageActions = createMessageActions(set, get);
   const offlineActions = createOfflineActions(set, get);
+
+  // Initialize auth listener if simplified realtime is enabled
+  if (FEATURES.SIMPLIFIED_REALTIME && typeof realtimeActions.setupAuthListener === 'function') {
+    console.log('[realtime-v2] Initializing auth state listener for chat store');
+    const cleanup = realtimeActions.setupAuthListener();
+    
+    // Store cleanup function for later use
+    // Note: In a real app, you'd want to call this on unmount or store destruction
+    (window as any).__chatStoreAuthCleanup = cleanup;
+  }
 
   return {
     // Initial state

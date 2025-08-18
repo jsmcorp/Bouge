@@ -5,6 +5,11 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+// Feature flag for new simplified realtime connection logic
+export const FEATURES = {
+  SIMPLIFIED_REALTIME: import.meta.env.VITE_SIMPLIFIED_REALTIME !== 'false', // Default enabled
+} as const;
+
 export type Json =
   | string
   | number
