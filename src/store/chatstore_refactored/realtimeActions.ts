@@ -341,7 +341,32 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       log(`Setting up simplified realtime subscription for group: ${groupId}`);
 
       try {
-        log('Skipping auth check - letting Supabase handle auth internally');
+        log('Starting auth check...');
+        // Quick auth check with timeout - let Supabase handle the details
+        const sessionPromise = supabase.auth.getSession();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Auth timeout')), 5000)
+        );
+        
+        const { data: { session } } = await Promise.race([sessionPromise, timeoutPromise]) as any;
+        log('Auth session retrieved');
+        const user = session?.user;
+        
+        if (!user) {
+          log('No authenticated user, scheduling reconnect');
+          isConnecting = false;
+          scheduleReconnect(groupId);
+          return;
+        }
+
+        if (!session?.access_token) {
+          log('No access token found, scheduling reconnect');
+          isConnecting = false;
+          scheduleReconnect(groupId);
+          return;
+        }
+
+        log(`Auth check passed - User: ${user.id}, Token length: ${session.access_token.length}`);
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -351,13 +376,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         get().cleanupRealtimeSubscription();
         set({ connectionStatus: 'connecting' });
 
+        // Set auth token explicitly for this subscription
+        try {
+          (supabase as any).realtime?.setAuth?.(session.access_token);
+        } catch (e) {
+          log('Failed to set auth token: ' + e);
+        }
+
         // Create channel with simple config and unique name
         const channelName = `group-${groupId}-${localToken}`;
         log(`Creating channel: ${channelName}`);
         
         const channel = supabase.channel(channelName, {
           config: { 
-            presence: { key: 'user' }, // Use generic key since we can't get user ID
+            presence: { key: user.id },
             broadcast: { self: true }
           },
         });
@@ -384,15 +416,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           if (localToken !== connectionToken) return;
           bumpActivity();
           const pollRow = payload.new as DbPollRow;
-          // Get current user ID safely
-          try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id || 'anonymous';
-            await handlePollInsert(pollRow, userId, groupId);
-          } catch (e) {
-            log('Failed to get user for poll insert, using anonymous');
-            await handlePollInsert(pollRow, 'anonymous', groupId);
-          }
+          await handlePollInsert(pollRow, user.id, groupId);
         });
 
         // Poll vote inserts
@@ -402,14 +426,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           if (localToken !== connectionToken) return;
           bumpActivity();
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
-          
-          // Skip own votes if we can identify current user
-          try {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (vote.user_id === session?.user?.id) return;
-          } catch (e) {
-            // If we can't get session, process the vote anyway
-          }
+          if (vote.user_id === user.id) return; // Skip own votes
           
           const state = get();
           const updatedPolls = state.polls.map((p: Poll) => {
@@ -480,6 +497,14 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
+              
+              // Check if we have a valid session before retrying
+              const { data: { session: currentSession } } = await supabase.auth.getSession();
+              if (!currentSession?.access_token) {
+                log('No valid session found, stopping retries');
+                set({ connectionStatus: 'disconnected', isReconnecting: false });
+                return;
+              }
               
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId);
