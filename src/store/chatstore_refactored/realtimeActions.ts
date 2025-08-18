@@ -323,29 +323,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
   return {
     ensureAuthBeforeSubscribe: async (opts?: { timeoutMs?: number }) => {
-      const timeoutMs = opts?.timeoutMs ?? 4000;
-      // Try to get an existing session first (with timeout)
+      const timeoutMs = opts?.timeoutMs ?? 10000;
+      // Fast-path: existing session loaded
       try {
-        const sessionRes = await Promise.race([
-          supabase.auth.getSession(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-        ]) as any;
-        const session = sessionRes?.data?.session;
-        if (session) return { ok: true };
-      } catch (e) {
-        // fall through to refresh
-      }
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          try { (supabase as any).realtime?.setAuth?.(session.access_token); } catch (_) {}
+          return { ok: true };
+        }
+      } catch (_) {}
 
-      // If no session, try to refresh (with timeout)
+      // Slow-path: poll getSession and trigger a refresh once
       try {
-        const refreshRes = await Promise.race([
-          supabase.auth.refreshSession(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-        ]) as any;
-        const session = refreshRes?.data?.session;
-        if (session) return { ok: true };
-        const reason = refreshRes?.error?.message || 'no_session';
-        return { ok: false, reason };
+        await supabase.auth.refreshSession().catch(() => {});
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.access_token) {
+            try { (supabase as any).realtime?.setAuth?.(session.access_token); } catch (_) {}
+            return { ok: true };
+          }
+          await new Promise(res => setTimeout(res, 300));
+        }
+        return { ok: false, reason: 'timeout' };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
@@ -355,20 +355,31 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       console.log('🔄 Setting up realtime subscription for group:', groupId);
 
       try {
-        const { data: { user } } = await supabase.auth.getUser();
+        // Ensure we have a fresh/valid session before subscribing
+        const authCheck = await (get() as any).ensureAuthBeforeSubscribe({ timeoutMs: 5000 });
+        if (!authCheck.ok) {
+          console.warn(`⚠️ Auth not ready for subscribe (reason=${authCheck.reason}); will retry`);
+          set({ connectionStatus: 'reconnecting' });
+          coalesceReconnect(groupId);
+          return;
+        }
+
+        // Use session to avoid racing against getUser and token propagation
+        const { data: { session } } = await supabase.auth.getSession();
+        const user = session?.user;
         if (!user) {
           console.warn('⚠️ No authenticated user found; skipping realtime subscription');
           set({ connectionStatus: 'disconnected' });
           return;
         }
 
-        // Guard: Clean previous subscription and timers first
-        get().cleanupRealtimeSubscription();
-        set({ connectionStatus: 'connecting' });
-
-        // Setup token to ignore late callbacks from older channels
+        // Setup token to ignore late callbacks from older channels BEFORE cleanup
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         latestSetupToken = localToken;
+
+        // Guard: Clean previous subscription and timers after updating token
+        get().cleanupRealtimeSubscription();
+        set({ connectionStatus: 'connecting' });
 
         const channel = supabase.channel(`group-${groupId}`, {
           config: { presence: { key: user.id } },
@@ -452,6 +463,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
+              // Clear any pending subscribe watchdog timer
+              const subTid = (get() as any).subscribeTimeoutId as any;
+              if (subTid) {
+                clearTimeout(subTid);
+                set({ subscribeTimeoutId: null } as any);
+              }
               set({ connectionStatus: 'connected', realtimeChannel: channel, subscribedAt: Date.now() });
               console.log('✅ Realtime subscribed');
 
@@ -491,7 +508,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     cleanupRealtimeSubscription: () => {
-      const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer, subscribeTimeoutId } = get();
+      const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer, subscribeTimeoutId, activeGroup } = get();
 
       if (typingTimeout) clearTimeout(typingTimeout);
       if (realtimeChannel) {
@@ -518,6 +535,18 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         clearTimeout(subT);
         set({ subscribeTimeoutId: null } as any);
       }
+
+      // Proactively remove any orphan group channels created prior to SUBSCRIBED
+      try {
+        const channels = (supabase as any).getChannels?.() || [];
+        const groupTopicFragment = activeGroup?.id ? `group-${activeGroup.id}` : 'group-';
+        channels.forEach((ch: any) => {
+          const topic: string = ch?.topic || '';
+          if (topic.includes(groupTopicFragment) || topic.includes('group-')) {
+            (supabase as any).removeChannel?.(ch);
+          }
+        });
+      } catch (_) {}
 
       // Clear typing users and reset status to avoid lingering UI state
       set({ connectionStatus: 'disconnected', typingUsers: [], typingTimeout: null });
