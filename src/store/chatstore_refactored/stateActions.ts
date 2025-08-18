@@ -125,14 +125,18 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   onAppResume: () => {
     const { activeGroup, setupRealtimeSubscription, cleanupRealtimeSubscription, reconnectTimer, ensureAuthBeforeSubscribe } = get() as any;
     if (activeGroup?.id) {
-      // Cancel any pending reconnect timer and do a single clean reconnect
+      console.log('[realtime] resume: invoking onAppResume');
+      // Cancel any pending reconnect timer and force a clean state first
       if (reconnectTimer) {
         clearTimeout(reconnectTimer as any);
         set({ reconnectTimer: null });
       }
+      // Always clean up timers/channels/state before resume subscribe
+      cleanupRealtimeSubscription();
+      set({ isReconnecting: false });
+
       // Ensure auth is valid before subscribing on resume
       (async () => {
-        set({ connectionStatus: 'connecting' });
         console.log('[realtime] auth_check: started (resume)');
         const auth = await ensureAuthBeforeSubscribe({ timeoutMs: 3000 });
         if (!auth.ok) {
@@ -140,7 +144,7 @@ export const createStateActions = (set: any, get: any): StateActions => ({
           set({ connectionStatus: 'disconnected' });
           return;
         }
-        cleanupRealtimeSubscription();
+        console.log('[realtime] auth_check: success (resume)');
         // Record subscribe attempt timestamp and start short watchdog
         const now = Date.now();
         set({ lastSubscribeAttemptAt: now } as any);
