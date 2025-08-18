@@ -324,14 +324,28 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   return {
     ensureAuthBeforeSubscribe: async (opts?: { timeoutMs?: number }) => {
       const timeoutMs = opts?.timeoutMs ?? 4000;
+      // Try to get an existing session first (with timeout)
       try {
-        const result = await Promise.race([
-          supabase.auth.getUser(),
+        const sessionRes = await Promise.race([
+          supabase.auth.getSession(),
           new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
         ]) as any;
-        const user = result?.data?.user;
-        if (!user) return { ok: false, reason: 'no_user' };
-        return { ok: true };
+        const session = sessionRes?.data?.session;
+        if (session) return { ok: true };
+      } catch (e) {
+        // fall through to refresh
+      }
+
+      // If no session, try to refresh (with timeout)
+      try {
+        const refreshRes = await Promise.race([
+          supabase.auth.refreshSession(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+        ]) as any;
+        const session = refreshRes?.data?.session;
+        if (session) return { ok: true };
+        const reason = refreshRes?.error?.message || 'no_session';
+        return { ok: false, reason };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
@@ -438,7 +452,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
-              set({ connectionStatus: 'connected', realtimeChannel: channel });
+              set({ connectionStatus: 'connected', realtimeChannel: channel, subscribedAt: Date.now() });
               console.log('✅ Realtime subscribed');
 
               // Reset reconnection/backoff, kick unified heartbeat
@@ -477,7 +491,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     cleanupRealtimeSubscription: () => {
-      const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer } = get();
+      const { realtimeChannel, typingTimeout, reconnectTimer, heartbeatTimer, reconnectWatchdogTimer, subscribeTimeoutId } = get();
 
       if (typingTimeout) clearTimeout(typingTimeout);
       if (realtimeChannel) {
@@ -498,6 +512,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // No longer used, but clear if present from older state
         clearTimeout(reconnectWatchdogTimer as any);
         set({ reconnectWatchdogTimer: null });
+      }
+      const subT = subscribeTimeoutId as any;
+      if (subT) {
+        clearTimeout(subT);
+        set({ subscribeTimeoutId: null } as any);
       }
 
       // Clear typing users and reset status to avoid lingering UI state

@@ -138,10 +138,21 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       // Ensure auth is valid before subscribing on resume
       (async () => {
         console.log('[realtime] auth_check: started (resume)');
-        const auth = await ensureAuthBeforeSubscribe({ timeoutMs: 3000 });
+        const auth = await ensureAuthBeforeSubscribe({ timeoutMs: 5000 });
         if (!auth.ok) {
           console.warn(`[realtime] auth_check: failed reason=${auth.reason}`);
-          set({ connectionStatus: 'disconnected' });
+          // Backoff retry for resume auth flow
+          const attempt = ((get() as any).reconnectAttempt || 0) as number;
+          const nextAttempt = Math.min(attempt + 1, 6);
+          const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
+          const jitter = Math.floor(Math.random() * 500);
+          const delay = baseDelay + jitter;
+          set({ connectionStatus: 'reconnecting', reconnectAttempt: nextAttempt, isReconnecting: true } as any);
+          const tRetry = setTimeout(() => {
+            console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
+            (get() as any).onAppResume();
+          }, delay);
+          set({ reconnectTimer: tRetry } as any);
           return;
         }
         console.log('[realtime] auth_check: success (resume)');
@@ -155,8 +166,18 @@ export const createStateActions = (set: any, get: any): StateActions => ({
             console.warn('[realtime] subscribe_watchdog fired');
             console.log('[connection] forceReconnect invoked reason=subscribe_watchdog');
             cleanupRealtimeSubscription();
-            set({ connectionStatus: 'reconnecting' });
-            setTimeout(() => setupRealtimeSubscription(activeGroup.id), 300);
+            // Backoff retry for subscribe timeout
+            const attempt = ((get() as any).reconnectAttempt || 0) as number;
+            const nextAttempt = Math.min(attempt + 1, 6);
+            const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30000);
+            const jitter = Math.floor(Math.random() * 500);
+            const delay = baseDelay + jitter;
+            set({ connectionStatus: 'reconnecting', reconnectAttempt: nextAttempt, isReconnecting: true } as any);
+            const tBackoff = setTimeout(() => {
+              console.log(`🔄 Reconnecting (attempt ${nextAttempt})...`);
+              setupRealtimeSubscription(activeGroup.id);
+            }, delay);
+            set({ reconnectTimer: tBackoff } as any);
           }
         }, 10000);
         set({ subscribeTimeoutId: t } as any);
