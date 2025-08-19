@@ -1,4 +1,5 @@
 import { supabase, FEATURES } from '@/lib/supabase';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
 import { useAuthStore } from '@/store/authStore';
@@ -48,7 +49,6 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let connectionToken: string | null = null;
   let reconnectTimeout: NodeJS.Timeout | null = null;
   let authStateListener: any = null;
-  let maxRetries = 3;
   let retryCount = 0;
   let isConnecting = false; // Guard against overlapping connection attempts
 
@@ -56,25 +56,34 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
   // Simple retry mechanism - 3 second timeout
-  const scheduleReconnect = (groupId: string, delayMs: number = 3000) => {
+  const scheduleReconnect = (groupId: string, delayMs?: number) => {
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
     }
     
+    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 3000, 3000];
+    const maxRetries = backoffList.length;
+    const nextDelay = typeof delayMs === 'number' ? delayMs : backoffList[Math.min(retryCount, backoffList.length - 1)];
+
     if (retryCount >= maxRetries) {
       log(`Max retries (${maxRetries}) reached, stopping reconnection attempts`);
       set({ connectionStatus: 'disconnected', isReconnecting: false });
+      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+        console.log(`[rt] degraded backoff=${nextDelay}`);
+        // Start poll fallback
+        try { (get() as any).startPollFallback?.(); } catch {}
+      }
       return;
     }
 
     retryCount++;
-    log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${delayMs}ms`);
+    log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${nextDelay}ms`);
     
     set({ connectionStatus: 'reconnecting', isReconnecting: true });
     reconnectTimeout = setTimeout(() => {
       log(`Reconnect attempt ${retryCount} starting...`);
       get().setupRealtimeSubscription(groupId);
-    }, delayMs);
+    }, nextDelay);
   };
 
   const resetRetryCount = () => {
@@ -467,6 +476,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               });
               log('✅ Realtime connected successfully');
 
+              // Stop degraded poll fallback when connected
+              try { (get() as any).stopPollFallback?.(); } catch {}
+
               startSimpleHeartbeat(groupId);
 
               // Fetch messages if list is empty
@@ -492,6 +504,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId);
+              if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+                console.log(`[rt] rebuild channel=group-${groupId} status=${status}`);
+              }
             } else if (status === 'CONNECTING') {
               log('🔄 Channel connecting...');
               set({ connectionStatus: 'connecting' });

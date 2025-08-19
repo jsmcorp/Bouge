@@ -5,6 +5,8 @@ import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
+import { ensureAuthForWrites } from './utils';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 export interface MessageActions {
   sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null) => Promise<void>;
@@ -289,7 +291,39 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         return;
       }
 
-      // If online, send to Supabase with idempotent upsert using dedupe_key
+      // If online, ensure auth for writes before hitting Supabase
+      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+        const authOk = await ensureAuthForWrites();
+        if (!authOk.canWrite) {
+          // Very short defer then outbox as safety
+          console.log('[outbox] deferred reason=auth_refresh');
+          await new Promise((r) => setTimeout(r, Math.min(1200, Math.max(300, FEATURES_PUSH.outbox.retryShortDelayMs))));
+          const retryAuth = await ensureAuthForWrites();
+          if (!retryAuth.canWrite) {
+            // Enqueue to outbox and show sending state
+            try {
+              const isNative = Capacitor.isNativePlatform();
+              const ready = isNative && await sqliteService.isReady();
+              if (ready) {
+                await get().enqueueOutbox({
+                  id: messageId,
+                  group_id: groupId,
+                  user_id: user.id,
+                  content,
+                  is_ghost: isGhost,
+                  message_type: messageType,
+                  category: category || null,
+                  parent_id: parentId || null,
+                  image_url: imageUrl || null,
+                });
+              }
+            } catch {}
+          } else {
+            console.log('[auth] writes:ready');
+          }
+        }
+      }
+
       const { data, error } = await supabase
         .from('messages')
         .upsert({

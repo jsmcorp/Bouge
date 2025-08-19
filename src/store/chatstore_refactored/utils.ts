@@ -1,4 +1,6 @@
 import { Message } from './types';
+import { supabase } from '@/lib/supabase';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 // Helper function to structure messages with replies nested under parent messages
 export const structureMessagesWithReplies = (messages: Message[]): Message[] => {
@@ -107,3 +109,42 @@ export let outboxProcessorInterval: NodeJS.Timeout | null = null;
 export const setOutboxProcessorInterval = (interval: NodeJS.Timeout | null) => {
   outboxProcessorInterval = interval;
 };
+
+// Writes auth safety gate — ensures a valid token for WRITES ONLY
+export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrite: boolean; reason?: string }> {
+	if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
+		return { canWrite: true };
+	}
+
+	const limit = typeof timeoutMs === 'number' ? timeoutMs : FEATURES_PUSH.auth.refreshTimeoutMs;
+
+	try {
+		const sessionResult = await supabase.auth.getSession();
+		const token = sessionResult?.data?.session?.access_token;
+		if (token) {
+			console.log('[auth] writes:ready');
+			return { canWrite: true };
+		}
+	} catch {}
+
+	// Try refresh with timeout but do not block UI beyond limit
+	try {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), limit);
+		const refreshPromise = supabase.auth.refreshSession();
+		const outcome = await Promise.race([
+			refreshPromise.then((res) => ({ ok: !!res?.data?.session?.access_token })),
+			new Promise<{ ok: boolean }>((resolve) => controller.signal.addEventListener('abort', () => resolve({ ok: false }))),
+		]);
+		clearTimeout(timeout);
+		if (outcome.ok) {
+			console.log('[auth] writes:ready');
+			return { canWrite: true };
+		}
+		console.log('[auth] writes:blocked reason=refresh_timeout');
+		return { canWrite: false, reason: 'refresh_timeout' };
+	} catch (e) {
+		console.log('[auth] writes:blocked reason=refresh_error');
+		return { canWrite: false, reason: 'refresh_error' };
+	}
+}

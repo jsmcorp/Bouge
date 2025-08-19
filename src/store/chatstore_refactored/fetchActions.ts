@@ -15,6 +15,8 @@ export interface FetchActions {
   preloadTopGroupMessages: () => Promise<void>;
   // Delta sync: fetch only new messages since cursor
   deltaSyncSince: (groupId: string, sinceIso: string) => Promise<void>;
+  // Missed sync wrapper
+  syncMissed: (groupId: string) => Promise<void>;
 }
 
 export const createFetchActions = (set: any, get: any): FetchActions => ({
@@ -866,6 +868,21 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       } catch (e) {}
     } catch (e) {
       console.error('❌ Delta sync failed:', e);
+    }
+  },
+
+  syncMissed: async (groupId: string) => {
+    try {
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+      if (!isSqliteReady) return;
+      const result = await (sqliteService as any).syncMissed(groupId);
+      if (result?.merged > 0) {
+        // Refresh UI data for the group
+        await (get() as any).fetchMessages(groupId);
+      }
+    } catch (e) {
+      console.error('❌ Missed sync failed:', e);
     }
   },
 });

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { supabase } from '@/lib/supabase';
+import { Capacitor } from '@capacitor/core';
 
 export interface User {
   id: string;
@@ -73,6 +74,18 @@ export const useAuthStore = create<AuthState>()(
           if (error) {
             console.error('❌ Logout error:', error);
           }
+          try {
+            // Best-effort deactivate device tokens on logout
+            const isNative = Capacitor.isNativePlatform();
+            if (isNative) {
+              const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+              const tokenRes = await FirebaseMessaging.getToken();
+              const token = tokenRes?.token;
+              if (token) {
+                await supabase.from('user_devices').update({ active: false }).eq('token', token);
+              }
+            }
+          } catch {}
           
           // Clear all state
           set({ 

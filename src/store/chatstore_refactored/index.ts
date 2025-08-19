@@ -11,6 +11,7 @@ import { createRealtimeActions } from './realtimeActions';
 import { createMessageActions } from './messageActions';
 import { createOfflineActions } from './offlineActions';
 import { FEATURES } from '@/lib/supabase';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 // Export all types for external use
 export * from './types';
@@ -88,6 +89,12 @@ export const useChatStore = create<ChatStore>((set, get) => {
     heartbeatTimer: null,
     reconnectWatchdogTimer: null,
     lastActivityAt: Date.now(),
+    writesBlocked: false,
+    realtimeDegraded: false,
+    pollFallbackTimer: null,
+    
+    // Extend actions with central onWake handler signature
+    onWake: (reason?: string, groupId?: string) => (get() as any).onWake(reason, groupId),
 
     // Combine all actions
     ...stateActions,

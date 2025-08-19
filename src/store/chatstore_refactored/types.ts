@@ -131,4 +131,8 @@ export interface ChatState {
   heartbeatTimer: NodeJS.Timeout | null;
   reconnectWatchdogTimer: NodeJS.Timeout | null;
   lastActivityAt: number;
+  // Push/resync flags
+  writesBlocked?: boolean;
+  realtimeDegraded?: boolean;
+  pollFallbackTimer?: NodeJS.Timeout | null;
 }

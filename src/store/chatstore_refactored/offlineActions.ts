@@ -3,6 +3,8 @@ import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
+import { ensureAuthForWrites } from './utils';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 // Concurrency guard to prevent duplicate processing runs
 let isProcessingOutbox = false;
@@ -113,6 +115,14 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       if (!await checkOnline()) {
         console.log('📵 Cannot process outbox while offline');
         return;
+      }
+
+      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+        const ok = await ensureAuthForWrites();
+        if (!ok.canWrite) {
+          console.log('[outbox] deferred reason=auth_refresh');
+          return;
+        }
       }
 
       console.log('🔄 Processing outbox messages...');

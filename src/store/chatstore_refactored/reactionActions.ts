@@ -1,4 +1,6 @@
 import { supabase } from '@/lib/supabase';
+import { ensureAuthForWrites } from './utils';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { Reaction } from './types';
 
 export interface ReactionActions {
@@ -32,6 +34,13 @@ export const createReactionActions = (set: any, get: any): ReactionActions => ({
 
   addReaction: async (messageId: string, emoji: string) => {
     try {
+      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+        const ok = await ensureAuthForWrites();
+        if (!ok.canWrite) {
+          console.log('[outbox] deferred reason=auth_refresh');
+          throw new Error('Auth not ready for writes');
+        }
+      }
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
@@ -93,6 +102,13 @@ export const createReactionActions = (set: any, get: any): ReactionActions => ({
 
   removeReaction: async (messageId: string, emoji: string) => {
     try {
+      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+        const ok = await ensureAuthForWrites();
+        if (!ok.canWrite) {
+          console.log('[outbox] deferred reason=auth_refresh');
+          throw new Error('Auth not ready for writes');
+        }
+      }
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 

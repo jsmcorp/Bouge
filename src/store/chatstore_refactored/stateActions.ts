@@ -1,5 +1,8 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
 import { FEATURES } from '@/lib/supabase';
+import { FEATURES_PUSH } from '@/lib/featureFlags';
+import { ensureAuthForWrites } from './utils';
+import { Network } from '@capacitor/network';
 
 export interface StateActions {
   setGroups: (groups: Group[]) => void;
@@ -34,6 +37,9 @@ export interface StateActions {
   onAppResumeSimplified: () => void;
   onNetworkOnline: () => void;
   onNetworkOnlineSimplified: () => void;
+  onWake: (reason?: string, groupId?: string) => Promise<void>;
+  startPollFallback: () => void;
+  stopPollFallback: () => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -115,6 +121,27 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     isConnected: status === 'connected'
   }),
   
+  // Poll fallback when realtime is degraded
+  // Call this when we mark realtime as degraded to keep UI updated
+  startPollFallback: () => {
+    const state = get();
+    if (state.pollFallbackTimer) return;
+    const timer = setInterval(() => {
+      const { activeGroup } = get();
+      if (activeGroup?.id) {
+        (get() as any).deltaSyncSince(activeGroup.id, new Date(Date.now() - 10000).toISOString());
+      }
+    }, 10000);
+    set({ pollFallbackTimer: timer as any });
+  },
+  stopPollFallback: () => {
+    const { pollFallbackTimer } = get();
+    if (pollFallbackTimer) {
+      clearInterval(pollFallbackTimer as any);
+      set({ pollFallbackTimer: null });
+    }
+  },
+  
   setShowGroupDetailsPanel: (show) => {
     set({ showGroupDetailsPanel: show });
     // Close thread panel when opening group details
@@ -158,6 +185,59 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       // Fallback if forceReconnect not available yet
       get().cleanupRealtimeSubscription();
       setTimeout(() => get().setupRealtimeSubscription(activeGroup.id), 100);
+    }
+  },
+
+  // Central onWake(reason, groupId?) orchestrates: ensureAuthForWrites (writes only) → realtime rebuild → syncMissed → outbox
+  onWake: async (reason?: string, groupIdOverride?: string) => {
+    try {
+      if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
+        return get().onAppResumeSimplified();
+      }
+
+      const state = get();
+      const activeGroupId = groupIdOverride || state.activeGroup?.id;
+      console.log(`[push] wake reason=${reason || 'unknown'}`);
+
+      // 1) Ensure auth for writes (non-blocking for realtime)
+      const authRes = await ensureAuthForWrites();
+      set({ writesBlocked: !authRes.canWrite });
+
+      // 2) Realtime reset (non-blocking)
+      if (activeGroupId) {
+        console.log(`[rt] rebuild channel=group-${activeGroupId} status=REQUESTED`);
+        const { forceReconnect } = get();
+        if (typeof forceReconnect === 'function') {
+          forceReconnect(activeGroupId);
+        } else {
+          get().cleanupRealtimeSubscription();
+          setTimeout(() => get().setupRealtimeSubscription(activeGroupId), 50);
+        }
+      }
+
+      // 3) Missed messages resync (bounded)
+      if (activeGroupId && typeof (get() as any).syncMissed === 'function') {
+        await (get() as any).syncMissed(activeGroupId);
+      }
+
+      // 4) Outbox drain gating on writes and network
+      const net = await Network.getStatus();
+      if (net.connected) {
+        if (!get().writesBlocked && typeof (get() as any).processOutbox === 'function') {
+          await (get() as any).processOutbox();
+        } else if (get().writesBlocked) {
+          console.log('[outbox] deferred reason=auth_refresh');
+          setTimeout(async () => {
+            const retry = await ensureAuthForWrites();
+            set({ writesBlocked: !retry.canWrite });
+            if (retry.canWrite && typeof (get() as any).processOutbox === 'function') {
+              await (get() as any).processOutbox();
+            }
+          }, FEATURES_PUSH.outbox.retryShortDelayMs);
+        }
+      }
+    } catch (e) {
+      console.warn('onWake error:', e);
     }
   },
 

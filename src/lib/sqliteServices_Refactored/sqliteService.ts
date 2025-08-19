@@ -184,6 +184,10 @@ class SQLiteService {
     return this.syncOps.getSyncState(key);
   }
 
+  public async syncMissed(groupId: string): Promise<{ merged: number; since: string | null }> {
+    return this.syncOps.syncMissed(groupId);
+  }
+
   // Reaction operations
   public async saveReaction(reaction: Omit<LocalReaction, 'local_id'>): Promise<void> {
     return this.reactionOps.saveReaction(reaction);
