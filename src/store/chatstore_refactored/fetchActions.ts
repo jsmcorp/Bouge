@@ -183,6 +183,54 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const isNative = Capacitor.isNativePlatform();
       const isSqliteReady = isNative && await sqliteService.isReady();
 
+      // Helper: merge fetched messages with any pending (optimistic) messages to avoid UI "disappearing" on refresh
+      const mergeWithPending = (incoming: Message[]): Message[] => {
+        try {
+          const existing = (get().messages || []) as Message[];
+          const pending = existing.filter(m => m.delivery_status !== 'delivered');
+          if (pending.length === 0) return incoming;
+          const seen = new Set(incoming.map(m => m.id));
+          const merged = [...incoming];
+          for (const p of pending) {
+            if (!seen.has(p.id)) merged.push(p);
+          }
+          // Ensure chronological order by created_at
+          merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          return merged;
+        } catch {
+          return incoming;
+        }
+      };
+
+      // Preserve optimistic replies that are still sending
+      const mergePendingReplies = (incoming: Message[]): Message[] => {
+        try {
+          const existing = (get().messages || []) as Message[];
+          const pendingByParent = new Map<string, Message[]>();
+          for (const msg of existing) {
+            const pendingReplies = (msg.replies || []).filter(r => r.delivery_status !== 'delivered');
+            if (pendingReplies.length > 0) pendingByParent.set(msg.id, pendingReplies);
+          }
+          if (pendingByParent.size === 0) return incoming;
+          return incoming.map(m => {
+            const pending = pendingByParent.get(m.id);
+            if (!pending || pending.length === 0) return m;
+            const existingIds = new Set((m.replies || []).map(r => r.id));
+            const mergedReplies = [...(m.replies || [])];
+            for (const pr of pending) {
+              if (!existingIds.has(pr.id)) mergedReplies.push(pr);
+            }
+            return {
+              ...m,
+              replies: mergedReplies,
+              reply_count: (m.reply_count || 0) + pending.filter(pr => !existingIds.has(pr.id)).length,
+            } as Message;
+          });
+        } catch {
+          return incoming;
+        }
+      };
+
       // FIRST: Try to load from in-memory cache for instant display
       const cachedMessages = messageCache.getCachedMessages(groupId);
       if (cachedMessages && cachedMessages.length > 0) {
@@ -204,9 +252,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           }
         });
 
-        // Update UI instantly with cached data
+        // Update UI instantly with cached data, preserving any pending optimistic messages
         set({ 
-          messages: structuredMessages, 
+          messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
           polls: polls,
           userVotes: userVotesMap
         });
@@ -367,7 +415,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Update UI with local data (only if we didn't already show cached data)
             if (!cachedMessages) {
               set({ 
-                messages: structuredMessages, 
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
                 polls: polls,
                 userVotes: userVotesMap
               });
@@ -375,7 +423,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             } else {
               // Silently update the UI with fresh data from SQLite
               set({ 
-                messages: structuredMessages, 
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
                 polls: polls,
                 userVotes: userVotesMap
               });
@@ -505,9 +553,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   // Update cache with all messages (only recent 10 will be cached)
                   messageCache.setCachedMessages(groupId, allMessages);
 
-                  // Update with all messages silently
+                  // Update with all messages silently, preserving any pending optimistic messages
                   set({ 
-                    messages: allStructuredMessages, 
+                    messages: mergeWithPending(mergePendingReplies(allStructuredMessages)), 
                     polls: allPolls,
                     userVotes: allUserVotesMap
                   });

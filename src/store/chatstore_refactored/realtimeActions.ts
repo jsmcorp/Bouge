@@ -1,6 +1,7 @@
 import { supabase, FEATURES } from '@/lib/supabase';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
+import { useAuthStore } from '@/store/authStore';
 import { Message, Poll, TypingUser } from './types';
 
 type Author = { display_name: string; avatar_url: string | null };
@@ -341,32 +342,22 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       log(`Setting up simplified realtime subscription for group: ${groupId}`);
 
       try {
-        log('Starting auth check...');
-        // Quick auth check with timeout - let Supabase handle the details
-        const sessionPromise = supabase.auth.getSession();
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Auth timeout')), 5000)
-        );
-        
-        const { data: { session } } = await Promise.race([sessionPromise, timeoutPromise]) as any;
-        log('Auth session retrieved');
-        const user = session?.user;
-        
-        if (!user) {
-          log('No authenticated user, scheduling reconnect');
-          isConnecting = false;
-          scheduleReconnect(groupId);
-          return;
-        }
+        log('Skipping blocking auth check; proceeding with local auth state');
 
-        if (!session?.access_token) {
-          log('No access token found, scheduling reconnect');
-          isConnecting = false;
-          scheduleReconnect(groupId);
-          return;
-        }
+        // Use locally persisted user id for presence. Do not block on network/session.
+        const authState = (useAuthStore as any)?.getState ? (useAuthStore as any).getState() : null;
+        const userId: string = authState?.user?.id || 'anonymous';
+        const user = { id: userId } as { id: string };
 
-        log(`Auth check passed - User: ${user.id}, Token length: ${session.access_token.length}`);
+        // Non-blocking: try to refresh realtime auth token in the background
+        // This does NOT gate the subscription setup to avoid timeouts on resume.
+        supabase.auth.getSession()
+          .then(({ data: { session } }) => {
+            try {
+              (supabase as any).realtime?.setAuth?.(session?.access_token);
+            } catch (_) {}
+          })
+          .catch(() => {});
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -375,13 +366,6 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Clean up previous subscription
         get().cleanupRealtimeSubscription();
         set({ connectionStatus: 'connecting' });
-
-        // Set auth token explicitly for this subscription
-        try {
-          (supabase as any).realtime?.setAuth?.(session.access_token);
-        } catch (e) {
-          log('Failed to set auth token: ' + e);
-        }
 
         // Create channel with simple config and unique name
         const channelName = `group-${groupId}-${localToken}`;

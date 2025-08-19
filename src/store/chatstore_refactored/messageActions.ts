@@ -32,29 +32,35 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         console.log('📵 Offline: Getting user from auth store');
         try {
           const authStore = useAuthStore.getState();
-          user = authStore.user;
+          user = authStore.user || authStore.session?.user || null;
           console.log('📱 Got user from auth store:', !!user, user?.id);
         } catch (error) {
           console.log('❌ Failed to get user from auth store:', error instanceof Error ? error.message : String(error));
           user = null;
         }
       } else {
-        // When online, try server auth first
-        try {
-          const { data: { user: authUser } } = await supabase.auth.getUser();
-          user = authUser;
-          console.log('✅ Got user from server:', !!user);
-        } catch (error) {
-          console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
-          // Fallback to local session even when online
+        // When online, prefer fast local store user/session to avoid blocking on auth
+        const authStore = useAuthStore.getState();
+        if (authStore?.user || authStore?.session?.user) {
+          user = authStore.user || authStore.session?.user;
+          console.log('📱 Got user from auth store/session (online):', !!user);
+        } else {
+          // Fallback to Supabase methods only if absolutely necessary
           try {
-            console.log('🔄 Falling back to local session...');
-            const session = await supabase.auth.getSession();
-            user = session.data.session?.user || null;
-            console.log('📱 Got user from local session fallback:', !!user);
-          } catch (sessionError) {
-            console.log('❌ Local session fallback failed:', sessionError instanceof Error ? sessionError.message : String(sessionError));
-            throw error; // Throw original error
+            const { data: { user: authUser } } = await supabase.auth.getUser();
+            user = authUser;
+            console.log('✅ Got user from server:', !!user);
+          } catch (error) {
+            console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
+            try {
+              console.log('🔄 Falling back to local session...');
+              const session = await supabase.auth.getSession();
+              user = session.data.session?.user || null;
+              console.log('📱 Got user from local session fallback:', !!user);
+            } catch (sessionError) {
+              console.log('❌ Local session fallback failed:', sessionError instanceof Error ? sessionError.message : String(sessionError));
+              throw error; // Throw original error
+            }
           }
         }
       }
