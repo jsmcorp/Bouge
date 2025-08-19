@@ -19,7 +19,7 @@ interface MessageReactionsProps {
 
 export function MessageReactions({ reactions, onToggleReaction, className }: MessageReactionsProps) {
   const { user } = useAuthStore();
-  
+
   if (!reactions || reactions.length === 0) {
     return null;
   }
@@ -42,7 +42,7 @@ export function MessageReactions({ reactions, onToggleReaction, className }: Mes
         {Object.entries(reactionCounts).map(([emoji, count]) => {
           const isUserReacted = userReactions.includes(emoji);
           const reactionsForEmoji = reactionsByEmoji[emoji] || [];
-          
+
           // Create tooltip content showing who reacted
           const tooltipContent = reactionsForEmoji.length > 0 ? (
             <div className="space-y-1">
@@ -50,7 +50,7 @@ export function MessageReactions({ reactions, onToggleReaction, className }: Mes
                 {reactionsForEmoji.length} {reactionsForEmoji.length === 1 ? 'reaction' : 'reactions'}
               </p>
               <div className="flex items-center space-x-1">
-                {reactionsForEmoji.slice(0, 3).map((reaction) => (
+                {reactionsForEmoji.slice(0, 3).map((reaction: Reaction) => (
                   <Avatar key={reaction.id} className="w-4 h-4">
                     <AvatarImage src={reaction.user?.avatar_url || ''} />
                     <AvatarFallback className="text-xs">
@@ -82,14 +82,13 @@ export function MessageReactions({ reactions, onToggleReaction, className }: Mes
                       variant="ghost"
                       size="sm"
                       onClick={() => onToggleReaction(emoji)}
-                      className={`h-6 px-2 text-xs rounded-full transition-all duration-200 ${
-                        isUserReacted
+                      className={`h-6 px-2 text-xs rounded-full transition-all duration-200 ${isUserReacted
                           ? 'bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30'
                           : 'bg-muted/50 hover:bg-muted border border-border/50'
-                      }`}
+                        }`}
                     >
                       <span className="mr-1">{emoji}</span>
-                      <span className="text-xs font-medium">{count}</span>
+                      <span className="text-xs font-medium">{count.toString()}</span>
                     </Button>
                   </TooltipTrigger>
                   {tooltipContent && (

@@ -44,7 +44,7 @@ export function ChatInput({
   setShowEmojiPanel 
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading] = useState(false);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [messageType, setMessageType] = useState<'text' | 'confession' | 'poll'>('text');
@@ -55,6 +55,7 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const maxLines = 6;
   
   const { 
     activeGroup, 
@@ -93,6 +94,29 @@ export function ChatInput({
       sendTypingStatus(false, isGhost);
     }, 1000);
   };
+
+  // Autosize textarea up to maxLines, keep compact when empty (ignore placeholder wrapping)
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const adjust = () => {
+      el.style.height = 'auto';
+      const style = window.getComputedStyle(el);
+      const lineHeight = parseFloat(style.lineHeight || '20');
+      const paddingTop = parseFloat(style.paddingTop || '0');
+      const paddingBottom = parseFloat(style.paddingBottom || '0');
+      const oneLineHeight = lineHeight + paddingTop + paddingBottom;
+      const maxHeight = lineHeight * maxLines + paddingTop + paddingBottom;
+
+      const targetHeight = el.value
+        ? Math.min(el.scrollHeight, maxHeight)
+        : oneLineHeight;
+
+      el.style.height = `${targetHeight}px`;
+      el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    };
+    requestAnimationFrame(adjust);
+  }, [message]);
 
   const handleTypingStop = () => {
     if (typingTimeoutRef.current) {
@@ -158,17 +182,27 @@ export function ChatInput({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!message.trim() && !selectedImage) || !activeGroup || isLoading || uploadingFile) return;
-
-    setIsLoading(true);
+    console.log('📤 Send button clicked, processing message...', { message: message.trim(), activeGroup: !!activeGroup, isLoading, uploadingFile });
+    
+    // Keep the keyboard open by ensuring the textarea retains focus immediately on submit
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
+    if ((!message.trim() && !selectedImage) || !activeGroup || uploadingFile) {
+      console.log('❌ Send blocked:', { hasMessage: !!message.trim(), hasImage: !!selectedImage, hasActiveGroup: !!activeGroup, isLoading, uploadingFile });
+      return;
+    }
+    
     handleTypingStop(); // Stop typing indicator immediately
     
+    const isGhost = messageType === 'confession' ? true : currentGhostMode;
+    const messageContent = selectedImage ? (message.trim() || 'Image') : message.trim();
+    
+    console.log('📤 About to send message:', { messageContent, isGhost, connectionStatus });
+    
     try {
-      const isGhost = messageType === 'confession' ? true : currentGhostMode;
-      
-      const messageContent = selectedImage ? (message.trim() || 'Image') : message.trim();
-      
-      await sendMessage(
+      // Fire-and-forget: optimistic send should update UI immediately
+      sendMessage(
         activeGroup.id,
         messageContent,
         isGhost,
@@ -177,8 +211,24 @@ export function ChatInput({
         replyingTo?.id || null,
         null,
         selectedImage
-      );
+      ).catch((error) => console.error('❌ sendMessage promise rejected:', error));
       
+      console.log('✅ Message dispatched, clearing input');
+      // Clear input immediately (optimistic UI)
+      setMessage('');
+      setMessageType('text');
+      setCategory('');
+      clearSelectedImage();
+      
+      // Focus back to textarea after sending
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+    } catch (error) {
+      console.error('❌ Send message error:', error);
+      
+      // Always clear input since optimistic message should have been added
+      console.log('📝 Clearing input after error (optimistic message should be visible)');
       setMessage('');
       setMessageType('text');
       setCategory('');
@@ -188,10 +238,11 @@ export function ChatInput({
       if (textareaRef.current) {
         textareaRef.current.focus();
       }
-    } catch (error) {
-      toast.error('Failed to send message. Please try again.');
-    } finally {
-      setIsLoading(false);
+      
+      // Only show error toast when online and there's a real error
+      if (connectionStatus !== 'disconnected') {
+        toast.error('Failed to send message. Please try again.');
+      }
     }
   };
 
@@ -426,7 +477,7 @@ export function ChatInput({
         )}
 
         {/* Compact Input Bar */}
-        <form onSubmit={handleSubmit} className={`message-input-area flex items-center gap-1 sm:gap-2 p-1 sm:p-2 shadow-lg ${isInThread ? 'h-10 sm:h-12' : 'h-12 sm:h-14'}`}>
+        <form onSubmit={handleSubmit} className={`message-input-area w-full overflow-hidden flex items-end gap-1 sm:gap-2 p-1 sm:p-2 shadow-lg ${isInThread ? 'min-h-10 sm:min-h-12' : 'min-h-12 sm:min-h-14'}`}>
           {/* Hidden file input */}
           <input
             ref={fileInputRef}
@@ -443,7 +494,7 @@ export function ChatInput({
                 <Button 
                   type="button" 
                   variant="ghost" 
-                  className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
+                  className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
                 >
                   <Plus className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
                 </Button>
@@ -470,7 +521,7 @@ export function ChatInput({
             type="button"
             variant="ghost"
             onClick={handleEmojiButtonClick}
-            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
+            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
           >
             {isMobile && showEmojiPanel ? (
               <Keyboard className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
@@ -488,12 +539,13 @@ export function ChatInput({
             onBlur={handleTypingStop}
             onFocus={handleTextareaFocus}
             placeholder={getPlaceholderText()}
-            className={`flex-1 min-h-0 ${isInThread ? 'h-7 sm:h-8' : 'h-8 sm:h-10'} py-1 sm:py-2 px-2 sm:px-4 rounded-3xl resize-none overflow-hidden ${isInThread ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none ${
-              connectionStatus !== 'connected' || uploadingFile ? 'opacity-75' : ''
+            className={`flex-1 min-h-0 ${isInThread ? 'h-7 sm:h-8' : 'h-8 sm:h-10'} py-1 sm:py-2 px-2 sm:px-4 rounded-3xl resize-none overflow-hidden self-end ${isInThread ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none focus-visible:ring-0 focus-visible:outline-none ring-0 outline-none ${
+              uploadingFile ? 'opacity-75' : ''
             }`}
             maxLength={2000}
-            disabled={connectionStatus === 'disconnected' || uploadingFile}
+            disabled={uploadingFile}
             rows={1}
+            style={{ height: 'auto', minHeight: 0 }}
           />
 
           {/* Image Button */}
@@ -501,8 +553,8 @@ export function ChatInput({
             type="button"
             variant="ghost"
             onClick={handleImageButtonClick}
-            disabled={uploadingFile}
-            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50`}
+            disabled={uploadingFile || connectionStatus === 'disconnected'}
+            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
           >
             <Image className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
           </Button>
@@ -510,8 +562,8 @@ export function ChatInput({
           {/* Send Button */}
           <Button
             type="submit"
-            disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || connectionStatus === 'disconnected'}
-            className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full`}
+            disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || (connectionStatus === 'disconnected' && !!selectedImage)}
+            className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full self-end flex-shrink-0`}
           >
             <Send className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
           </Button>

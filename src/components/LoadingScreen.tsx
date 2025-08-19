@@ -3,7 +3,7 @@ import { Ghost } from 'lucide-react';
 
 export function LoadingScreen() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center">
+    <div className="min-h-screen w-full bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center fixed inset-0">
       <div className="text-center">
         <motion.div
           animate={{

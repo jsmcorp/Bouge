@@ -28,8 +28,6 @@ a:hover {
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
   min-height: 100vh;
 }
@@ -1052,6 +1050,7 @@ button:focus-visible {
   -webkit-backdrop-filter: blur(25px);
   border: 1px solid rgba(255, 255, 255, 0.01);
   border-radius: 1.5rem;
+  overflow: hidden;
 }
 
 .light .message-input-area {

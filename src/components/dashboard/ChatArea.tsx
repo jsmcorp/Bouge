@@ -40,7 +40,13 @@ export function ChatArea() {
 
   useEffect(() => {
     if (activeGroup?.id) {
-      fetchMessages(activeGroup.id);
+      console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
+      const startTime = performance.now();
+      
+      fetchMessages(activeGroup.id).then(() => {
+        const endTime = performance.now();
+        console.log(`💬 ChatArea: Messages loaded in ${(endTime - startTime).toFixed(2)}ms`);
+      });
     }
   }, [activeGroup?.id, fetchMessages]);
 
@@ -108,14 +114,11 @@ export function ChatArea() {
 
   const handleBackClick = () => {
     if (isMobile) {
-      // Navigate first with replace to prevent history stacking
+      // Clear active group first
+      useChatStore.getState().setActiveGroup(null);
+      // Use window.history to ensure immediate navigation
+      window.history.replaceState(null, '', '/dashboard');
       navigate('/dashboard', { replace: true });
-      
-      // Use setTimeout to clear the active group after navigation has started
-      // This prevents the component from re-rendering before navigation completes
-      setTimeout(() => {
-        useChatStore.getState().setActiveGroup(null);
-      }, 0);
     }
   };
 

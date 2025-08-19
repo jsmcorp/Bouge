@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Plus, 
@@ -31,9 +31,10 @@ import { toast } from 'sonner';
 
 export function Sidebar() {
   const navigate = useNavigate();
+  const location = useLocation();
   const isMobile = useIsMobile();
   const { user, logout } = useAuthStore();
-  const { groups, activeGroup, setActiveGroup } = useChatStore();
+  const { groups, activeGroup, setActiveGroup, preloadTopGroupMessages } = useChatStore();
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showJoinGroup, setShowJoinGroup] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -41,6 +42,21 @@ export function Sidebar() {
   const filteredGroups = groups.filter(group =>
     group.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  // Preload messages when user is on dashboard and groups are available
+  useEffect(() => {
+    const isDashboard = location.pathname === '/dashboard';
+    
+    if (isDashboard && groups.length > 0) {
+      // Delay preloading slightly to let the UI settle
+      const preloadTimer = setTimeout(() => {
+        console.log('🚀 Dashboard: Triggering background preload for top groups');
+        preloadTopGroupMessages();
+      }, 500);
+
+      return () => clearTimeout(preloadTimer);
+    }
+  }, [location.pathname, groups.length, preloadTopGroupMessages]);
 
   const handleLogout = async () => {
     try {
