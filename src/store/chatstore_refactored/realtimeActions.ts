@@ -729,7 +729,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         
         log(`Auth event: ${event}`);
         
-        if (event === 'TOKEN_REFRESHED' && activeGroupId) {
+        if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && activeGroupId) {
           log('Token refreshed, reconnecting realtime');
           // Force fresh connection with new token
           get().forceReconnect(activeGroupId);

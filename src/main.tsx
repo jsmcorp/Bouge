@@ -26,6 +26,11 @@ createRoot(document.getElementById('root')!).render(
 		}
 	});
 
+	// Some Android builds emit 'resume' separately; handle it too
+	CapApp.addListener('resume', () => {
+		try { useChatStore.getState().onWake?.('resume'); } catch {}
+	});
+
 	// Network online
 	Network.addListener('networkStatusChange', (status) => {
 		if (status.connected) {

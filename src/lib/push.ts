@@ -96,6 +96,15 @@ export async function initPush(): Promise<void> {
 				window.dispatchEvent(new CustomEvent('network:online'));
 			}
 		});
+
+		// Associate token after auth events to ensure row exists in user_devices
+		try {
+			supabase.auth.onAuthStateChange((event, session) => {
+				if (currentToken && session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
+					upsertDeviceToken(currentToken);
+				}
+			});
+		} catch {}
 	} catch (e) {
 		console.warn('Push init skipped (plugin missing or error):', e);
 	}
