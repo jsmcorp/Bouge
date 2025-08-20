@@ -135,7 +135,15 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
 
       console.log(`📤 Found ${outboxMessages.length} pending messages to send`);
 
-      const { data: { user } } = await supabase.auth.getUser();
+      // Avoid hanging getUser on mobile unlock by bounding with timeout
+      let user: any = null;
+      try {
+        const bounded = await Promise.race([
+          supabase.auth.getUser().then((res) => res?.data?.user || null),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+        ]);
+        user = bounded;
+      } catch {}
       if (!user) {
         console.error('❌ Cannot process outbox: User not authenticated');
         return;

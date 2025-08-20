@@ -177,13 +177,17 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
     console.log('[realtime-v2] App resumed, forcing fresh connection');
     
-    // Non-blocking: refresh token in background to improve likelihood of successful reconnect
+    // Non-blocking: ensure token freshness and apply to realtime
     try {
       supabase.auth.getSession().then(async (res) => {
-        const session = res.data.session;
-        if (!session?.access_token) {
-          try { await supabase.auth.refreshSession(); } catch (_) {}
+        let token = res?.data?.session?.access_token || null;
+        if (!token) {
+          try {
+            const refreshed = await supabase.auth.refreshSession();
+            token = refreshed?.data?.session?.access_token || null;
+          } catch (_) {}
         }
+        try { (supabase as any).realtime?.setAuth?.(token || undefined); } catch {}
       }).catch(() => {});
     } catch (_) {}
 

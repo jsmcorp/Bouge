@@ -56,6 +56,35 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
+  // Get a usable access token with a bounded wait. Returns null if unavailable in time.
+  async function getAccessTokenBounded(limitMs: number): Promise<string | null> {
+    try {
+      const sessionRace = Promise.race([
+        supabase.auth.getSession().then((res) => res?.data?.session?.access_token || null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(800, limitMs))),
+      ]);
+      let token = await sessionRace;
+      if (token) return token;
+
+      // Try refresh with abortable timeout
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), Math.max(800, limitMs));
+        const refreshRace = Promise.race([
+          supabase.auth.refreshSession().then((res) => res?.data?.session?.access_token || null),
+          new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
+        ]);
+        token = await refreshRace;
+        clearTimeout(timeout);
+        return token || null;
+      } catch {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
   // Simple retry mechanism - 3 second timeout
   const scheduleReconnect = (groupId: string, delayMs?: number) => {
     if (reconnectTimeout) {
@@ -373,24 +402,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const user = { id: userId } as { id: string };
 
         // Ensure realtime has a valid token before subscribing (bounded wait)
-        try {
-          const { data: { session } } = await supabase.auth.getSession();
-          let accessToken = session?.access_token || null;
-          if (!accessToken) {
-            try {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
-              const refreshPromise = supabase.auth.refreshSession();
-              const outcome = await Promise.race([
-                refreshPromise.then((res) => ({ token: res?.data?.session?.access_token || null })),
-                new Promise<{ token: null }>((resolve) => controller.signal.addEventListener('abort', () => resolve({ token: null }))),
-              ]);
-              clearTimeout(timeout);
-              accessToken = outcome.token;
-            } catch (_) {}
-          }
-          try { (supabase as any).realtime?.setAuth?.(accessToken || undefined); } catch (_) {}
-        } catch (_) {}
+        const accessToken = await getAccessTokenBounded(FEATURES_PUSH.auth.refreshTimeoutMs);
+        try { (supabase as any).realtime?.setAuth?.(accessToken || undefined); } catch (_) {}
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -515,6 +528,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
+              // Clear subscribe watchdog if set
+              const { reconnectWatchdogTimer } = get();
+              if (reconnectWatchdogTimer) {
+                clearTimeout(reconnectWatchdogTimer as any);
+                set({ reconnectWatchdogTimer: null });
+              }
               resetRetryCount(); // Reset on successful connection
               isConnecting = false; // Clear the guard
               set({ 
@@ -541,6 +560,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 log('Background message fetch failed: ' + e);
               }
             } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
+              // Clear subscribe watchdog if set
+              const { reconnectWatchdogTimer } = get();
+              if (reconnectWatchdogTimer) {
+                clearTimeout(reconnectWatchdogTimer as any);
+                set({ reconnectWatchdogTimer: null });
+              }
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
 
@@ -579,6 +604,22 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             }
           }, 10000); // 10 second timeout
 
+        // Subscribe watchdog: if we don't reach SUBSCRIBED within a bound, rebuild
+        try {
+          const watchdog = setTimeout(() => {
+            if (localToken !== connectionToken) return;
+            const state = get();
+            if (state.connectionStatus !== 'connected') {
+              log('Subscribe watchdog timeout, rebuilding connection');
+              isConnecting = false;
+              try { supabase.removeChannel(channel); } catch {}
+              set({ connectionStatus: 'disconnected' });
+              scheduleReconnect(groupId, 300);
+            }
+          }, Math.max(8000, FEATURES_PUSH.auth.refreshTimeoutMs + 500));
+          set({ reconnectWatchdogTimer: watchdog as any });
+        } catch {}
+
       } catch (error) {
         log('Setup error: ' + (error as Error).message);
         isConnecting = false; // Clear the guard
@@ -588,7 +629,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     cleanupRealtimeSubscription: () => {
-      const { realtimeChannel, typingTimeout, heartbeatTimer } = get();
+      const { realtimeChannel, typingTimeout, heartbeatTimer, reconnectWatchdogTimer } = get();
 
       log('Cleaning up realtime subscription');
       isConnecting = false; // Clear connection guard
@@ -607,6 +648,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer as any);
         set({ heartbeatTimer: null });
+      }
+
+      if (reconnectWatchdogTimer) {
+        clearTimeout(reconnectWatchdogTimer as any);
+        set({ reconnectWatchdogTimer: null });
       }
 
       if (reconnectTimeout) {
@@ -723,16 +769,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       log('Setting up auth state listener for realtime');
       
-      authStateListener = supabase.auth.onAuthStateChange((event, _session) => {
+      authStateListener = supabase.auth.onAuthStateChange((event, session) => {
         const state = get();
         const activeGroupId = state.activeGroup?.id;
         
         log(`Auth event: ${event}`);
         
-        if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && activeGroupId) {
-          log('Token refreshed, reconnecting realtime');
-          // Force fresh connection with new token
-          get().forceReconnect(activeGroupId);
+        if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+          // Always apply the latest token to realtime
+          try { (supabase as any).realtime?.setAuth?.(session?.access_token); } catch {}
+          if (activeGroupId) {
+            log('Token applied, reconnecting realtime');
+            get().forceReconnect(activeGroupId);
+          }
         } else if (event === 'SIGNED_OUT') {
           log('User signed out, cleaning up realtime');
           get().cleanupRealtimeSubscription();
