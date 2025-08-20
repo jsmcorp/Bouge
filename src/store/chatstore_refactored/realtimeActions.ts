@@ -202,28 +202,41 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           return m;
         });
         set({ messages: updatedMessages });
+        try {
+          messageCache.setCachedMessages(message.group_id, [...updatedMessages]);
+        } catch (err) {
+          console.error('❌ Message cache update failed:', err);
+        }
       }
 
       if (state.activeThread?.id === message.parent_id) {
         const threadReplyExists = state.threadReplies.some((r: Message) => r.id === message.id);
         if (!threadReplyExists) {
-          set({ threadReplies: [...state.threadReplies, message] });
+          const updatedReplies = [...state.threadReplies, message];
+          set({ threadReplies: updatedReplies });
         }
       }
     } else {
       const exists = state.messages.some((m: Message) => m.id === message.id);
       if (!exists) {
-        get().addMessage(message);
+        const messagesAfter = [...state.messages, message];
+        set({ messages: messagesAfter });
+        try {
+          messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
+          console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
+        } catch (err) {
+          console.error('❌ Message cache update failed:', err);
+        }
       } else {
-        get().updateMessage(message.id, { delivery_status: 'delivered' });
-      }
-
-      try {
-        const latestMessages = get().messages;
-        messageCache.setCachedMessages(message.group_id, [...latestMessages]);
-        console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
-      } catch (err) {
-        console.error('❌ Message cache update failed:', err);
+        const messagesAfter = state.messages.map((m: Message) => (
+          m.id === message.id ? { ...m, delivery_status: 'delivered' } : m
+        ));
+        set({ messages: messagesAfter });
+        try {
+          messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
+        } catch (err) {
+          console.error('❌ Message cache update failed:', err);
+        }
       }
     }
   }
@@ -408,6 +421,31 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           try {
             const message = await buildMessageFromRow(row);
             attachMessageToState(message);
+            // Persist to local storage immediately to avoid disappearing on navigation
+            try {
+              const { Capacitor } = await import('@capacitor/core');
+              const isNative = Capacitor.isNativePlatform();
+              if (isNative) {
+                const ready = await sqliteService.isReady();
+                if (ready) {
+                  await sqliteService.saveMessage({
+                    id: row.id,
+                    group_id: row.group_id,
+                    user_id: row.user_id,
+                    content: row.content,
+                    is_ghost: row.is_ghost ? 1 : 0,
+                    message_type: row.message_type,
+                    category: row.category || null,
+                    parent_id: row.parent_id || null,
+                    image_url: row.image_url || null,
+                    created_at: new Date(row.created_at).getTime(),
+                  });
+                  try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}
+                }
+              }
+            } catch (persistErr) {
+              console.warn('⚠️ Failed to persist realtime message locally:', persistErr);
+            }
           } catch (e) {
             log('Failed to process message insert: ' + e);
           }
@@ -496,7 +534,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               try {
                 const state = get();
                 if (state.messages?.length === 0 && typeof state.fetchMessages === 'function') {
-                  state.fetchMessages(groupId);
+                  // Use a small delay to ensure any initial realtime inserts are merged before fetch
+                  setTimeout(() => state.fetchMessages(groupId), 150);
                 }
               } catch (e) {
                 log('Background message fetch failed: ' + e);
@@ -506,7 +545,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               isConnecting = false; // Clear the guard
 
               // Try to ensure we have a valid session token before retrying
-              let { data: { session: currentSession } } = await supabase.auth.getSession();
+              let currentSession: any = null;
+              try {
+                const res = await supabase.auth.getSession();
+                currentSession = res?.data?.session || null;
+              } catch (_) {}
               if (!currentSession?.access_token) {
                 try {
                   const controller = new AbortController();
@@ -655,11 +698,16 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // New simplified methods
     forceReconnect: (groupId: string) => {
+      const { connectionStatus } = get();
+      if (connectionStatus === 'connecting') {
+        log('Force reconnect requested but already connecting; skipping duplicate');
+        return;
+      }
       log('Force reconnect requested');
       resetRetryCount();
       get().cleanupRealtimeSubscription();
       set({ connectionStatus: 'connecting' });
-      setTimeout(() => get().setupRealtimeSubscription(groupId), 100);
+      setTimeout(() => get().setupRealtimeSubscription(groupId), 150);
     },
 
     setupAuthListener: () => {
