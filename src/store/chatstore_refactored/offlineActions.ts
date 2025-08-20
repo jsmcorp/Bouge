@@ -120,8 +120,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
         const ok = await ensureAuthForWrites();
         if (!ok.canWrite) {
-          console.log('[outbox] deferred reason=auth_refresh');
-          return;
+          // Proceed anyway; server will validate auth. This avoids messages getting stuck locally.
+          console.log('[outbox] proceeding despite auth gate (server will validate)');
         }
       }
 
