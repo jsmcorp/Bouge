@@ -78,7 +78,7 @@ export const useAuthStore = create<AuthState>()(
             // Best-effort deactivate device tokens on logout
             const isNative = Capacitor.isNativePlatform();
             if (isNative) {
-              const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+              const { FirebaseMessaging } = await import(/* @vite-ignore */ '@capacitor-firebase/messaging');
               const tokenRes = await FirebaseMessaging.getToken();
               const token = tokenRes?.token;
               if (token) {

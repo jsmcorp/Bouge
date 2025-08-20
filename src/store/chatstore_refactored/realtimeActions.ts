@@ -50,6 +50,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let reconnectTimeout: NodeJS.Timeout | null = null;
   let authStateListener: any = null;
   let retryCount = 0;
+  const maxRetries = 5;
   let isConnecting = false; // Guard against overlapping connection attempts
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });

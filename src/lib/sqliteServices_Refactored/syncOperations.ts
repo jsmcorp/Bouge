@@ -52,7 +52,7 @@ export class SyncOperations {
       .order('created_at', { ascending: true })
       .limit(limit);
 
-    const { data, error } = sinceIso ? query.gt('created_at', sinceIso) : query;
+    const { data, error } = await (sinceIso ? query.gt('created_at', sinceIso) : query);
     if (error) throw error;
 
     const rows = data || [];

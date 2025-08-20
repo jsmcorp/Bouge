@@ -48,21 +48,26 @@ export async function initPush(): Promise<void> {
 
 	try {
 		// Dynamic import to avoid bundling on web
-		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+		const moduleName = '@capacitor-firebase/messaging';
+		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
 
 		await FirebaseMessaging.requestPermissions();
 		const tokenResult = await FirebaseMessaging.getToken();
 		if (tokenResult?.token) {
 			currentToken = tokenResult.token;
-			await upsertDeviceToken(currentToken);
+			if (typeof currentToken === 'string') {
+				await upsertDeviceToken(currentToken);
+			}
 		}
 
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
 			currentToken = event.token;
-			await upsertDeviceToken(currentToken);
+			if (typeof currentToken === 'string') {
+				await upsertDeviceToken(currentToken);
+			}
 		});
 
-		FirebaseMessaging.addListener('messageReceived', async (event: any) => {
+		FirebaseMessaging.addListener('notificationReceived', async (event: any) => {
 			try {
 				const data = event?.data || {};
 				const reason = data?.type === 'new_message' ? 'data' : 'other';

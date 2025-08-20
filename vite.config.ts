@@ -7,6 +7,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // Stub Firebase messaging plugin on web builds to avoid bundling web adapter
+      ...(process.env.BUILD_TARGET === 'web' || !process.env.CAPACITOR_PLATFORM ? {
+        '@capacitor-firebase/messaging': path.resolve(__dirname, './src/shims/capacitor-firebase-messaging.ts'),
+      } : {}),
     },
   },
   optimizeDeps: {
