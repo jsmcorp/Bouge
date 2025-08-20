@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "535723987037",
+    "project_id": "bouge-58e98",
+    "storage_bucket": "bouge-58e98.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:535723987037:android:8343d089ea0376d3357db4",
+        "android_client_info": {
+          "package_name": "com.tydon.bouge"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyChHlJraLXmKB5rNEd6cdsvcerAm-McA5M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
