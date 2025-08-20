@@ -359,15 +359,25 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const userId: string = authState?.user?.id || 'anonymous';
         const user = { id: userId } as { id: string };
 
-        // Non-blocking: try to refresh realtime auth token in the background
-        // This does NOT gate the subscription setup to avoid timeouts on resume.
-        supabase.auth.getSession()
-          .then(({ data: { session } }) => {
+        // Ensure realtime has a valid token before subscribing (bounded wait)
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          let accessToken = session?.access_token || null;
+          if (!accessToken) {
             try {
-              (supabase as any).realtime?.setAuth?.(session?.access_token);
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
+              const refreshPromise = supabase.auth.refreshSession();
+              const outcome = await Promise.race([
+                refreshPromise.then((res) => ({ token: res?.data?.session?.access_token || null })),
+                new Promise<{ token: null }>((resolve) => controller.signal.addEventListener('abort', () => resolve({ token: null }))),
+              ]);
+              clearTimeout(timeout);
+              accessToken = outcome.token;
             } catch (_) {}
-          })
-          .catch(() => {});
+          }
+          try { (supabase as any).realtime?.setAuth?.(accessToken || undefined); } catch (_) {}
+        } catch (_) {}
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -494,15 +504,25 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
-              
-              // Check if we have a valid session before retrying
-              const { data: { session: currentSession } } = await supabase.auth.getSession();
+
+              // Try to ensure we have a valid session token before retrying
+              let { data: { session: currentSession } } = await supabase.auth.getSession();
               if (!currentSession?.access_token) {
-                log('No valid session found, stopping retries');
-                set({ connectionStatus: 'disconnected', isReconnecting: false });
-                return;
+                try {
+                  const controller = new AbortController();
+                  const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
+                  const refreshed = await Promise.race([
+                    supabase.auth.refreshSession().then((res) => res?.data?.session || null),
+                    new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
+                  ]);
+                  clearTimeout(timeout);
+                  currentSession = refreshed ?? null;
+                } catch (_) {}
               }
-              
+
+              // Update realtime auth with whatever token we have (may be undefined)
+              try { (supabase as any).realtime?.setAuth?.(currentSession?.access_token); } catch (_) {}
+
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId);
               if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {

@@ -1,5 +1,5 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
-import { FEATURES } from '@/lib/supabase';
+import { supabase, FEATURES } from '@/lib/supabase';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { ensureAuthForWrites } from './utils';
 import { Network } from '@capacitor/network';
@@ -177,6 +177,16 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
     console.log('[realtime-v2] App resumed, forcing fresh connection');
     
+    // Non-blocking: refresh token in background to improve likelihood of successful reconnect
+    try {
+      supabase.auth.getSession().then(async (res) => {
+        const session = res.data.session;
+        if (!session?.access_token) {
+          try { await supabase.auth.refreshSession(); } catch (_) {}
+        }
+      }).catch(() => {});
+    } catch (_) {}
+
     // Force a fresh connection on app resume (requirement #2)
     const { forceReconnect } = get();
     if (typeof forceReconnect === 'function') {
