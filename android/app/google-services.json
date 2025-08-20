@@ -7,6 +7,25 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:535723987037:android:e856f3113d7c8320357db4",
+        "android_client_info": {
+          "package_name": "com.confessr.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyChHlJraLXmKB5rNEd6cdsvcerAm-McA5M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:535723987037:android:8343d089ea0376d3357db4",
         "android_client_info": {
           "package_name": "com.tydon.bouge"
