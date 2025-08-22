@@ -89,6 +89,8 @@ class SupabasePipeline {
   // Track recent unlock state to force outbox usage
   private lastUnlockTime = 0;
   private readonly unlockGracePeriodMs = 8000; // 8 seconds
+  // Last outbox processing statistics for callers to inspect without changing method signatures
+  private lastOutboxStats: { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null = null;
 
   constructor() {
     this.log('🚀 Pipeline initialized');
@@ -912,6 +914,12 @@ class SupabasePipeline {
 
       const client = await this.getClient();
 
+      // Track per-run statistics for callers
+      let sentCount = 0;
+      let failedCount = 0; // permanently failed and removed
+      let retriedCount = 0; // scheduled for retry
+      const groupsWithSent = new Set<string>();
+
       for (let i = 0; i < outboxMessages.length; i++) {
         const outboxItem = outboxMessages[i];
         this.log(`📦 Processing outbox message ${i + 1}/${outboxMessages.length} (ID: ${outboxItem.id})`);
@@ -955,6 +963,10 @@ class SupabasePipeline {
             await sqliteService.removeFromOutbox(outboxItem.id);
             this.log(`✅ Outbox message ${outboxItem.id} sent and removed`);
           }
+          sentCount++;
+          if (outboxItem.group_id) {
+            groupsWithSent.add(outboxItem.group_id);
+          }
 
         } catch (error) {
           this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
@@ -967,18 +979,27 @@ class SupabasePipeline {
             if (newRetryCount >= maxRetries) {
               this.log(`🗑️ Outbox message ${outboxItem.id} exceeded max retries, removing`);
               await sqliteService.removeFromOutbox(outboxItem.id);
+              failedCount++;
             } else {
               const backoffMs = Math.min(newRetryCount * 30000, 300000); // 30s to 5min max
               const nextRetryAt = Date.now() + backoffMs;
               
               await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
               this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
+              retriedCount++;
             }
           }
         }
       }
 
       this.log(`📦 Outbox processing complete - session ${sessionId}`);
+      // Expose statistics for callers
+      this.lastOutboxStats = {
+        sent: sentCount,
+        failed: failedCount,
+        retried: retriedCount,
+        groupsWithSent: Array.from(groupsWithSent)
+      };
     } catch (error) {
       this.log(`❌ Outbox processing failed - session ${sessionId}:`, stringifyError(error));
       throw error;
@@ -1062,6 +1083,13 @@ class SupabasePipeline {
    */
   public async getDirectClient(): Promise<SupabaseClient<Database>> {
     return await this.getClient();
+  }
+
+  /**
+   * Get last outbox processing statistics
+   */
+  public getLastOutboxStats(): { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null {
+    return this.lastOutboxStats;
   }
 
   /**

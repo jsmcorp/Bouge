@@ -16,6 +16,10 @@ let processingWatchdog: NodeJS.Timeout | null = null;
 let triggerTimeout: NodeJS.Timeout | null = null;
 let watchdogTimeoutCount = 0; // Track consecutive watchdog timeouts to prevent infinite loops
 
+// Simple per-group refresh throttling (WhatsApp-style: avoid frequent back-to-back refresh)
+const groupRefreshThrottleMs = 2000;
+const lastGroupRefreshAt: Record<string, number> = {};
+
 // Reset processing state (called from realtime cleanup/reconnect)
 export const resetOutboxProcessingState = () => {
   console.log('[outbox-unified] Resetting outbox processing state');
@@ -228,19 +232,33 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
 
       // Use pipeline to process outbox (handles all retry logic, auth, timeouts)
       await supabasePipeline.processOutbox();
+      const stats = supabasePipeline.getLastOutboxStats();
       
       // Reset watchdog timeout count on successful completion
       watchdogTimeoutCount = 0;
-      console.log(`[outbox-unified] ${sessionId} - Pipeline processing completed successfully`);
+      console.log(`[outbox-unified] ${sessionId} - Pipeline processing completed successfully`, stats);
       
-      // Refresh UI if needed
+      // Refresh only if any messages were delivered, with per-group throttle
       const state = get();
-      if (state.activeGroup) {
-        console.log(`[outbox-unified] ${sessionId} - Refreshing messages after processing...`);
-        await get().fetchMessages(state.activeGroup.id);
-        
-        // Refresh thread replies if thread is open
-        if (state.activeThread?.id) {
+      const groupsToRefresh = new Set<string>(stats?.groupsWithSent || []);
+      if (groupsToRefresh.size > 0) {
+        for (const groupId of groupsToRefresh) {
+          const lastAt = lastGroupRefreshAt[groupId] || 0;
+          const now = Date.now();
+          if (now - lastAt >= groupRefreshThrottleMs) {
+            lastGroupRefreshAt[groupId] = now;
+            try {
+              console.log(`[outbox-unified] ${sessionId} - Refreshing messages for group ${groupId} (sent=${stats?.sent})`);
+              await get().fetchMessages(groupId);
+            } catch (e) {
+              console.error(`[outbox-unified] ${sessionId} - Error refreshing group ${groupId}:`, e);
+            }
+          } else {
+            console.log(`[outbox-unified] ${sessionId} - Skipping refresh for group ${groupId} (throttled)`);
+          }
+        }
+        // Refresh thread replies if thread is open and belongs to a refreshed group
+        if (state.activeThread?.id && state.activeGroup?.id && groupsToRefresh.has(state.activeGroup.id)) {
           try {
             const replies = await get().fetchReplies(state.activeThread.id);
             _set({ threadReplies: replies });
@@ -248,6 +266,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
             console.error(`[outbox-unified] ${sessionId} - Error refreshing thread replies:`, e);
           }
         }
+      } else {
+        console.log(`[outbox-unified] ${sessionId} - No deliveries; skipping refresh`);
       }
       
     } catch (error) {
