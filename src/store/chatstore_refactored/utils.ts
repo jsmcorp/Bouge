@@ -1,5 +1,5 @@
 import { Message } from './types';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 // Helper function to structure messages with replies nested under parent messages
@@ -123,10 +123,11 @@ export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrit
 	const limit = typeof timeoutMs === 'number' ? timeoutMs : FEATURES_PUSH.auth.refreshTimeoutMs;
 	console.log(`[auth-debug] ${sessionId} - Using timeout: ${limit}ms`);
 
-	// Initial session check with detailed logging
+	// Initial session check with detailed logging using pipeline
 	try {
-		console.log(`[auth-debug] ${sessionId} - Getting current session...`);
-		const sessionResult = await supabase.auth.getSession();
+		console.log(`[auth-debug] ${sessionId} - Getting current session via pipeline...`);
+		const client = await supabasePipeline.getDirectClient();
+		const sessionResult = await client.auth.getSession();
 		console.log(`[auth-debug] ${sessionId} - Session result received, checking token...`);
 		const token = sessionResult?.data?.session?.access_token;
 		if (token) {
@@ -139,47 +140,20 @@ export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrit
 		console.log(`[auth-debug] ${sessionId} - Session check failed:`, e);
 	}
 
-	// Try refresh with timeout but do not block UI beyond limit
+	// Try refresh with pipeline (already has timeout handling)
 	try {
-		console.log(`[auth-debug] ${sessionId} - Creating abort controller for refresh...`);
-		const controller = new AbortController();
+		console.log(`[auth-debug] ${sessionId} - Starting pipeline refresh...`);
+		const refreshSuccess = await supabasePipeline.refreshSession();
+		console.log(`[auth-debug] ${sessionId} - Pipeline refresh result: ${refreshSuccess}`);
 		
-		console.log(`[auth-debug] ${sessionId} - Setting timeout for ${limit}ms...`);
-		const timeout = setTimeout(() => {
-			console.log(`[auth-debug] ${sessionId} - Timeout reached, aborting refresh...`);
-			controller.abort();
-		}, limit);
-		
-		console.log(`[auth-debug] ${sessionId} - Starting refresh session...`);
-		const refreshPromise = supabase.auth.refreshSession();
-		
-		console.log(`[auth-debug] ${sessionId} - Racing refresh vs timeout...`);
-		const outcome = await Promise.race([
-			refreshPromise.then((res) => {
-				console.log(`[auth-debug] ${sessionId} - Refresh completed, checking result...`);
-				const hasToken = !!res?.data?.session?.access_token;
-				console.log(`[auth-debug] ${sessionId} - Refresh success: ${hasToken}`);
-				return { ok: hasToken };
-			}),
-			new Promise<{ ok: boolean }>((resolve) => {
-				controller.signal.addEventListener('abort', () => {
-					console.log(`[auth-debug] ${sessionId} - Abort signal received`);
-					resolve({ ok: false });
-				});
-			}),
-		]);
-		
-		clearTimeout(timeout);
-		console.log(`[auth-debug] ${sessionId} - Race completed, outcome:`, outcome);
-		
-		if (outcome.ok) {
+		if (refreshSuccess) {
 			console.log(`[auth-debug] ${sessionId} - Refresh successful, writes ready`);
 			console.log('[auth] writes:ready');
 			return { canWrite: true };
 		}
-		console.log(`[auth-debug] ${sessionId} - Refresh failed/timed out`);
-		console.log('[auth] writes:blocked reason=refresh_timeout');
-		return { canWrite: false, reason: 'refresh_timeout' };
+		console.log(`[auth-debug] ${sessionId} - Refresh failed`);
+		console.log('[auth] writes:blocked reason=refresh_failed');
+		return { canWrite: false, reason: 'refresh_failed' };
 	} catch (e) {
 		console.log(`[auth-debug] ${sessionId} - Refresh error:`, e);
 		console.log('[auth] writes:blocked reason=refresh_error');

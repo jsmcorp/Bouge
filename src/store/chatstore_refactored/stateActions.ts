@@ -1,5 +1,6 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
-import { supabase, FEATURES } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
+import { FEATURES } from '@/lib/supabase';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { Network } from '@capacitor/network';
 import { markDeviceUnlock } from './messageActions';
@@ -181,6 +182,11 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       return;
     }
 
+    // Use pipeline to handle app resume (client reset, session refresh, outbox processing)
+    supabasePipeline.onAppResume().catch(error => {
+      console.error('[realtime-v2] Pipeline app resume failed:', error);
+    });
+
     // Mark device unlock to skip health checks
     markDeviceUnlock();
     console.log('[realtime-v2] App resumed after device unlock - forcing complete Supabase client rebuild');
@@ -200,31 +206,27 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         console.log('[realtime-v2] Starting 8-second timeout race for session refresh');
         
         isSessionRefreshing = true;
-        sessionRefreshPromise = Promise.race([
-          supabase.auth.refreshSession().then(result => {
-            const duration = Date.now() - refreshStartTime;
-            console.log(`[realtime-v2] Session refresh completed in ${duration}ms`);
-            return result;
-          }),
-          new Promise<never>((_, reject) => 
-            setTimeout(() => {
-              const duration = Date.now() - refreshStartTime;
-              console.log(`[realtime-v2] Session refresh timeout reached after ${duration}ms`);
-              reject(new Error('Session refresh timeout after 8 seconds'));
-            }, 8000)
-          )
-        ]);
+        sessionRefreshPromise = (async () => {
+          const success = await supabasePipeline.refreshSession();
+          const duration = Date.now() - refreshStartTime;
+          console.log(`[realtime-v2] Pipeline session refresh completed in ${duration}ms: ${success}`);
+          return { success };
+        })();
         
         try {
           const refreshResult = await sessionRefreshPromise;
-          const newToken = refreshResult?.data?.session?.access_token;
-          console.log('[realtime-v2] Session refresh successful:', !!newToken);
+          console.log('[realtime-v2] Session refresh successful:', refreshResult.success);
           
-          // Step 2: Complete client rebuild - apply fresh token to ALL client parts
-          try { 
-            (supabase as any).realtime?.setAuth?.(newToken || undefined); 
-            console.log('[realtime-v2] Applied fresh token to realtime client');
-          } catch {}
+          // Step 2: Complete client rebuild - apply fresh token to realtime
+          if (refreshResult.success) {
+            try { 
+              const client = await supabasePipeline.getDirectClient();
+              const session = await client.auth.getSession();
+              const newToken = session?.data?.session?.access_token;
+              (client as any).realtime?.setAuth?.(newToken || undefined); 
+              console.log('[realtime-v2] Applied fresh token to realtime client');
+            } catch {}
+          }
           
           // Step 3: Force recreate realtime connection
           const { forceReconnect } = get();
@@ -239,30 +241,23 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         } catch (error) {
           console.warn('[realtime-v2] Session refresh failed/timed out:', error);
           
-          // Retry logic with longer timeout
-          console.log('[realtime-v2] Attempting retry with 10-second timeout...');
+          // Retry logic using pipeline
+          console.log('[realtime-v2] Attempting retry with pipeline...');
           const retryStartTime = Date.now();
           
           try {
-            const retryResult = await Promise.race([
-              supabase.auth.refreshSession().then(result => {
-                const duration = Date.now() - retryStartTime;
-                console.log(`[realtime-v2] Retry session refresh completed in ${duration}ms`);
-                return result;
-              }),
-              new Promise<never>((_, reject) => 
-                setTimeout(() => {
-                  const duration = Date.now() - retryStartTime;
-                  console.log(`[realtime-v2] Retry session refresh timeout reached after ${duration}ms`);
-                  reject(new Error('Retry session refresh timeout after 10 seconds'));
-                }, 10000)
-              )
-            ]);
+            const retrySuccess = await supabasePipeline.refreshSession();
+            const duration = Date.now() - retryStartTime;
+            console.log(`[realtime-v2] Retry session refresh completed in ${duration}ms: ${retrySuccess}`);
             
-            const newToken = retryResult?.data?.session?.access_token;
-            console.log('[realtime-v2] Retry session refresh successful:', !!newToken);
-            
-            try { (supabase as any).realtime?.setAuth?.(newToken || undefined); } catch {}
+            if (retrySuccess) {
+              try { 
+                const client = await supabasePipeline.getDirectClient();
+                const session = await client.auth.getSession();
+                const newToken = session?.data?.session?.access_token;
+                (client as any).realtime?.setAuth?.(newToken || undefined); 
+              } catch {}
+            }
           } catch (retryError) {
             console.warn('[realtime-v2] Retry session refresh also failed:', retryError);
           }
@@ -293,6 +288,11 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         return get().onAppResumeSimplified();
       }
 
+      // Use pipeline to handle app resume (client reset, session refresh, outbox processing)
+      supabasePipeline.onAppResume().catch(error => {
+        console.error('[push] Pipeline app resume failed:', error);
+      });
+
       // Mark device unlock to skip health checks
       markDeviceUnlock();
       
@@ -310,7 +310,8 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         try {
           await sessionRefreshPromise;
           // Check if the existing refresh was successful
-          const currentSession = await supabase.auth.getSession();
+          const client = await supabasePipeline.getDirectClient();
+          const currentSession = await client.auth.getSession();
           clientRebuildSuccess = !!currentSession?.data?.session?.access_token;
         } catch (e) {
           console.warn('[push] wake - existing session refresh failed:', e);
@@ -320,63 +321,47 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         console.log('[push] wake - starting 8-second timeout race for session refresh');
         
         isSessionRefreshing = true;
-        sessionRefreshPromise = Promise.race([
-          supabase.auth.refreshSession().then(result => {
-            const duration = Date.now() - refreshStartTime;
-            console.log(`[push] wake - session refresh completed in ${duration}ms`);
-            return result;
-          }),
-          new Promise<never>((_, reject) => 
-            setTimeout(() => {
-              const duration = Date.now() - refreshStartTime;
-              console.log(`[push] wake - session refresh timeout reached after ${duration}ms`);
-              reject(new Error('Session refresh timeout after 8 seconds'));
-            }, 8000)
-          )
-        ]);
+        sessionRefreshPromise = (async () => {
+          const success = await supabasePipeline.refreshSession();
+          const duration = Date.now() - refreshStartTime;
+          console.log(`[push] wake - pipeline session refresh completed in ${duration}ms: ${success}`);
+          return { success };
+        })();
         
         try {
           const refreshResult = await sessionRefreshPromise;
-          const hasNewToken = !!refreshResult?.data?.session?.access_token;
+          const hasNewToken = refreshResult.success;
           console.log('[push] wake - session refresh completed:', hasNewToken);
           clientRebuildSuccess = hasNewToken;
           
           // Apply fresh token to complete client rebuild
           if (hasNewToken) {
             try { 
-              (supabase as any).realtime?.setAuth?.(refreshResult.data.session.access_token); 
+              const client = await supabasePipeline.getDirectClient();
+              const session = await client.auth.getSession();
+              (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
               console.log('[push] wake - applied fresh token to realtime client');
             } catch {}
           }
         } catch (e) {
           console.warn('[push] wake - session refresh failed/timed out:', e);
           
-          // Retry logic with longer timeout
-          console.log('[push] wake - attempting retry with 10-second timeout...');
+          // Retry logic using pipeline
+          console.log('[push] wake - attempting retry with pipeline...');
           const retryStartTime = Date.now();
           
           try {
-            const retryResult = await Promise.race([
-              supabase.auth.refreshSession().then(result => {
-                const duration = Date.now() - retryStartTime;
-                console.log(`[push] wake - retry session refresh completed in ${duration}ms`);
-                return result;
-              }),
-              new Promise<never>((_, reject) => 
-                setTimeout(() => {
-                  const duration = Date.now() - retryStartTime;
-                  console.log(`[push] wake - retry session refresh timeout reached after ${duration}ms`);
-                  reject(new Error('Retry session refresh timeout after 10 seconds'));
-                }, 10000)
-              )
-            ]);
+            const retrySuccess = await supabasePipeline.refreshSession();
+            const duration = Date.now() - retryStartTime;
+            console.log(`[push] wake - retry session refresh completed in ${duration}ms: ${retrySuccess}`);
+            clientRebuildSuccess = retrySuccess;
             
-            const hasNewToken = !!retryResult?.data?.session?.access_token;
-            console.log('[push] wake - retry session refresh completed:', hasNewToken);
-            clientRebuildSuccess = hasNewToken;
-            
-            if (hasNewToken && retryResult.data?.session) {
-              try { (supabase as any).realtime?.setAuth?.(retryResult.data.session.access_token); } catch {}
+            if (retrySuccess) {
+              try { 
+                const client = await supabasePipeline.getDirectClient();
+                const session = await client.auth.getSession();
+                (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
+              } catch {}
             }
           } catch (retryError) {
             console.warn('[push] wake - retry session refresh also failed:', retryError);

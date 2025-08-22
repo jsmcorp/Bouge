@@ -1,4 +1,5 @@
-import { supabase, FEATURES } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
+import { FEATURES } from '@/lib/supabase';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
@@ -61,7 +62,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   async function getAccessTokenBounded(limitMs: number): Promise<string | null> {
     try {
       const sessionRace = Promise.race([
-        supabase.auth.getSession().then((res) => res?.data?.session?.access_token || null),
+        (async () => {
+          const client = await supabasePipeline.getDirectClient();
+          const res = await client.auth.getSession();
+          return res?.data?.session?.access_token || null;
+        })(),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(800, limitMs))),
       ]);
       let token = await sessionRace;
@@ -72,7 +77,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), Math.max(800, limitMs));
         const refreshRace = Promise.race([
-          supabase.auth.refreshSession().then((res) => res?.data?.session?.access_token || null),
+          (async () => {
+            const success = await supabasePipeline.refreshSession();
+            if (success) {
+              const client = await supabasePipeline.getDirectClient();
+              const res = await client.auth.getSession();
+              return res?.data?.session?.access_token || null;
+            }
+            return null;
+          })(),
           new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
         ]);
         token = await refreshRace;
@@ -153,7 +166,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // Fallback to Supabase query (single, cached thereafter)
     try {
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('users')
         .select('display_name, avatar_url')
         .eq('id', userId)
@@ -277,7 +291,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // Verify poll belongs to the current group
     try {
-      const { data: msgRef, error: msgErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: msgRef, error: msgErr } = await client
         .from('messages')
         .select('group_id')
         .eq('id', pollRow.message_id)
@@ -295,7 +310,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     let votesCount = 0;
     let voteCounts: number[] = [];
     try {
-      const { data: votes, error: votesErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: votes, error: votesErr } = await client
         .from('poll_votes')
         .select('option_index')
         .eq('poll_id', pollRow.id);
@@ -316,7 +332,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     let userVoteIndex: number | null = null;
     try {
-      const { data: uv, error: uvErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: uv, error: uvErr } = await client
         .from('poll_votes')
         .select('option_index')
         .eq('poll_id', pollRow.id)
@@ -369,7 +386,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       
       // For simplified version, just check if we have a session
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        const client = await supabasePipeline.getDirectClient();
+        const { data: { session } } = await client.auth.getSession();
         return { ok: !!session?.access_token };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
@@ -404,7 +422,10 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
         // Ensure realtime has a valid token before subscribing (bounded wait)
         const accessToken = await getAccessTokenBounded(FEATURES_PUSH.auth.refreshTimeoutMs);
-        try { (supabase as any).realtime?.setAuth?.(accessToken || undefined); } catch (_) {}
+        try { 
+          const client = await supabasePipeline.getDirectClient();
+          (client as any).realtime?.setAuth?.(accessToken || undefined); 
+        } catch (_) {}
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -418,7 +439,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const channelName = `group-${groupId}-${localToken}`;
         log(`Creating channel: ${channelName}`);
         
-        const channel = supabase.channel(channelName, {
+        const client = await supabasePipeline.getDirectClient();
+        const channel = client.channel(channelName, {
           config: { 
             presence: { key: user.id },
             broadcast: { self: true }
@@ -587,28 +609,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 let refreshSuccess = false;
                 
                 try {
-                  log('🔧 CHANNEL_ERROR: Starting 8-second session refresh');
-                  const refreshResult = await Promise.race([
-                    supabase.auth.refreshSession().then(result => {
-                      const duration = Date.now() - refreshStartTime;
-                      log(`🔧 CHANNEL_ERROR: Session refresh completed in ${duration}ms`);
-                      return result;
-                    }),
-                    new Promise<null>((_, resolve) => 
-                      setTimeout(() => {
-                        const duration = Date.now() - refreshStartTime;
-                        log(`🔧 CHANNEL_ERROR: Session refresh timeout after ${duration}ms`);
-                        resolve(null);
-                      }, 8000)
-                    )
-                  ]);
+                  log('🔧 CHANNEL_ERROR: Starting pipeline session refresh');
+                  refreshSuccess = await supabasePipeline.refreshSession();
+                  const duration = Date.now() - refreshStartTime;
+                  log(`🔧 CHANNEL_ERROR: Pipeline session refresh completed in ${duration}ms: ${refreshSuccess}`);
                   
-                  if (refreshResult?.data?.session?.access_token) {
+                  if (refreshSuccess) {
                     log('🔧 CHANNEL_ERROR: Session refresh successful, applying to realtime');
-                    try { (supabase as any).realtime?.setAuth?.(refreshResult.data.session.access_token); } catch {}
-                    refreshSuccess = true;
+                    try { 
+                      const client = await supabasePipeline.getDirectClient();
+                      const session = await client.auth.getSession();
+                      (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
+                    } catch {}
                   } else {
-                    log('🔧 CHANNEL_ERROR: Session refresh failed or returned no token');
+                    log('🔧 CHANNEL_ERROR: Session refresh failed');
                   }
                 } catch (e) {
                   const duration = Date.now() - refreshStartTime;
@@ -621,25 +635,17 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                   const retryStartTime = Date.now();
                   
                   try {
-                    const retryResult = await Promise.race([
-                      supabase.auth.refreshSession().then(result => {
-                        const duration = Date.now() - retryStartTime;
-                        log(`🔧 CHANNEL_ERROR: Retry session refresh completed in ${duration}ms`);
-                        return result;
-                      }),
-                      new Promise<null>((_, resolve) => 
-                        setTimeout(() => {
-                          const duration = Date.now() - retryStartTime;
-                          log(`🔧 CHANNEL_ERROR: Retry session refresh timeout after ${duration}ms`);
-                          resolve(null);
-                        }, 10000)
-                      )
-                    ]);
+                    refreshSuccess = await supabasePipeline.refreshSession();
+                    const duration = Date.now() - retryStartTime;
+                    log(`🔧 CHANNEL_ERROR: Retry session refresh completed in ${duration}ms: ${refreshSuccess}`);
                     
-                    if (retryResult?.data?.session?.access_token) {
+                    if (refreshSuccess) {
                       log('🔧 CHANNEL_ERROR: Retry session refresh successful');
-                      try { (supabase as any).realtime?.setAuth?.(retryResult.data.session.access_token); } catch {}
-                      refreshSuccess = true;
+                      try { 
+                        const client = await supabasePipeline.getDirectClient();
+                        const session = await client.auth.getSession();
+                        (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
+                      } catch {}
                     }
                   } catch (retryError) {
                     log(`🔧 CHANNEL_ERROR: Retry session refresh also failed: ${retryError}`);
@@ -648,27 +654,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 
                 log(`🔧 CHANNEL_ERROR: Client rebuild result: ${refreshSuccess ? 'SUCCESS' : 'FAILED'}`);
               } else {
-                // Standard session refresh for CLOSED/TIMED_OUT
+                // Standard session refresh for CLOSED/TIMED_OUT using pipeline
                 let currentSession: any = null;
                 try {
-                  const res = await supabase.auth.getSession();
+                  const client = await supabasePipeline.getDirectClient();
+                  const res = await client.auth.getSession();
                   currentSession = res?.data?.session || null;
                 } catch (_) {}
                 if (!currentSession?.access_token) {
                   try {
-                    const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
-                    const refreshed = await Promise.race([
-                      supabase.auth.refreshSession().then((res) => res?.data?.session || null),
-                      new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
-                    ]);
-                    clearTimeout(timeout);
-                    currentSession = refreshed ?? null;
+                    const refreshed = await supabasePipeline.refreshSession();
+                    if (refreshed) {
+                      const client = await supabasePipeline.getDirectClient();
+                      const res = await client.auth.getSession();
+                      currentSession = res?.data?.session || null;
+                    }
                   } catch (_) {}
                 }
 
                 // Update realtime auth with whatever token we have (may be undefined)
-                try { (supabase as any).realtime?.setAuth?.(currentSession?.access_token); } catch (_) {}
+                try { 
+                  const client = await supabasePipeline.getDirectClient();
+                  (client as any).realtime?.setAuth?.(currentSession?.access_token); 
+                } catch (_) {}
               }
 
               set({ connectionStatus: 'disconnected' });
@@ -686,13 +694,16 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
         // Subscribe watchdog: if we don't reach SUBSCRIBED within a bound, rebuild
         try {
-          const watchdog = setTimeout(() => {
+          const watchdog = setTimeout(async () => {
             if (localToken !== connectionToken) return;
             const state = get();
             if (state.connectionStatus !== 'connected') {
               log('Subscribe watchdog timeout, rebuilding connection');
               isConnecting = false;
-              try { supabase.removeChannel(channel); } catch {}
+              try { 
+                const client = await supabasePipeline.getDirectClient();
+                client.removeChannel(channel); 
+              } catch {}
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId, 300);
             }
@@ -708,7 +719,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
     },
 
-    cleanupRealtimeSubscription: () => {
+    cleanupRealtimeSubscription: async () => {
       const { realtimeChannel, typingTimeout, heartbeatTimer, reconnectWatchdogTimer } = get();
 
       log('Cleaning up realtime subscription');
@@ -719,7 +730,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       
       if (realtimeChannel) {
         try {
-          supabase.removeChannel(realtimeChannel);
+          const client = await supabasePipeline.getDirectClient();
+          client.removeChannel(realtimeChannel);
         } catch (e) {
           log('Error removing channel: ' + e);
         }
@@ -850,32 +862,39 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       log('Setting up auth state listener for realtime');
       
-      authStateListener = supabase.auth.onAuthStateChange((event, session) => {
-        const state = get();
-        const activeGroupId = state.activeGroup?.id;
-        
-        log(`Auth event: ${event}`);
-        
-        if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-          // Always apply the latest token to realtime
-          try { (supabase as any).realtime?.setAuth?.(session?.access_token); } catch {}
-          if (activeGroupId) {
-            log('Token applied, reconnecting realtime');
-            get().forceReconnect(activeGroupId);
-          }
-          // Reset outbox state and kick processing after token events using unified system (delayed to avoid redundant triggers)
-          resetOutboxProcessingState();
-          try {
-            const { triggerOutboxProcessing } = get();
-            if (typeof triggerOutboxProcessing === 'function') {
-              setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+      (async () => {
+        try {
+          const client = await supabasePipeline.getDirectClient();
+          authStateListener = client.auth.onAuthStateChange((event, session) => {
+            const state = get();
+            const activeGroupId = state.activeGroup?.id;
+            
+            log(`Auth event: ${event}`);
+            
+            if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+              // Always apply the latest token to realtime
+              try { (client as any).realtime?.setAuth?.(session?.access_token); } catch {}
+              if (activeGroupId) {
+                log('Token applied, reconnecting realtime');
+                get().forceReconnect(activeGroupId);
+              }
+              // Reset outbox state and kick processing after token events using unified system (delayed to avoid redundant triggers)
+              resetOutboxProcessingState();
+              try {
+                const { triggerOutboxProcessing } = get();
+                if (typeof triggerOutboxProcessing === 'function') {
+                  setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+                }
+              } catch {}
+            } else if (event === 'SIGNED_OUT') {
+              log('User signed out, cleaning up realtime');
+              get().cleanupRealtimeSubscription();
             }
-          } catch {}
-        } else if (event === 'SIGNED_OUT') {
-          log('User signed out, cleaning up realtime');
-          get().cleanupRealtimeSubscription();
+          }).data.subscription;
+        } catch (error) {
+          log('Error setting up auth listener: ' + error);
         }
-      }).data.subscription;
+      })();
 
       return () => {
         if (authStateListener) {

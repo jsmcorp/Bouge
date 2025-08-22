@@ -1,9 +1,9 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
-import { FEATURES_PUSH } from '@/lib/featureFlags';
+
 
 // ============================================================================
 // UNIFIED OUTBOX PROCESSING TRIGGER SYSTEM
@@ -189,320 +189,57 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
     }
   },
   processOutbox: async () => {
-    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // Prevent overlapping outbox processing
+    if (isProcessingOutbox) {
+      pendingRerunCount++;
+      console.log(`[outbox-unified] Processing already active, queued rerun #${pendingRerunCount}`);
+      return;
+    }
+    
+    isProcessingOutbox = true;
+    const sessionId = `outbox-${Date.now()}`;
+    console.log(`[outbox-unified] Starting processing session ${sessionId}`);
+    
     try {
-      if (isProcessingOutbox) {
-        pendingRerunCount++;
-        console.log(`[outbox-unified] Processing already active, queued rerun #${pendingRerunCount}`);
-        return;
-      }
-      
-      isProcessingOutbox = true;
-      console.log(`[outbox-unified] Starting processing session ${sessionId}`);
-      
-      // Set watchdog to prevent permanent blocking (reduced to 15 second timeout)
+      // Set watchdog to prevent permanent blocking
       processingWatchdog = setTimeout(() => {
         watchdogTimeoutCount++;
         console.warn(`⚠️ [outbox-unified] Watchdog timeout after 15s - session ${sessionId} - timeout count: ${watchdogTimeoutCount}`);
         
-        // If we've had too many consecutive timeouts, stop triggering to prevent infinite loops
         if (watchdogTimeoutCount >= 5) {
           console.warn(`⚠️ [outbox-unified] Too many consecutive timeouts (${watchdogTimeoutCount}), stopping auto-recovery`);
-          isProcessingOutbox = false;
-          pendingRerunCount = 0;
-          if (processingWatchdog) {
-            clearTimeout(processingWatchdog);
-            processingWatchdog = null;
-          }
+          resetOutboxProcessingState();
           return;
         }
         
         resetOutboxProcessingState();
       }, 15000);
-      console.log(`[outbox-unified] ${sessionId} - Checking SQLite readiness...`);
+
+      // Check prerequisites
       if (!await checkSqliteReady()) {
         console.log(`[outbox-unified] ${sessionId} - SQLite not ready, aborting`);
         return;
       }
       
-      console.log(`[outbox-unified] ${sessionId} - Checking network connectivity...`);
       if (!await checkOnline()) {
         console.log(`[outbox-unified] ${sessionId} - Network offline, aborting`);
         return;
       }
 
-      console.log(`[outbox-unified] ${sessionId} - Fetching outbox messages...`);
-      const outboxMessages = await sqliteService.getOutboxMessages();
-
-      if (outboxMessages.length === 0) {
-        console.log(`[outbox-unified] ${sessionId} - No pending outbox messages to process`);
-        return;
-      }
-
-      console.log(`[outbox-unified] ${sessionId} - Found ${outboxMessages.length} pending messages to send`);
-
-      // Skip auth check and session check completely to avoid hangs
-      // Let the server validate auth per request instead
-      console.log(`[outbox-unified] ${sessionId} - Skipping auth pre-check to avoid hangs after device unlock`);
-      console.log(`[outbox-unified] ${sessionId} - Server will validate auth per message`);
-
-      const now = Date.now();
-      for (let i = 0; i < outboxMessages.length; i++) {
-        const outboxItem = outboxMessages[i];
-        console.log(`[outbox-unified] ${sessionId} - Processing message ${i + 1}/${outboxMessages.length} (ID: ${outboxItem.id})`);
-        try {
-          const messageData = JSON.parse(outboxItem.content);
-
-          // Respect next_retry_at; skip until it's due
-          if (outboxItem.next_retry_at && outboxItem.next_retry_at > now) {
-            console.log(`[outbox-unified] ${sessionId} - Skipping outbox ${outboxItem.id} until ${new Date(outboxItem.next_retry_at).toISOString()}`);
-            continue;
-          }
-
-          console.log(`[outbox-unified] ${sessionId} - Sending message ${outboxItem.id} to Supabase...`);
-          
-          // Add timeout to the Supabase insert operation
-          const insertPromise = supabase
-            .from('messages')
-            .insert({
-              group_id: outboxItem.group_id,
-              user_id: outboxItem.user_id,
-              content: messageData.content,
-              is_ghost: messageData.is_ghost,
-              message_type: messageData.message_type,
-              category: messageData.category,
-              parent_id: messageData.parent_id,
-              image_url: messageData.image_url,
-            })
-            .select(`
-              *,
-              reactions(*),
-              users!messages_user_id_fkey(display_name, avatar_url)
-            `)
-            .single();
-
-          // Enhanced timeout handling with duration logging for outbox operations
-          const insertStartTime = Date.now();
-          console.log(`[outbox-unified] ${sessionId} - Starting 8-second timeout race for outbox message ${outboxItem.id}`);
-          
-          const { data, error } = await Promise.race([
-            insertPromise.then(result => {
-              const duration = Date.now() - insertStartTime;
-              console.log(`[outbox-unified] ${sessionId} - Supabase insert completed for outbox message ${outboxItem.id} in ${duration}ms`);
-              return result;
-            }),
-            new Promise<never>((_, reject) => 
-              setTimeout(() => {
-                const duration = Date.now() - insertStartTime;
-                console.log(`[outbox-unified] ${sessionId} - Supabase insert timeout for outbox message ${outboxItem.id} after ${duration}ms`);
-                reject(new Error(`Supabase insert timeout after 8s for outbox message ${outboxItem.id}`));
-              }, 8000)
-            )
-          ]) as { data: any; error: any };
-
-          if (error) {
-            console.error(`[outbox-unified] ${sessionId} - Error sending outbox message ${outboxItem.id}:`, error);
-            // Detect auth-related errors and handle with fast refresh + quick retry
-            const status = (error as any)?.status || (error as any)?.code;
-            const message = String((error as any)?.message || '').toLowerCase();
-            const isAuthError = status === 401 || status === 403 || message.includes('jwt') || message.includes('auth');
-
-            console.log(`[outbox-unified] ${sessionId} - Error analysis for ${outboxItem.id}: status=${status}, isAuth=${isAuthError}`);
-
-            if (isAuthError) {
-              try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
-                const refreshed = await Promise.race([
-                  supabase.auth.refreshSession(),
-                  new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null)))
-                ]);
-                clearTimeout(timeout);
-                const ok = (refreshed as any)?.data?.session?.access_token;
-                if (ok) {
-                  // One immediate retry after refresh
-                  const retryRes = await supabase
-                    .from('messages')
-                    .insert({
-                      group_id: outboxItem.group_id,
-                      user_id: outboxItem.user_id,
-                      content: messageData.content,
-                      is_ghost: messageData.is_ghost,
-                      message_type: messageData.message_type,
-                      category: messageData.category,
-                      parent_id: messageData.parent_id,
-                      image_url: messageData.image_url,
-                    })
-                    .select(`
-                      *,
-                      reactions(*),
-                      users!messages_user_id_fkey(display_name, avatar_url)
-                    `)
-                    .single();
-                  if (!(retryRes as any).error) {
-                    // Treat as success path
-                    const data = (retryRes as any).data;
-                    console.log(`✅ Successfully sent outbox message ${outboxItem.id} after auth refresh`);
-                    await sqliteService.removeFromOutbox(outboxItem.id!);
-                    const state = get();
-                    if (messageData.parent_id) {
-                      const updatedMessages = state.messages.map((msg: any) => {
-                        if (msg.id === messageData.parent_id) {
-                          return {
-                            ...msg,
-                            replies: (msg.replies || []).map((reply: any) =>
-                              reply.id === messageData.id 
-                                ? { 
-                                    ...reply, 
-                                    delivery_status: 'delivered', 
-                                    id: data.id,
-                                    created_at: data.created_at
-                                  }
-                                : reply
-                            ),
-                          };
-                        }
-                        return msg;
-                      });
-                      _set({ messages: updatedMessages });
-                      if (state.activeThread?.id === messageData.parent_id) {
-                        const updatedReplies = state.threadReplies.map((reply: any) =>
-                          reply.id === messageData.id 
-                            ? { ...reply, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
-                            : reply
-                        );
-                        _set({ threadReplies: updatedReplies });
-                      }
-                    } else {
-                      const updatedMessages = state.messages.map((msg: any) =>
-                        msg.id === messageData.id 
-                          ? { ...msg, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
-                          : msg
-                      );
-                      _set({ messages: updatedMessages });
-                    }
-                    await sqliteService.saveMessage({
-                      id: data.id,
-                      group_id: data.group_id,
-                      user_id: data.user_id,
-                      content: data.content,
-                      is_ghost: data.is_ghost ? 1 : 0,
-                      message_type: data.message_type,
-                      category: data.category || null,
-                      parent_id: data.parent_id || null,
-                      image_url: data.image_url || null,
-                      created_at: new Date(data.created_at).getTime()
-                    });
-                    try { await sqliteService.deleteMessage(messageData.id); } catch {}
-                    if (!data.is_ghost && data.users) {
-                      await saveUserFromSupabase({ ...data.users, id: data.user_id, is_onboarded: 1 });
-                    }
-                    continue; // handled
-                  }
-                }
-              } catch (_) {}
-              // Quick retry soon for auth failures
-              const attempt = (outboxItem.retry_count || 0) + 1;
-              const nextRetry = Date.now() + Math.min(1500, FEATURES_PUSH.outbox.retryShortDelayMs);
-              await sqliteService.updateOutboxRetry(outboxItem.id!, attempt, nextRetry);
-              continue;
-            }
-
-            // Generic backoff for non-auth errors: min(2^n * 5s, 5m) + 0-1s
-            const attempt = (outboxItem.retry_count || 0) + 1;
-            const base = Math.min(Math.pow(2, attempt) * 5000, 5 * 60 * 1000);
-            const jitter = Math.floor(Math.random() * 1000);
-            const nextRetry = Date.now() + base + jitter;
-            await sqliteService.updateOutboxRetry(
-              outboxItem.id!,
-              attempt,
-              nextRetry
-            );
-            continue;
-          }
-
-          console.log(`[outbox-unified] ${sessionId} - Successfully sent outbox message ${outboxItem.id}`);
-          await sqliteService.removeFromOutbox(outboxItem.id!);
-
-          const state = get();
-          if (messageData.parent_id) {
-            const updatedMessages = state.messages.map((msg: any) => {
-              if (msg.id === messageData.parent_id) {
-                return {
-                  ...msg,
-                  replies: (msg.replies || []).map((reply: any) =>
-                    reply.id === messageData.id 
-                      ? { 
-                          ...reply, 
-                          delivery_status: 'delivered', 
-                          id: data.id,
-                          created_at: data.created_at
-                        }
-                      : reply
-                  ),
-                };
-              }
-              return msg;
-            });
-            _set({ messages: updatedMessages });
-
-            if (state.activeThread?.id === messageData.parent_id) {
-              const updatedReplies = state.threadReplies.map((reply: any) =>
-                reply.id === messageData.id 
-                  ? { ...reply, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
-                  : reply
-              );
-              _set({ threadReplies: updatedReplies });
-            }
-          } else {
-            // Update the optimistic message to the real ID and delivered status
-            const updatedMessages = state.messages.map((msg: any) =>
-              msg.id === messageData.id 
-                ? { ...msg, delivery_status: 'delivered', id: data.id, created_at: data.created_at }
-                : msg
-            );
-            _set({ messages: updatedMessages });
-          }
-
-          await sqliteService.saveMessage({
-            id: data.id,
-            group_id: data.group_id,
-            user_id: data.user_id,
-            content: data.content,
-            is_ghost: data.is_ghost ? 1 : 0,
-            message_type: data.message_type,
-            category: data.category || null,
-            parent_id: data.parent_id || null,
-            image_url: data.image_url || null,
-            created_at: new Date(data.created_at).getTime()
-          });
-
-          try {
-            await sqliteService.deleteMessage(messageData.id);
-            console.log(`🗑️ Removed temp message ${messageData.id} after successful sync`);
-          } catch (error) {
-            console.error(`❌ Error removing temp message ${messageData.id}:`, error);
-          }
-
-          if (!data.is_ghost && data.users) {
-            await saveUserFromSupabase({ ...data.users, id: data.user_id, is_onboarded: 1 });
-          }
-        } catch (error) {
-          console.error(`[outbox-unified] ${sessionId} - Error processing outbox message ${outboxItem.id}:`, error);
-        }
-      }
-
-      console.log(`[outbox-unified] ${sessionId} - Finished processing all outbox messages`);
+      // Use pipeline to process outbox (handles all retry logic, auth, timeouts)
+      await supabasePipeline.processOutbox();
       
       // Reset watchdog timeout count on successful completion
       watchdogTimeoutCount = 0;
-      console.log(`[outbox-unified] ${sessionId} - Reset watchdog timeout count after successful processing`);
+      console.log(`[outbox-unified] ${sessionId} - Pipeline processing completed successfully`);
       
+      // Refresh UI if needed
       const state = get();
-      if (state.activeGroup && outboxMessages.length > 0) {
+      if (state.activeGroup) {
         console.log(`[outbox-unified] ${sessionId} - Refreshing messages after processing...`);
         await get().fetchMessages(state.activeGroup.id);
-        // If a thread is open, refresh its replies too
+        
+        // Refresh thread replies if thread is open
         if (state.activeThread?.id) {
           try {
             const replies = await get().fetchReplies(state.activeThread.id);
@@ -512,8 +249,9 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
           }
         }
       }
+      
     } catch (error) {
-      console.error(`[outbox-unified] ${sessionId} - Fatal error during processing:`, error);
+      console.error(`[outbox-unified] ${sessionId} - Pipeline processing failed:`, error);
     } finally {
       // Clear watchdog
       if (processingWatchdog) {
@@ -563,7 +301,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       if (!await checkSqliteReady()) return;
       console.log(`📊 Syncing message-related data for group ${groupId}...`);
 
-      const { data: groupData } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: groupData } = await client
         .from('groups')
         .select('*')
         .eq('id', groupId)
@@ -583,7 +322,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         });
       }
 
-      const { data: members } = await supabase
+      const { data: members } = await client
         .from('group_members')
         .select('*, users!group_members_user_id_fkey(*)')
         .eq('group_id', groupId);
@@ -602,7 +341,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
 
       const messageIds = messages.map(msg => msg.id);
       if (messageIds.length > 0) {
-        const { data: reactions } = await supabase
+        const { data: reactions } = await client
           .from('reactions')
           .select('*')
           .in('message_id', messageIds);
@@ -622,7 +361,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
 
       const pollMessages = messages.filter(msg => msg.message_type === 'poll');
       if (pollMessages.length > 0) {
-        const { data: polls } = await supabase
+        const { data: polls } = await client
           .from('polls')
           .select('*')
           .in('message_id', pollMessages.map(msg => msg.id));
@@ -659,7 +398,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         return;
       }
 
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('messages')
         .select(`
           *,

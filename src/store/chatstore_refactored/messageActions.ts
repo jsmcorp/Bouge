@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
@@ -6,13 +6,9 @@ import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
 
-// Track device unlock/resume to skip health check
-let lastDeviceUnlockTime = 0;
+// Use pipeline's device unlock tracking
 export const markDeviceUnlock = () => {
-  lastDeviceUnlockTime = Date.now();
-};
-const isRecentlyUnlocked = () => {
-  return (Date.now() - lastDeviceUnlockTime) < 30000; // 30 seconds
+  supabasePipeline.markDeviceUnlocked();
 };
 
 export interface MessageActions {
@@ -21,73 +17,38 @@ export interface MessageActions {
 
 export const createMessageActions = (set: any, get: any): MessageActions => ({
   sendMessage: async (groupId: string, content: string, isGhost: boolean, messageType = 'text', category: string | null = null, parentId: string | null = null, _pollId: string | null = null, imageFile: File | null = null) => {
-    console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType, isOnline: 'checking...' });
+    console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType });
     
-    // Declare messageId at the function scope so it's accessible in catch blocks
     let messageId: string = 'unknown';
     
     try {
-      // Check network status first
+      // Check network status
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
       console.log('🌐 Network status:', { isOnline, connectionType: networkStatus.connectionType });
 
-      // Check if we're on a native platform with SQLite available
-      const isNative = Capacitor.isNativePlatform();
-      const isSqliteReady = isNative && await sqliteService.isReady();
-
-      // Get user - handle offline case gracefully
-      console.log('🔐 Getting user authentication...');
-      let user;
+      // Get user from auth store (prefer local to avoid network calls)
+      const authStore = useAuthStore.getState();
+      let user = authStore.user || authStore.session?.user || null;
       
-      if (!isOnline) {
-        // When offline, get user from auth store (no network calls)
-        console.log('📵 Offline: Getting user from auth store');
+      // Fallback to Supabase client if no local user and we're online
+      if (!user && isOnline) {
         try {
-          const authStore = useAuthStore.getState();
-          user = authStore.user || authStore.session?.user || null;
-          console.log('📱 Got user from auth store:', !!user, user?.id);
+          const client = await supabasePipeline.getDirectClient();
+          const { data: { user: authUser } } = await client.auth.getUser();
+          user = authUser;
         } catch (error) {
-          console.log('❌ Failed to get user from auth store:', error instanceof Error ? error.message : String(error));
-          user = null;
-        }
-      } else {
-        // When online, prefer fast local store user/session to avoid blocking on auth
-        const authStore = useAuthStore.getState();
-        if (authStore?.user || authStore?.session?.user) {
-          user = authStore.user || authStore.session?.user;
-          console.log('📱 Got user from auth store/session (online):', !!user);
-        } else {
-          // Fallback to Supabase methods only if absolutely necessary
-          try {
-            const { data: { user: authUser } } = await supabase.auth.getUser();
-            user = authUser;
-            console.log('✅ Got user from server:', !!user);
-          } catch (error) {
-            console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
-            try {
-              console.log('🔄 Falling back to local session...');
-              const session = await supabase.auth.getSession();
-              user = session.data.session?.user || null;
-              console.log('📱 Got user from local session fallback:', !!user);
-            } catch (sessionError) {
-              console.log('❌ Local session fallback failed:', sessionError instanceof Error ? sessionError.message : String(sessionError));
-              throw error; // Throw original error
-            }
-          }
+          console.log('❌ Failed to get user from client:', error);
         }
       }
 
       if (!user) {
-        console.log('❌ No user found, throwing authentication error');
         throw new Error('Not authenticated');
       }
-      
-      console.log('✅ User authenticated, proceeding with message send');
 
       let imageUrl: string | null = null;
 
-      // Upload image if provided - only possible when online
+      // Handle image upload if provided and online
       if (imageFile && isOnline) {
         get().setUploadingFile(true);
 
@@ -121,7 +82,6 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
 
           canvas.width = width;
           canvas.height = height;
-
           ctx?.drawImage(img, 0, 0, width, height);
 
           // Convert to blob with compression
@@ -132,8 +92,9 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           // Create file name
           const fileName = `${user.id}/${Date.now()}_${imageFile.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
 
-          // Upload to Supabase Storage
-          const { data: uploadData, error: uploadError } = await supabase.storage
+          // Upload to Supabase Storage using direct client
+          const client = await supabasePipeline.getDirectClient();
+          const { data: uploadData, error: uploadError } = await client.storage
             .from('chat-media')
             .upload(fileName, blob, {
               contentType: 'image/jpeg',
@@ -143,13 +104,11 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           if (uploadError) throw uploadError;
 
           // Get public URL
-          const { data: { publicUrl } } = supabase.storage
+          const { data: { publicUrl } } = client.storage
             .from('chat-media')
             .getPublicUrl(uploadData.path);
 
           imageUrl = publicUrl;
-
-          // Clean up
           URL.revokeObjectURL(img.src);
         } catch (error) {
           console.error('Error uploading image:', error);
@@ -158,17 +117,15 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           get().setUploadingFile(false);
         }
       } else if (imageFile && !isOnline) {
-        // Cannot upload images when offline
-        console.warn('⚠️ Cannot upload images when offline');
         throw new Error('Cannot upload images when offline');
       }
 
-      // Generate client ids: client-visible temp id, plus dedupe_key for server idempotency
+      // Generate message ID and dedupe key
       const clientMsgId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
       messageId = isOnline ? clientMsgId : `temp-${clientMsgId}`;
       const dedupeKey = `d:${user.id}:${groupId}:${clientMsgId}`;
 
-      // Create optimistic message
+      // Create optimistic message for UI
       const optimisticMessage: Message = {
         id: messageId,
         group_id: groupId,
@@ -189,7 +146,6 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       };
 
       // Add optimistic message to UI
-      console.log('📤 Adding optimistic message to UI:', { messageId, content, parentId });
       if (parentId) {
         const state = get();
         const updatedMessages = state.messages.map((msg: Message) => {
@@ -203,20 +159,18 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           return msg;
         });
         set({ messages: updatedMessages });
-        console.log('📤 Added reply to parent message');
 
         if (state.activeThread?.id === parentId) {
           set({ threadReplies: [...state.threadReplies, optimisticMessage] });
         }
       } else {
         get().addMessage(optimisticMessage);
-        console.log('📤 Added new message to chat');
       }
 
       // Stop typing indicator
       get().sendTypingStatus(false, isGhost);
 
-      // Persist draft immediately for guaranteed recovery (even online, for durability)
+      // Persist draft for recovery
       try {
         await get().markMessageAsDraft({
           id: messageId,
@@ -232,11 +186,13 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         });
       } catch (_) {}
 
-      // If offline, handle message appropriately
+      // If offline, queue for later and return
       if (!isOnline) {
+        const isNative = Capacitor.isNativePlatform();
+        const isSqliteReady = isNative && await sqliteService.isReady();
+        
         if (isSqliteReady) {
           try {
-            console.log('📵 Offline mode: Enqueueing message to outbox');
             await get().enqueueOutbox({
               id: messageId,
               group_id: groupId,
@@ -249,384 +205,138 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               image_url: imageUrl || null
             });
 
-            console.log('✅ Message saved to local storage and outbox');
-            // Immediate outbox trigger for offline messages using unified system
-            try {
-              const { triggerOutboxProcessing } = get();
-              if (typeof triggerOutboxProcessing === 'function') {
-                triggerOutboxProcessing('offline-message', 'high');
-              }
-            } catch {}
-          } catch (error) {
-            console.error('❌ Error saving offline message:', error);
-            // Don't throw error, just log it and continue with optimistic UI update
-          }
-        } else {
-          console.log('📵 Offline mode: SQLite not available, showing optimistic message only');
-        }
-
-        // Update message status - keep as 'sending' when offline to show clock icon
-        const updatedMessage = { 
-          ...optimisticMessage, 
-          delivery_status: 'sending' as const 
-        };
-
-        if (parentId) {
-          const state = get();
-          const updatedMessages = state.messages.map((msg: Message) => {
-            if (msg.id === parentId) {
-              return {
-                ...msg,
-                replies: (msg.replies || []).map(reply =>
-                  reply.id === messageId ? updatedMessage : reply
-                ),
-                reply_count: (msg.reply_count || 0) + 1,
-              };
-            }
-            return msg;
-          });
-          set({ messages: updatedMessages });
-
-          if (state.activeThread?.id === parentId) {
-            const updatedReplies = state.threadReplies.map((reply: Message) =>
-              reply.id === messageId ? updatedMessage : reply
-            );
-            set({ threadReplies: updatedReplies });
-          }
-        } else {
-          const state = get();
-          const updatedMessages = state.messages.map((msg: Message) =>
-            msg.id === messageId ? updatedMessage : msg
-          );
-          set({ messages: updatedMessages });
-        }
-
-        // Clear reply state if not in thread
-        if (!get().activeThread) {
-          set({ replyingTo: null });
-        }
-
-        return;
-      }
-
-      // Skip health check after device unlock - go straight to outbox
-      if (isRecentlyUnlocked()) {
-        console.log(`📤 Skipping health check due to recent device unlock - falling back to outbox for message ${messageId}`);
-        
-        try {
-          const isNative = Capacitor.isNativePlatform();
-          const ready = isNative && await sqliteService.isReady();
-          if (ready) {
-            await get().enqueueOutbox({
-              id: messageId,
-              group_id: groupId,
-              user_id: user.id,
-              content,
-              is_ghost: isGhost,
-              message_type: messageType,
-              category: category || null,
-              parent_id: parentId || null,
-              image_url: imageUrl || null,
-            });
-            console.log(`📤 Message ${messageId} enqueued to outbox due to recent device unlock`);
-            
-            // Trigger outbox processing immediately
-            try {
-              const { triggerOutboxProcessing } = get();
-              if (typeof triggerOutboxProcessing === 'function') {
-                triggerOutboxProcessing('device-unlock-skip', 'high');
-              }
-            } catch {}
-            
-            return; // Exit early - outbox will handle delivery
-          }
-        } catch (outboxError) {
-          console.error(`📤 Outbox fallback failed after device unlock - message ${messageId}:`, outboxError);
-        }
-        
-        throw new Error(`Skipped health check due to recent device unlock`);
-      }
-      
-      // Client is healthy, proceed with direct send with enhanced retry logic
-      console.log(`📤 Client healthy, proceeding with direct Supabase send for message ${messageId}`);
-      
-      let lastError: any = null;
-      let retryCount = 0;
-      const maxRetries = 2; // Initial attempt + 1 retry
-      let successData: any = undefined;
-      
-      while (retryCount <= maxRetries) {
-        const attemptNum = retryCount + 1;
-        const timeoutMs = retryCount === 0 ? 5000 : 8000; // 5s first attempt, 8s retry
-        
-        try {
-          console.log(`📤 Attempt ${attemptNum}/${maxRetries + 1}: Sending message ${messageId} to Supabase...`);
-          
-          // Create the insert promise
-          const insertPromise = supabase
-            .from('messages')
-            .upsert({
-              group_id: groupId,
-              user_id: user.id,
-              content,
-              is_ghost: isGhost,
-              message_type: messageType,
-              category,
-              parent_id: parentId,
-              image_url: imageUrl,
-              dedupe_key: dedupeKey,
-            }, { onConflict: 'dedupe_key' })
-            .select(`
-              *,
-              reactions(*),
-              users!messages_user_id_fkey(display_name, avatar_url)
-            `)
-            .single();
-          
-          console.log(`📤 Starting ${timeoutMs}ms timeout race for Supabase insert of message ${messageId} (attempt ${attemptNum})...`);
-          const { data, error } = await Promise.race([
-            insertPromise.then(result => {
-              console.log(`📤 Supabase insert completed for message ${messageId} (attempt ${attemptNum})`);
-              return result;
-            }),
-            new Promise<never>((_, reject) => 
-              setTimeout(() => {
-                console.log(`📤 Supabase insert timeout reached for message ${messageId} (attempt ${attemptNum}) after ${timeoutMs}ms`);
-                reject(new Error(`Supabase insert timeout after ${timeoutMs}ms (attempt ${attemptNum})`));
-              }, timeoutMs)
-            )
-          ]);
-          
-          if (error) {
-            console.error(`📤 Supabase error for message ${messageId} (attempt ${attemptNum}):`, error);
-            lastError = error;
-            
-            // Determine if error is retryable
-            const isRetryableError = (
-              error.message?.includes('timeout') ||
-              error.message?.includes('network') ||
-              error.message?.includes('ENOTFOUND') ||
-              error.message?.includes('ECONNRESET') ||
-              error.code === 'PGRST301' || // JWT expired
-              error.code === 'PGRST116'    // Row level security
-            );
-            
-            if (retryCount < maxRetries && isRetryableError) {
-              const backoffMs = 1000 * (retryCount + 1); // 1s, 2s backoff
-              console.log(`📤 Retryable error for message ${messageId}, backing off ${backoffMs}ms before retry...`);
-              await new Promise(resolve => setTimeout(resolve, backoffMs));
-              retryCount++;
-              continue; // Try again
-            } else {
-              // Non-retryable error or max retries reached
-              throw error;
-            }
-          }
-          
-          // Success! Store the result and break
-          successData = data;
-          break;
-          
-        } catch (attemptError: any) {
-          console.error(`📤 Attempt ${attemptNum} failed for message ${messageId}:`, attemptError);
-          lastError = attemptError;
-          
-          // Determine if error is retryable
-          const isRetryableError = (
-            attemptError.message?.includes('timeout') ||
-            attemptError.message?.includes('network') ||
-            attemptError.message?.includes('ENOTFOUND') ||
-            attemptError.message?.includes('ECONNRESET') ||
-            attemptError.code === 'PGRST301' || // JWT expired
-            attemptError.code === 'PGRST116'    // Row level security
-          );
-          
-          if (retryCount < maxRetries && isRetryableError) {
-            const backoffMs = 1000 * (retryCount + 1); // 1s, 2s backoff
-            console.log(`📤 Retryable error for message ${messageId}, backing off ${backoffMs}ms before retry...`);
-            await new Promise(resolve => setTimeout(resolve, backoffMs));
-            retryCount++;
-            continue; // Try again
-          } else {
-            // Non-retryable error or max retries reached - fallback to outbox
-            break;
-          }
-        }
-      }
-      
-      // Check if we have successful data to process
-      if (successData) {
-        console.log(`📤 Successfully sent message ${messageId} to Supabase, got server ID: ${successData.id}`);
-
-        // Replace optimistic message with real message
-        const realMessage = {
-          ...successData,
-          author: successData.is_ghost ? undefined : successData.users,
-          reply_count: 0,
-          replies: [],
-          delivery_status: 'sent' as const,
-        };
-
-        // Update the optimistic message with real data
-        if (parentId) {
-          const state = get();
-          const updatedMessages = state.messages.map((msg: Message) => {
-            if (msg.id === parentId) {
-              return {
-                ...msg,
-                replies: (msg.replies || []).map(reply =>
-                  reply.id === messageId ? realMessage : reply
-                ),
-                reply_count: (msg.reply_count || 0) + 1,
-              };
-            }
-            return msg;
-          });
-          set({ messages: updatedMessages });
-
-          if (state.activeThread?.id === parentId) {
-            const updatedReplies = state.threadReplies.map((reply: Message) =>
-              reply.id === messageId ? realMessage : reply
-            );
-            set({ threadReplies: updatedReplies });
-          }
-        } else {
-          // Replace the optimistic message with the real one
-          const state = get();
-          const updatedMessages = state.messages.map((msg: Message) =>
-            msg.id === messageId ? realMessage : msg
-          );
-          set({ messages: updatedMessages });
-        }
-
-        // Save message to local storage for offline access
-        if (isSqliteReady) {
-          try {
-            // Save message with server ID
-            await sqliteService.saveMessage({
-              id: successData.id,
-              group_id: successData.group_id,
-              user_id: successData.user_id,
-              content: successData.content,
-              is_ghost: successData.is_ghost ? 1 : 0,
-              message_type: successData.message_type,
-              category: successData.category || null,
-              parent_id: successData.parent_id || null,
-              image_url: successData.image_url || null,
-              created_at: new Date(successData.created_at).getTime()
-            });
-
-            // Save user info
-            if (!successData.is_ghost && successData.users) {
-              await sqliteService.saveUser({
-                id: successData.user_id,
-                display_name: successData.users.display_name,
-                phone_number: successData.users.phone_number || null,
-                avatar_url: successData.users.avatar_url || null,
-                is_onboarded: 1,
-                created_at: new Date(successData.users.created_at).getTime()
-              });
-            }
-
-            // Remove the temporary message if it exists
-            if (messageId.startsWith('temp-') || messageId.includes('-')) {
-              try {
-                await sqliteService.deleteMessage(messageId);
-                console.log(`🗑️ Removed temp message ${messageId} after saving server message ${successData.id}`);
-              } catch (error) {
-                console.error(`❌ Error removing temp message ${messageId}:`, error);
-              }
-            }
-
-            console.log(`✅ Message ${successData.id} synced to local storage`);
-          } catch (error) {
-            console.error('❌ Error syncing message to local storage:', error);
-          }
-        }
-
-        // Clear reply state if not in thread
-        if (!get().activeThread) {
-          set({ replyingTo: null });
-        }
-
-        // Invalidate cache for this group since we added a new message
-        messageCache.invalidateCache(groupId);
-        console.log(`📦 MessageCache: Invalidated cache for group ${groupId} after sending message`);
-        
-        return; // Success - exit function
-      }
-      
-      // If we get here, all attempts failed - graceful fallback to outbox
-      console.log(`📤 All direct send attempts failed for ${messageId}, falling back to outbox`);
-      console.error(`📤 Final error for message ${messageId}:`, lastError);
-      
-      try {
-        const isNative = Capacitor.isNativePlatform();
-        const ready = isNative && await sqliteService.isReady();
-        if (ready) {
-          await get().enqueueOutbox({
-            id: messageId,
-            group_id: groupId,
-            user_id: user.id,
-            content,
-            is_ghost: isGhost,
-            message_type: messageType,
-            category: category || null,
-            parent_id: parentId || null,
-            image_url: imageUrl || null,
-          });
-          console.log(`📤 Message ${messageId} enqueued to outbox after all direct send attempts failed`);
-          
-          // Trigger outbox processing immediately
-          try {
             const { triggerOutboxProcessing } = get();
             if (typeof triggerOutboxProcessing === 'function') {
-              triggerOutboxProcessing('direct-send-exhausted', 'high');
+              triggerOutboxProcessing('offline-message', 'high');
             }
-          } catch {}
-          
-          // Don't throw error - let outbox handle delivery
-          return;
+          } catch (error) {
+            console.error('❌ Error saving offline message:', error);
+          }
         }
-      } catch (outboxError) {
-        console.error(`📤 Outbox fallback also failed for ${messageId}:`, outboxError);
+        return; // Exit - message will be sent when online
+      }
+
+      // Online: Use pipeline to send message
+      const messageForPipeline = {
+        id: messageId,
+        group_id: groupId,
+        user_id: user.id,
+        content,
+        is_ghost: isGhost,
+        message_type: messageType,
+        category,
+        parent_id: parentId,
+        image_url: imageUrl,
+        dedupe_key: dedupeKey,
+      };
+
+      try {
+        // Send through pipeline (handles retries, health checks, fallback to outbox)
+        await supabasePipeline.sendMessage(messageForPipeline);
+        
+        // Message sent successfully - update UI to reflect sent status
+        const updateMessageToSent = (msg: Message) => {
+          if (msg.id === messageId) {
+            return { ...msg, delivery_status: 'sent' as const };
+          }
+          return msg;
+        };
+
+        if (parentId) {
+          const state = get();
+          const updatedMessages = state.messages.map((msg: Message) => {
+            if (msg.id === parentId) {
+              return {
+                ...msg,
+                replies: (msg.replies || []).map(updateMessageToSent),
+              };
+            }
+            return msg;
+          });
+          set({ messages: updatedMessages });
+
+          if (state.activeThread?.id === parentId) {
+            const updatedReplies = state.threadReplies.map(updateMessageToSent);
+            set({ threadReplies: updatedReplies });
+          }
+        } else {
+          const state = get();
+          const updatedMessages = state.messages.map(updateMessageToSent);
+          set({ messages: updatedMessages });
+        }
+
+        // Clear reply state if not in thread
+        if (!get().activeThread) {
+          set({ replyingTo: null });
+        }
+
+        // Invalidate message cache for this group
+        messageCache.invalidateCache(groupId);
+        
+      } catch (error: any) {
+        console.error('📤 Pipeline send failed for message:', messageId, error);
+        
+        // Update UI to show failed status
+        const updateMessageToFailed = (msg: Message) => {
+          if (msg.id === messageId) {
+            return { 
+              ...msg, 
+              delivery_status: 'failed' as const,
+              error_info: { category: 'send_failed', message: error.message }
+            };
+          }
+          return msg;
+        };
+
+        if (parentId) {
+          const state = get();
+          const updatedMessages = state.messages.map((msg: Message) => {
+            if (msg.id === parentId) {
+              return {
+                ...msg,
+                replies: (msg.replies || []).map(updateMessageToFailed),
+              };
+            }
+            return msg;
+          });
+          set({ messages: updatedMessages });
+
+          if (state.activeThread?.id === parentId) {
+            const updatedReplies = state.threadReplies.map(updateMessageToFailed);
+            set({ threadReplies: updatedReplies });
+          }
+        } else {
+          const state = get();
+          const updatedMessages = state.messages.map(updateMessageToFailed);
+          set({ messages: updatedMessages });
+        }
+
+        // Pipeline handles outbox fallback, so we don't throw here
+        console.log('📤 Message marked as failed, pipeline will handle retry via outbox');
       }
       
-      throw lastError || new Error('All send attempts failed');
-      
     } catch (error: any) {
-      console.error('Error sending message:', error);
+      console.error('❌ Send message error:', error);
       
-      // Enhanced error categorization
-      const errorCategory = (() => {
-        if (error.message?.includes('timeout')) return 'timeout';
-        if (error.message?.includes('network') || error.message?.includes('ENOTFOUND')) return 'network';
-        if (error.code === 'PGRST301' || error.code === 'PGRST116') return 'auth';
-        if (error.message?.includes('Client unhealthy')) return 'client';
-        return 'server';
-      })();
-      
-      console.log(`📤 Error category for message ${messageId}: ${errorCategory}`);
-
-      // Update optimistic message to show failed status with error info
-      const updateMessageStatus = (msg: Message) => {
-        if (msg.id === messageId || msg.id.startsWith('temp-')) {
+      // Update UI to show error
+      const updateMessageToError = (msg: Message) => {
+        if (msg.id === messageId) {
           return { 
             ...msg, 
             delivery_status: 'failed' as const,
-            error_info: { category: errorCategory, message: error.message }
+            error_info: { category: 'error', message: error.message }
           };
         }
         return msg;
       };
-      
+
       if (parentId) {
         const state = get();
         const updatedMessages = state.messages.map((msg: Message) => {
           if (msg.id === parentId) {
             return {
               ...msg,
-              replies: (msg.replies || []).map(updateMessageStatus),
+              replies: (msg.replies || []).map(updateMessageToError),
             };
           }
           return msg;
@@ -634,17 +344,14 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         set({ messages: updatedMessages });
       } else {
         const state = get();
-        const updatedMessages = state.messages.map(updateMessageStatus);
+        const updatedMessages = state.messages.map(updateMessageToError);
         set({ messages: updatedMessages });
       }
 
-      // For certain error categories, don't throw (outbox will handle)
-      if (errorCategory === 'timeout' || errorCategory === 'network' || errorCategory === 'client') {
-        console.log(`📤 Final fallback: marking message ${messageId} as failed`);
-        return; // Don't throw - message is marked as failed in UI
+      // Only throw for critical errors like auth issues
+      if (error.message?.includes('Not authenticated')) {
+        throw error;
       }
-      
-      throw error;
     }
   },
 });
