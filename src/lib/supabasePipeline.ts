@@ -92,20 +92,32 @@ class SupabasePipeline {
   private lastResumeAt = 0;
   // Last outbox processing statistics for callers to inspect without changing method signatures
   private lastOutboxStats: { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null = null;
+  // Pipeline-managed auth listeners so they survive client recreation
+  private authListeners: Array<{ id: string; callback: (event: string, session: any) => void; unsubscribe?: () => void }> = [];
+  // Coalesce concurrent hard-recreate requests
+  private recreatePromise: Promise<void> | null = null;
+  // Track last known session user id for corruption checks
+  private lastKnownUserId: string | null = null;
+  // Throttle full corruption checks
+  private lastCorruptionCheckAt: number = 0;
+  // Track last known tokens for session rehydration
+  private lastKnownAccessToken: string | null = null;
+  private lastKnownRefreshToken: string | null = null;
+  // Internal auth listener to cache tokens (rebounds on recreate)
+  private internalAuthUnsub: (() => void) | null = null;
 
   constructor() {
     this.log('🚀 Pipeline initialized');
+    this.log('🧪 Debug tag: v2025-08-22.1');
   }
 
   /**
    * Initialize Supabase client (idempotent). Pass force=true to recreate.
    */
   public async initialize(force: boolean = false): Promise<void> {
-    if (!force && this.isInitialized && this.client) return;
-    if (this.initializePromise) {
-      await this.initializePromise;
-      return;
-    }
+    this.log(`🔄 initialize() called - force=${force} isInitialized=${this.isInitialized} hasClient=${!!this.client} initPromiseActive=${!!this.initializePromise}`);
+    if (!force && this.isInitialized && this.client) { this.log('🔄 initialize() early return (already initialized)'); return; }
+    if (this.initializePromise) { this.log('🔄 initialize() waiting for existing initializePromise'); await this.initializePromise; return; }
 
     this.log('🔄 Initializing Supabase client...');
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
@@ -113,14 +125,18 @@ class SupabasePipeline {
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error('Missing Supabase configuration');
     }
+    this.log(`🔄 Supabase env present? url=${!!supabaseUrl} anonKey=${!!supabaseAnonKey}`);
 
     this.initializePromise = (async () => {
       // Only tear down existing channels if we truly force a reinit
       if (force && this.client) {
         this.log('🗑️ Destroying old client instance (forced)');
+        try { this.internalAuthUnsub?.(); this.internalAuthUnsub = null; } catch (_) {}
         try { await this.client.removeAllChannels(); } catch (e) {
           this.log('⚠️ Error removing channels during client destruction:', e);
         }
+        try { (this.client as any)?.realtime?.removeAllChannels?.(); } catch (_) {}
+        try { (this.client as any)?.realtime?.disconnect?.(); } catch (_) {}
       }
 
       if (!this.client || force) {
@@ -131,6 +147,23 @@ class SupabasePipeline {
             detectSessionInUrl: false,
           },
         });
+        this.log('🔄 Supabase client created (persistSession=true, autoRefreshToken=true)');
+        // Re-bind any pipeline-managed auth listeners onto the new client
+        try { await this.bindAuthListenersToClient(); } catch (e) { this.log('⚠️ Failed to bind auth listeners on init:', e as any); }
+        // Attach internal auth listener to cache tokens
+        try {
+          const sub = this.client.auth.onAuthStateChange((_event, session: any) => {
+            try {
+              const s = session || {};
+              this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
+              this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
+              this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+            } catch {}
+          });
+          this.internalAuthUnsub = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
+        } catch (e) { this.log('⚠️ Failed to attach internal auth listener:', e as any); }
+        // Best-effort apply last-known token to realtime
+        try { (this.client as any)?.realtime?.setAuth?.(this.lastKnownAccessToken || undefined); } catch (_) {}
       }
 
       this.isInitialized = true;
@@ -144,9 +177,20 @@ class SupabasePipeline {
    * Get the current client instance, initializing if needed
    */
   private async getClient(): Promise<SupabaseClient<Database>> {
-    if (!this.client || !this.isInitialized) {
-      await this.initialize();
-    }
+    this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise}`);
+    if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
+    // Opportunistic, throttled corruption check and auto-heal
+    try {
+      const now = Date.now();
+      if (now - this.lastCorruptionCheckAt > 3000) {
+        this.lastCorruptionCheckAt = now;
+        const corrupted = await this.detectCorruption();
+        if (corrupted) {
+          this.log('🧪 getClient(): corruption detected → hard recreate');
+          await this.ensureRecreated('getClient-autoheal');
+        }
+      }
+    } catch {}
     return this.client!;
   }
 
@@ -166,7 +210,26 @@ class SupabasePipeline {
     // Lightweight health: rely on local session presence and freshness to avoid timeouts.
     try {
       const client = await this.getClient();
-      const { data } = await client.auth.getSession();
+      const online = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : 'unknown';
+      this.log(`🏥 Health check: starting (navigator.onLine=${online})`);
+      // Wrap getSession() with a 3s timeout to avoid hangs after resume
+      const sessionPromise = client.auth.getSession();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('getSession timeout')), 3000);
+      });
+      let data: any;
+      try {
+        const result: any = await Promise.race([sessionPromise, timeoutPromise]);
+        data = result?.data;
+      } catch (err: any) {
+        if (err && err.message === 'getSession timeout') {
+          this.log('🏥 Health check: getSession timeout → scheduling hard recreate and marking unhealthy');
+          // Trigger a hard recreate in the background to heal corruption
+          this.ensureRecreated('health-check-getsession-timeout').catch(() => {});
+          return false; // mark unhealthy to avoid direct sends during rebuild
+        }
+        throw err;
+      }
       const session = data?.session;
       if (!session?.access_token) {
         this.log('🏥 Health check: no active session');
@@ -179,7 +242,9 @@ class SupabasePipeline {
         this.log('🏥 Health check: session expired');
         return false;
       }
-      this.log('🏥 Health check: healthy');
+      const secsLeft = expiresAt > 0 ? (expiresAt - nowSec) : 'unknown';
+      const userId = (session as any)?.user?.id ? String((session as any).user.id).slice(0, 8) : 'unknown';
+      this.log(`🏥 Health check: healthy (user=${userId}, expiresIn=${secsLeft}s)`);
       return true;
     } catch (error) {
       // Fail open to reduce unnecessary outbox fallbacks during transient issues
@@ -195,8 +260,23 @@ class SupabasePipeline {
     this.log('🔄 Refreshing session...');
     try {
       const client = await this.getClient();
-      const { data } = await client.auth.getSession();
-      const current = data?.session;
+      // Wrap pre-check getSession() with 5s timeout
+      const preSessionPromise = client.auth.getSession();
+      const preTimeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('getSession timeout')), 5000);
+      });
+      let current: any = null;
+      try {
+        const preResult: any = await Promise.race([preSessionPromise, preTimeoutPromise]);
+        current = preResult?.data?.session;
+      } catch (err: any) {
+        if (err && err.message === 'getSession timeout') {
+          this.log('🔄 getSession timeout before refresh → scheduling hard recreate');
+          this.ensureRecreated('refresh-precheck-timeout').catch(() => {});
+          return false;
+        }
+        throw err;
+      }
       if (!current?.access_token) {
         this.log('🔄 No active session to refresh');
         return false;
@@ -207,7 +287,21 @@ class SupabasePipeline {
         this.log('🔄 Session is fresh; skipping refresh');
         return true;
       }
-      const result = await client.auth.refreshSession();
+      // Wrap refreshSession() with 5s timeout
+      const refreshPromise = client.auth.refreshSession();
+      const refreshTimeout = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
+      });
+      let result: any;
+      try {
+        result = await Promise.race([refreshPromise, refreshTimeout]);
+      } catch (err: any) {
+        if (err && err.message === 'refreshSession timeout') {
+          this.log('🔄 Session refresh: timeout');
+          return false;
+        }
+        throw err;
+      }
       const success = !!result?.data?.session?.access_token && !result?.error;
       this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
       return success;
@@ -217,11 +311,112 @@ class SupabasePipeline {
     }
   }
 
+  /**
+   * Detect client corruption by bounding getSession. True means likely corrupted (hang/timeout).
+   */
+  public async isClientCorrupted(timeoutMs: number = 2500): Promise<boolean> {
+    try {
+      const client = await this.getClient();
+      const sessionPromise = client.auth.getSession();
+      const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('getSession timeout')), timeoutMs));
+      await Promise.race([sessionPromise, timeoutPromise]);
+      return false;
+    } catch (err: any) {
+      if (err && err.message === 'getSession timeout') {
+        this.log(`🧪 Corruption probe: getSession timed out after ${timeoutMs}ms`);
+        return true;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Multi-check corruption detector (fast, bounded). Returns true if any check indicates corruption.
+   */
+  public async detectCorruption(): Promise<boolean> {
+    try {
+      const client = await this.getDirectClient();
+
+      // 1) authSessionNull: known user but no session (or timeout)
+      const authCheck = (async () => {
+        try {
+          const res = await Promise.race([
+            client.auth.getSession(),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('authCheck timeout')), 1000))
+          ]) as any;
+          const hasSession = !!res?.data?.session?.access_token;
+          const known = !!this.lastKnownUserId;
+          return known && !hasSession;
+        } catch (e: any) {
+          return e?.message === 'authCheck timeout';
+        }
+      })();
+
+      // 2) databaseHang: trivial select bound to 1s
+      const dbCheck = (async () => {
+        try {
+          const res = await Promise.race([
+            client.from('users').select('id').limit(1),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('dbCheck timeout')), 1000))
+          ]) as any;
+          return !!res?.error;
+        } catch (e: any) {
+          return e?.message === 'dbCheck timeout';
+        }
+      })();
+
+      // 3) realtimeDesync: token exists but setAuth throws
+      const realtimeCheck = (async () => {
+        try {
+          const { data } = await client.auth.getSession();
+          const access = data?.session?.access_token;
+          if (!access) return false;
+          try { (client as any)?.realtime?.setAuth?.(access); return false; } catch { return true; }
+        } catch { return true; }
+      })();
+
+      // 4) promiseQueue: bounded getUser
+      const promiseCheck = (async () => {
+        try {
+          await Promise.race([
+            client.auth.getUser(),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('promiseCheck timeout')), 1000))
+          ]);
+          return false;
+        } catch (e: any) {
+          return e?.message === 'promiseCheck timeout';
+        }
+      })();
+
+      // 5) rpc ping (bounded); tolerate error → not corruption unless timeout
+      const rpcCheck = (async () => {
+        try {
+          await Promise.race([
+            client.rpc('pg_sleep', { seconds: 0 }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('rpcCheck timeout')), 1000))
+          ]);
+          return false;
+        } catch (e: any) {
+          return e?.message === 'rpcCheck timeout';
+        }
+      })();
+
+      const results = await Promise.all([authCheck, dbCheck, realtimeCheck, promiseCheck, rpcCheck]);
+      const corrupted = results.some(Boolean);
+      if (corrupted) this.log('🧪 Corruption detector tripped:', results);
+      return corrupted;
+    } catch (e) {
+      this.log('🧪 Corruption detection error:', stringifyError(e));
+      return false;
+    }
+  }
+
   private async ensureSessionFreshness(): Promise<void> {
     try {
       const client = await this.getClient();
       const { data } = await client.auth.getSession();
       const session = data?.session;
+      try { this.lastKnownUserId = session?.user?.id || this.lastKnownUserId || null; } catch (_) {}
       if (!session?.access_token) return;
       const nowSec = Math.floor(Date.now() / 1000);
       const expiresAt = session.expires_at || 0;
@@ -310,6 +505,12 @@ class SupabasePipeline {
     try {
       const client = await this.getClient();
       const result = await client.auth.getSession();
+      try {
+        const s = result?.data?.session || null;
+        this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
+        this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
+        this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+      } catch (_) {}
       return result;
     } catch (error) {
       this.log('🔐 Get session failed:', error);
@@ -322,8 +523,29 @@ class SupabasePipeline {
    */
   public async onAuthStateChange(callback: (event: string, session: any) => void): Promise<{ data: { subscription: any } }> {
     try {
-      const client = await this.getClient();
-      return client.auth.onAuthStateChange(callback);
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // Create registry record first
+      const record = { id, callback, unsubscribe: undefined as undefined | (() => void) };
+      this.authListeners.push(record);
+
+      // Bind immediately on current client
+      let client: SupabaseClient<Database>;
+      try { client = await this.getClient(); } catch (e) { this.log('🔐 Fetch client for listener failed (will bind later):', e as any); }
+      try {
+        const sub = client!.auth.onAuthStateChange(callback);
+        record.unsubscribe = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
+      } catch (e) {
+        this.log('🔐 Immediate bind of auth listener failed (will bind on next init):', e as any);
+      }
+
+      // Return a wrapper subscription that removes from registry and unsubscribes current binding
+      const subscription = {
+        unsubscribe: () => {
+          try { record.unsubscribe?.(); } catch (_) {}
+          this.authListeners = this.authListeners.filter(l => l.id !== id);
+        }
+      };
+      return Promise.resolve({ data: { subscription } });
     } catch (error) {
       this.log('🔐 Auth state change listener failed:', error);
       throw error;
@@ -767,6 +989,9 @@ class SupabasePipeline {
    */
   public async sendMessage(message: Message): Promise<void> {
     this.log(`📤 Sending message ${message.id}...`);
+    const dbgLabel = `send-${message.id}`;
+    try { console.time?.(`[${dbgLabel}] total`); } catch {}
+    this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
     
     try {
       await this.sendMessageInternal(message);
@@ -778,6 +1003,9 @@ class SupabasePipeline {
         this.log(`❌ Message ${message.id} send failed:`, stringifyError(error));
       }
       throw error;
+    } finally {
+      try { console.timeEnd?.(`[${dbgLabel}] total`); } catch {}
+      this.log(`[${dbgLabel}] finished`);
     }
   }
 
@@ -788,7 +1016,10 @@ class SupabasePipeline {
     // Do not gate sends after unlock; proceed directly
 
     // Check health before attempting direct send
+    const dbgLabel = `send-${message.id}`;
+    this.log(`[${dbgLabel}] checkHealth() -> start`);
     const isHealthy = await this.checkHealth();
+    this.log(`[${dbgLabel}] checkHealth() -> ${isHealthy ? 'healthy' : 'unhealthy'}`);
     if (!isHealthy) {
       this.log(`📤 Client unhealthy, falling back to outbox - message ${message.id}`);
       await this.fallbackToOutbox(message);
@@ -803,6 +1034,7 @@ class SupabasePipeline {
     for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
+        try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
         
         const client = await this.getClient();
         
@@ -830,6 +1062,7 @@ class SupabasePipeline {
           `)
           .single();
 
+        this.log(`[${dbgLabel}] attempt ${attempt} -> awaiting Supabase upsert...`);
         const { error } = await Promise.race([sendPromise, timeoutPromise]);
 
         if (error) {
@@ -837,10 +1070,19 @@ class SupabasePipeline {
         }
 
         this.log(`✅ Direct send successful - message ${message.id}`);
+        try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
         return; // Success!
       } catch (error) {
         lastError = error;
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
+        try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+        // If direct send timed out, schedule a background hard recreate to heal potential corruption
+        try {
+          const msg = (error as any)?.message || '';
+          if (typeof msg === 'string' && msg.includes('Direct send timeout')) {
+            this.ensureRecreated('direct-send-timeout').catch(() => {});
+          }
+        } catch {}
         
         if (attempt < this.config.maxRetries) {
           this.log(`⏳ Waiting ${this.config.retryBackoffMs}ms before retry...`);
@@ -865,6 +1107,8 @@ class SupabasePipeline {
     try {
       const isNative = Capacitor.isNativePlatform();
       const ready = isNative && await sqliteService.isReady();
+      const dbgLabel = `send-${message.id}`;
+      this.log(`[${dbgLabel}] fallbackToOutbox(): isNative=${isNative} sqliteReady=${ready}`);
       
       if (!ready) {
         throw new Error('SQLite not ready for outbox storage');
@@ -908,6 +1152,7 @@ class SupabasePipeline {
     try {
       const isNative = Capacitor.isNativePlatform();
       const ready = isNative && await sqliteService.isReady();
+      this.log(`📦 Outbox pre-check: isNative=${isNative} sqliteReady=${ready}`);
       
       if (!ready) {
         this.log('📦 SQLite not ready, skipping outbox processing');
@@ -1031,6 +1276,7 @@ class SupabasePipeline {
     
     // Use dynamic import to avoid circular dependencies
     import('../store/chatstore_refactored/offlineActions').then(({ triggerOutboxProcessing }) => {
+      this.log('📦 triggerOutboxProcessing(): dynamic import succeeded');
       triggerOutboxProcessing(context, 'high');
     }).catch(error => {
       this.log(`❌ Failed to trigger outbox processing:`, stringifyError(error));
@@ -1054,6 +1300,44 @@ class SupabasePipeline {
   }
 
   /**
+   * Hard client recreation: tear down realtime, drop old client, recreate, rebind listeners, preserve session.
+   */
+  public async hardRecreateClient(reason: string = 'unknown'): Promise<void> {
+    this.log(`🧹 Hard recreating Supabase client (reason=${reason})`);
+    try {
+      if (this.client) {
+        try { await this.client.removeAllChannels(); } catch (_) {}
+        try { (this.client as any)?.realtime?.removeAllChannels?.(); } catch (_) {}
+        try { (this.client as any)?.realtime?.disconnect?.(); } catch (_) {}
+      }
+      // Drop reference and flags before recreate
+      this.client = null;
+      this.isInitialized = false;
+      await this.initialize(true);
+      // After recreate, ensure realtime has token
+      try {
+        const client = await this.getClient();
+        const { data } = await client.auth.getSession();
+        const access = data?.session?.access_token;
+        try { (client as any)?.realtime?.setAuth?.(access); } catch (_) {}
+      } catch (_) {}
+      // Nudge realtime store to reconnect active group if any
+      try {
+        const mod = await import('@/store/chatstore_refactored');
+        const state = (mod as any).useChatStore?.getState?.();
+        const gid = state?.activeGroup?.id;
+        if (gid && typeof state?.forceReconnect === 'function') {
+          setTimeout(() => { try { state.forceReconnect(gid); } catch {} }, 200);
+        }
+      } catch {}
+      this.log('✅ Hard recreation complete');
+    } catch (error) {
+      this.log('❌ Hard recreation failed:', stringifyError(error));
+      throw error;
+    }
+  }
+
+  /**
    * Handle app resume/unlock events
    */
   public async onAppResume(): Promise<void> {
@@ -1064,16 +1348,25 @@ class SupabasePipeline {
 
     // Debounce duplicate resume spikes
     const now = Date.now();
-    if (now - this.lastResumeAt < 1500) {
+    const sinceLast = this.lastResumeAt ? (now - this.lastResumeAt) : null;
+    if (sinceLast !== null) { this.log(`📱 App resume delta=${sinceLast}ms`); }
+    if (sinceLast !== null && sinceLast < 1500) {
       this.log('📱 App resume debounced');
       return;
     }
     this.lastResumeAt = now;
 
     try {
-      await this.initialize(false);
-      // refresh in background if near expiry
-      this.ensureSessionFreshness().catch(() => {});
+      // Probe for corruption; if detected, perform hard recreate which also rebinds listeners
+      const corrupted = await this.isClientCorrupted(2500);
+      if (corrupted) {
+        this.log('🧪 Resume: client appears corrupted; performing hard recreate');
+        await this.hardRecreateClient('app-resume-corruption');
+      } else {
+        await this.initialize(false);
+        // refresh in background if near expiry
+        this.ensureSessionFreshness().catch(() => {});
+      }
     } catch (error) {
       this.log('⚠️ Resume handling failed:', stringifyError(error));
     }
@@ -1089,8 +1382,15 @@ class SupabasePipeline {
     this.log('🌐 Network reconnection detected');
     
     try {
-      await this.initialize(false);
-      this.ensureSessionFreshness().catch(() => {});
+      // Probe and heal if corrupted
+      const corrupted = await this.isClientCorrupted(2500);
+      if (corrupted) {
+        this.log('🧪 Network reconnect: client appears corrupted; performing hard recreate');
+        await this.ensureRecreated('network-reconnect-corruption');
+      } else {
+        await this.initialize(false);
+        this.ensureSessionFreshness().catch(() => {});
+      }
     } catch (error) {
       this.log('⚠️ Network reconnect handling failed:', stringifyError(error));
     }
@@ -1125,6 +1425,47 @@ class SupabasePipeline {
       return arg;
     });
     console.log(`[supabase-pipeline] ${message}`, ...logArgs);
+  }
+
+  /**
+   * (Re)bind all registered auth listeners to current client. Idempotent across recreations.
+   */
+  private async bindAuthListenersToClient(): Promise<void> {
+    if (!this.authListeners.length) return;
+    try {
+      const client = await this.getClient();
+      // Unsubscribe any previous bindings (best-effort)
+      for (const l of this.authListeners) { try { l.unsubscribe?.(); } catch (_) {} }
+      // Rebind and store new unsub functions
+      for (const l of this.authListeners) {
+        try {
+          const sub = client.auth.onAuthStateChange(l.callback);
+          l.unsubscribe = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
+        } catch (e) {
+          this.log('⚠️ Failed to bind an auth listener:', e as any);
+        }
+      }
+      this.log(`🔁 Rebound ${this.authListeners.length} auth listener(s) to new client`);
+    } catch (e) {
+      this.log('⚠️ bindAuthListenersToClient failed:', e as any);
+    }
+  }
+
+  /**
+   * Ensure client is hard-recreated once, coalescing concurrent requests.
+   */
+  private async ensureRecreated(reason: string): Promise<void> {
+    if (this.recreatePromise) {
+      return this.recreatePromise;
+    }
+    this.recreatePromise = (async () => {
+      try {
+        await this.hardRecreateClient(reason);
+      } finally {
+        this.recreatePromise = null;
+      }
+    })();
+    return this.recreatePromise;
   }
 }
 

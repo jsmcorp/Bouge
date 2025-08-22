@@ -864,8 +864,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       
       (async () => {
         try {
-          const client = await supabasePipeline.getDirectClient();
-          authStateListener = client.auth.onAuthStateChange((event, session) => {
+          const res = await supabasePipeline.onAuthStateChange((event, session) => {
             const state = get();
             const activeGroupId = state.activeGroup?.id;
             
@@ -873,7 +872,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             
             if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
               // Always apply the latest token to realtime
-              try { (client as any).realtime?.setAuth?.(session?.access_token); } catch {}
+              try { (supabasePipeline as any).getDirectClient?.().then((c: any) => c?.realtime?.setAuth?.(session?.access_token)).catch(() => {}); } catch {}
               if (activeGroupId) {
                 log('Token applied, reconnecting realtime');
                 get().forceReconnect(activeGroupId);
@@ -890,7 +889,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               log('User signed out, cleaning up realtime');
               get().cleanupRealtimeSubscription();
             }
-          }).data.subscription;
+          });
+          authStateListener = res.data.subscription;
         } catch (error) {
           log('Error setting up auth listener: ' + error);
         }
