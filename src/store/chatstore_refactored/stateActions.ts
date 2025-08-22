@@ -1,13 +1,8 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES } from '@/lib/supabase';
-import { FEATURES_PUSH } from '@/lib/featureFlags';
-import { Network } from '@capacitor/network';
-import { markDeviceUnlock } from './messageActions';
 
-// Global session refresh debounce state
-let isSessionRefreshing = false;
-let sessionRefreshPromise: Promise<any> | null = null;
+// Resume/unlock flow is owned exclusively by supabasePipeline.onAppResume()
 
 export interface StateActions {
   setGroups: (groups: Group[]) => void;
@@ -176,246 +171,21 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
   onAppResumeSimplified: () => {
     const { activeGroup } = get() as any;
-    
     if (!activeGroup?.id) {
       console.log('[realtime-v2] No active group, skipping resume');
       return;
     }
-
-    // Use pipeline to handle app resume (client reset, session refresh, outbox processing)
+    // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
     supabasePipeline.onAppResume().catch(error => {
       console.error('[realtime-v2] Pipeline app resume failed:', error);
-    });
-
-    // Mark device unlock to skip health checks
-    markDeviceUnlock();
-    console.log('[realtime-v2] App resumed after device unlock - forcing complete Supabase client rebuild');
-    
-    // CRITICAL: Force complete Supabase client rebuild with debounced session refresh
-    const performClientRebuild = async () => {
-      // Step 1: Debounced session refresh with duration logging
-      if (isSessionRefreshing && sessionRefreshPromise) {
-        console.log('[realtime-v2] Session refresh already in progress, waiting for completion...');
-        try {
-          await sessionRefreshPromise;
-        } catch (e) {
-          console.warn('[realtime-v2] Existing session refresh failed:', e);
-        }
-      } else {
-        const refreshStartTime = Date.now();
-        console.log('[realtime-v2] Starting 8-second timeout race for session refresh');
-        
-        isSessionRefreshing = true;
-        sessionRefreshPromise = (async () => {
-          const success = await supabasePipeline.refreshSession();
-          const duration = Date.now() - refreshStartTime;
-          console.log(`[realtime-v2] Pipeline session refresh completed in ${duration}ms: ${success}`);
-          return { success };
-        })();
-        
-        try {
-          const refreshResult = await sessionRefreshPromise;
-          console.log('[realtime-v2] Session refresh successful:', refreshResult.success);
-          
-          // Step 2: Complete client rebuild - apply fresh token to realtime
-          if (refreshResult.success) {
-            try { 
-              const client = await supabasePipeline.getDirectClient();
-              const session = await client.auth.getSession();
-              const newToken = session?.data?.session?.access_token;
-              (client as any).realtime?.setAuth?.(newToken || undefined); 
-              console.log('[realtime-v2] Applied fresh token to realtime client');
-            } catch {}
-          }
-          
-          // Step 3: Force recreate realtime connection
-          const { forceReconnect } = get();
-          if (typeof forceReconnect === 'function') {
-            forceReconnect(activeGroup.id);
-          } else {
-            get().cleanupRealtimeSubscription();
-            setTimeout(() => get().setupRealtimeSubscription(activeGroup.id), 100);
-          }
-          
-          console.log('[realtime-v2] Complete client rebuild finished - ready for messaging');
-        } catch (error) {
-          console.warn('[realtime-v2] Session refresh failed/timed out:', error);
-          
-          // Retry logic using pipeline
-          console.log('[realtime-v2] Attempting retry with pipeline...');
-          const retryStartTime = Date.now();
-          
-          try {
-            const retrySuccess = await supabasePipeline.refreshSession();
-            const duration = Date.now() - retryStartTime;
-            console.log(`[realtime-v2] Retry session refresh completed in ${duration}ms: ${retrySuccess}`);
-            
-            if (retrySuccess) {
-              try { 
-                const client = await supabasePipeline.getDirectClient();
-                const session = await client.auth.getSession();
-                const newToken = session?.data?.session?.access_token;
-                (client as any).realtime?.setAuth?.(newToken || undefined); 
-              } catch {}
-            }
-          } catch (retryError) {
-            console.warn('[realtime-v2] Retry session refresh also failed:', retryError);
-          }
-          
-          // Always try to reconnect even if refresh fails
-          const { forceReconnect } = get();
-          if (typeof forceReconnect === 'function') {
-            forceReconnect(activeGroup.id);
-          }
-        } finally {
-          isSessionRefreshing = false;
-          sessionRefreshPromise = null;
-        }
-      }
-    };
-    
-    performClientRebuild().catch(e => {
-      console.error('[realtime-v2] Client rebuild failed:', e);
-      isSessionRefreshing = false;
-      sessionRefreshPromise = null;
     });
   },
 
   // Central onWake(reason, groupId?) orchestrates: ensureAuthForWrites (writes only) → realtime rebuild → syncMissed → outbox
-  onWake: async (reason?: string, groupIdOverride?: string) => {
+  onWake: async (_reason?: string, _groupIdOverride?: string) => {
     try {
-      if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
-        return get().onAppResumeSimplified();
-      }
-
-      // Use pipeline to handle app resume (client reset, session refresh, outbox processing)
-      supabasePipeline.onAppResume().catch(error => {
-        console.error('[push] Pipeline app resume failed:', error);
-      });
-
-      // Mark device unlock to skip health checks
-      markDeviceUnlock();
-      
-      const state = get();
-      const activeGroupId = groupIdOverride || state.activeGroup?.id;
-      console.log(`[push] wake reason=${reason || 'unknown'}`);
-
-      // 0) Force complete Supabase client rebuild with debounced session refresh
-      console.log('[push] wake - forcing complete client rebuild to fix stale client');
-      let clientRebuildSuccess = false;
-      
-      // Debounced session refresh with duration logging
-      if (isSessionRefreshing && sessionRefreshPromise) {
-        console.log('[push] wake - session refresh already in progress, waiting for completion...');
-        try {
-          await sessionRefreshPromise;
-          // Check if the existing refresh was successful
-          const client = await supabasePipeline.getDirectClient();
-          const currentSession = await client.auth.getSession();
-          clientRebuildSuccess = !!currentSession?.data?.session?.access_token;
-        } catch (e) {
-          console.warn('[push] wake - existing session refresh failed:', e);
-        }
-      } else {
-        const refreshStartTime = Date.now();
-        console.log('[push] wake - starting 8-second timeout race for session refresh');
-        
-        isSessionRefreshing = true;
-        sessionRefreshPromise = (async () => {
-          const success = await supabasePipeline.refreshSession();
-          const duration = Date.now() - refreshStartTime;
-          console.log(`[push] wake - pipeline session refresh completed in ${duration}ms: ${success}`);
-          return { success };
-        })();
-        
-        try {
-          const refreshResult = await sessionRefreshPromise;
-          const hasNewToken = refreshResult.success;
-          console.log('[push] wake - session refresh completed:', hasNewToken);
-          clientRebuildSuccess = hasNewToken;
-          
-          // Apply fresh token to complete client rebuild
-          if (hasNewToken) {
-            try { 
-              const client = await supabasePipeline.getDirectClient();
-              const session = await client.auth.getSession();
-              (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
-              console.log('[push] wake - applied fresh token to realtime client');
-            } catch {}
-          }
-        } catch (e) {
-          console.warn('[push] wake - session refresh failed/timed out:', e);
-          
-          // Retry logic using pipeline
-          console.log('[push] wake - attempting retry with pipeline...');
-          const retryStartTime = Date.now();
-          
-          try {
-            const retrySuccess = await supabasePipeline.refreshSession();
-            const duration = Date.now() - retryStartTime;
-            console.log(`[push] wake - retry session refresh completed in ${duration}ms: ${retrySuccess}`);
-            clientRebuildSuccess = retrySuccess;
-            
-            if (retrySuccess) {
-              try { 
-                const client = await supabasePipeline.getDirectClient();
-                const session = await client.auth.getSession();
-                (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
-              } catch {}
-            }
-          } catch (retryError) {
-            console.warn('[push] wake - retry session refresh also failed:', retryError);
-          }
-        } finally {
-          isSessionRefreshing = false;
-          sessionRefreshPromise = null;
-        }
-      }
-      
-      set({ writesBlocked: !clientRebuildSuccess });
-      console.log('[push] wake - client rebuild result:', clientRebuildSuccess ? 'SUCCESS' : 'FAILED');
-
-      // 1) Reset outbox processing state only after confirmed client rebuild success
-      if (clientRebuildSuccess) {
-        try {
-          const { resetOutboxProcessingState } = await import('./offlineActions');
-          resetOutboxProcessingState();
-          console.log('[push] wake - outbox state reset after successful client rebuild');
-        } catch (e) {
-          console.warn('Failed to reset outbox state on wake:', e);
-        }
-      } else {
-        console.log('[push] wake - skipping outbox reset due to client rebuild failure');
-      }
-
-      // 2) Realtime reset (non-blocking)
-      if (activeGroupId) {
-        console.log(`[rt] rebuild channel=group-${activeGroupId} status=REQUESTED`);
-        const { forceReconnect } = get();
-        if (typeof forceReconnect === 'function') {
-          forceReconnect(activeGroupId);
-        } else {
-          get().cleanupRealtimeSubscription();
-          setTimeout(() => get().setupRealtimeSubscription(activeGroupId), 50);
-        }
-      }
-
-      // 3) Missed messages resync (bounded)
-      if (activeGroupId && typeof (get() as any).syncMissed === 'function') {
-        await (get() as any).syncMissed(activeGroupId);
-      }
-
-      // 4) Outbox drain with refreshed session
-      const net = await Network.getStatus();
-      if (net.connected && !get().writesBlocked) {
-        console.log('[push] wake - triggering outbox processing with fresh session');
-        const { triggerOutboxProcessing } = get();
-        if (typeof triggerOutboxProcessing === 'function') {
-          triggerOutboxProcessing('wake-session-refreshed', 'high');
-        }
-      } else {
-        console.log('[push] wake - skipping outbox processing:', { online: net.connected, writesBlocked: get().writesBlocked });
-      }
+      // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
+      await get().onAppResumeSimplified();
     } catch (e) {
       console.warn('onWake error:', e);
     }

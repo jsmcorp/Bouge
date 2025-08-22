@@ -230,7 +230,7 @@ class SupabasePipeline {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         
         const client = await this.getClient();
-        const { error } = await client
+        const sendPromise = client
           .from('messages')
           .insert({
             id: message.id,
@@ -250,6 +250,12 @@ class SupabasePipeline {
             users!messages_user_id_fkey(display_name, avatar_url)
           `)
           .single();
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Direct send timeout')), this.config.masterTimeoutMs);
+        });
+
+        const { error } = await Promise.race([sendPromise, timeoutPromise]);
 
         if (error) {
           throw error;
@@ -345,7 +351,7 @@ class SupabasePipeline {
         try {
           const messageData = JSON.parse(outboxItem.content);
 
-          // Send to Supabase with timeout
+          // Send to Supabase with timeout race
           const insertPromise = client
             .from('messages')
             .insert({
