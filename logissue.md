@@ -75,7 +75,7 @@
 1) Replace pipeline inserts with idempotent upsert-by-dedupe_key and remove `id` from payload to Supabase (direct + outbox paths). [COMPLETED]
 2) Adjust pipeline API to report `queued` vs `direct_sent`; update callers to not mark `sent` on `queued`. [COMPLETED]
 3) Make outbox processing report success/fail counts and only refresh on success; add per-group throttle. [COMPLETED]
-4) Dedupe/centralize refresh so only one path triggers it (either cache invalidation OR outbox-complete, not both).
+4) Dedupe/centralize refresh so only one path triggers it (either cache invalidation OR outbox-complete, not both). [COMPLETED]
 5) Rework `fetchMessages` to batch replies/polls/votes (avoid per-message queries) and prefer delta sync for active chat.
 6) Reduce log verbosity in `ProtectedRoute` and memoize pseudonym calls at the component level.
 

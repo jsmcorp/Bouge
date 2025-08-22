@@ -1,6 +1,5 @@
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
-import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
@@ -581,9 +580,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           set({ replyingTo: null });
         }
 
-        // Invalidate cache for this group since we added a new message
-        messageCache.invalidateCache(groupId);
-        console.log(`📦 MessageCache: Invalidated cache for group ${groupId} after sending message`);
+        // No cache invalidation here; realtime/outbox refresh handles updates
         
         return; // Success - exit function
       }

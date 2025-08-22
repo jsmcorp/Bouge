@@ -1,6 +1,5 @@
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
-import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
@@ -269,9 +268,6 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         if (!get().activeThread) {
           set({ replyingTo: null });
         }
-
-        // Invalidate message cache for this group
-        messageCache.invalidateCache(groupId);
 
       } catch (error: any) {
         console.error('📤 Pipeline send outcome for message:', messageId, error);
