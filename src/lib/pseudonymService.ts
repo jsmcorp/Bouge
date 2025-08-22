@@ -7,6 +7,7 @@ interface PseudonymCacheEntry {
 
 class PseudonymService {
   private cache: Map<string, PseudonymCacheEntry> = new Map();
+  private inFlight: Map<string, Promise<string>> = new Map();
   private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
 
   /**
@@ -26,36 +27,38 @@ class PseudonymService {
       return cachedEntry.pseudonym;
     }
 
-    try {
-      console.log('🎭 Fetching pseudonym from Supabase for', cacheKey);
-      
-      // Call the Supabase RPC function via pipeline
-      const { data, error } = await supabasePipeline.rpc<string>('upsert_pseudonym', {
-        q_group_id: groupId,
-        q_user_id: userId
-      });
+    // Deduplicate concurrent fetches for the same key
+    const existing = this.inFlight.get(cacheKey);
+    if (existing) return existing;
 
-      if (error) {
-        console.error('❌ Error fetching pseudonym:', error);
-        // Fallback to a generic pseudonym if the RPC fails
+    const fetchPromise = (async () => {
+      try {
+        console.log('🎭 Fetching pseudonym from Supabase for', cacheKey);
+
+        const { data, error } = await supabasePipeline.rpc<string>('upsert_pseudonym', {
+          q_group_id: groupId,
+          q_user_id: userId
+        });
+
+        if (error) {
+          console.error('❌ Error fetching pseudonym:', error);
+          return 'Anonymous Ghost';
+        }
+
+        const pseudonym = data as string;
+        this.cache.set(cacheKey, { pseudonym, timestamp: now });
+        console.log('✅ Cached new pseudonym:', pseudonym, 'for', cacheKey);
+        return pseudonym;
+      } catch (error) {
+        console.error('💥 Unexpected error fetching pseudonym:', error);
         return 'Anonymous Ghost';
+      } finally {
+        this.inFlight.delete(cacheKey);
       }
+    })();
 
-      const pseudonym = data as string;
-      
-      // Cache the result
-      this.cache.set(cacheKey, {
-        pseudonym,
-        timestamp: now
-      });
-
-      console.log('✅ Cached new pseudonym:', pseudonym, 'for', cacheKey);
-      return pseudonym;
-    } catch (error) {
-      console.error('💥 Unexpected error fetching pseudonym:', error);
-      // Fallback to a generic pseudonym
-      return 'Anonymous Ghost';
-    }
+    this.inFlight.set(cacheKey, fetchPromise);
+    return fetchPromise;
   }
 
   /**
