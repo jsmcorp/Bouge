@@ -745,7 +745,11 @@ class SupabasePipeline {
       await this.sendMessageInternal(message);
       this.log(`✅ Message ${message.id} sent successfully`);
     } catch (error) {
-      this.log(`❌ Message ${message.id} send failed:`, stringifyError(error));
+      if ((error as any)?.code === 'QUEUED_OUTBOX' || (error as any)?.name === 'MessageQueuedError') {
+        this.log(`📦 Message ${message.id} queued to outbox`);
+      } else {
+        this.log(`❌ Message ${message.id} send failed:`, stringifyError(error));
+      }
       throw error;
     }
   }
@@ -758,7 +762,10 @@ class SupabasePipeline {
     if (this.isRecentlyUnlocked()) {
       this.log(`📤 Skipping direct send due to recent unlock - message ${message.id}`);
       await this.fallbackToOutbox(message);
-      return;
+      const queuedError: any = new Error(`Message ${message.id} queued to outbox (recent unlock)`);
+      queuedError.code = 'QUEUED_OUTBOX';
+      queuedError.name = 'MessageQueuedError';
+      throw queuedError;
     }
 
     // Check health before attempting direct send
@@ -766,7 +773,10 @@ class SupabasePipeline {
     if (!isHealthy) {
       this.log(`📤 Client unhealthy, falling back to outbox - message ${message.id}`);
       await this.fallbackToOutbox(message);
-      return;
+      const queuedError: any = new Error(`Message ${message.id} queued to outbox (unhealthy client)`);
+      queuedError.code = 'QUEUED_OUTBOX';
+      queuedError.name = 'MessageQueuedError';
+      throw queuedError;
     }
 
     // Attempt direct send with retries
@@ -823,6 +833,10 @@ class SupabasePipeline {
     // All direct send attempts failed, fallback to outbox
     this.log(`📤 All direct send attempts failed for ${message.id}, falling back to outbox. Last error:`, stringifyError(lastError));
     await this.fallbackToOutbox(message);
+    const queuedError: any = new Error(`Message ${message.id} queued to outbox after direct send failures`);
+    queuedError.code = 'QUEUED_OUTBOX';
+    queuedError.name = 'MessageQueuedError';
+    throw queuedError;
   }
 
   /**

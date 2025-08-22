@@ -233,8 +233,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       try {
         // Send through pipeline (handles retries, health checks, fallback to outbox)
         await supabasePipeline.sendMessage(messageForPipeline);
-        
-        // Message sent successfully - update UI to reflect sent status
+
+        // If we get here, it was directly sent. Mark as sent.
         const updateMessageToSent = (msg: Message) => {
           if (msg.id === messageId) {
             return { ...msg, delivery_status: 'sent' as const };
@@ -272,47 +272,52 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
 
         // Invalidate message cache for this group
         messageCache.invalidateCache(groupId);
-        
-      } catch (error: any) {
-        console.error('📤 Pipeline send failed for message:', messageId, error);
-        
-        // Update UI to show failed status
-        const updateMessageToFailed = (msg: Message) => {
-          if (msg.id === messageId) {
-            return { 
-              ...msg, 
-              delivery_status: 'failed' as const,
-              error_info: { category: 'send_failed', message: error.message }
-            };
-          }
-          return msg;
-        };
 
-        if (parentId) {
-          const state = get();
-          const updatedMessages = state.messages.map((msg: Message) => {
-            if (msg.id === parentId) {
-              return {
-                ...msg,
-                replies: (msg.replies || []).map(updateMessageToFailed),
+      } catch (error: any) {
+        console.error('📤 Pipeline send outcome for message:', messageId, error);
+        
+        // If queued to outbox, keep UI in 'sending' (WhatsApp-style), do not mark failed/sent
+        if (error?.code === 'QUEUED_OUTBOX' || error?.name === 'MessageQueuedError') {
+          // Optionally we could tag a subtle queued flag, but we keep 'sending'
+          console.log('📦 Message queued to outbox; keeping delivery_status as sending');
+        } else {
+          // Mark as failed only for real errors
+          const updateMessageToFailed = (msg: Message) => {
+            if (msg.id === messageId) {
+              return { 
+                ...msg, 
+                delivery_status: 'failed' as const,
+                error_info: { category: 'send_failed', message: error?.message }
               };
             }
             return msg;
-          });
-          set({ messages: updatedMessages });
+          };
 
-          if (state.activeThread?.id === parentId) {
-            const updatedReplies = state.threadReplies.map(updateMessageToFailed);
-            set({ threadReplies: updatedReplies });
+          if (parentId) {
+            const state = get();
+            const updatedMessages = state.messages.map((msg: Message) => {
+              if (msg.id === parentId) {
+                return {
+                  ...msg,
+                  replies: (msg.replies || []).map(updateMessageToFailed),
+                };
+              }
+              return msg;
+            });
+            set({ messages: updatedMessages });
+
+            if (state.activeThread?.id === parentId) {
+              const updatedReplies = state.threadReplies.map(updateMessageToFailed);
+              set({ threadReplies: updatedReplies });
+            }
+          } else {
+            const state = get();
+            const updatedMessages = state.messages.map(updateMessageToFailed);
+            set({ messages: updatedMessages });
           }
-        } else {
-          const state = get();
-          const updatedMessages = state.messages.map(updateMessageToFailed);
-          set({ messages: updatedMessages });
         }
 
-        // Pipeline handles outbox fallback, so we don't throw here
-        console.log('📤 Message marked as failed, pipeline will handle retry via outbox');
+        // Do not throw; pipeline/outbox handles retries
       }
       
     } catch (error: any) {
