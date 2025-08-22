@@ -249,7 +249,19 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
             lastGroupRefreshAt[groupId] = now;
             try {
               console.log(`[outbox-unified] ${sessionId} - Refreshing messages for group ${groupId} (sent=${stats?.sent})`);
-              await get().fetchMessages(groupId);
+              // Prefer delta sync for active chat if we have a recent cursor
+              const currentState = get();
+              if (currentState.activeGroup?.id === groupId && Array.isArray(currentState.messages) && currentState.messages.length > 0 && typeof currentState.deltaSyncSince === 'function') {
+                const lastMessage = currentState.messages[currentState.messages.length - 1];
+                const sinceIso = lastMessage?.created_at;
+                if (sinceIso) {
+                  await currentState.deltaSyncSince(groupId, sinceIso);
+                } else {
+                  await get().fetchMessages(groupId);
+                }
+              } else {
+                await get().fetchMessages(groupId);
+              }
             } catch (e) {
               console.error(`[outbox-unified] ${sessionId} - Error refreshing group ${groupId}:`, e);
             }
