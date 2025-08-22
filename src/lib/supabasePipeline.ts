@@ -783,8 +783,7 @@ class SupabasePipeline {
 
         const sendPromise = client
           .from('messages')
-          .insert({
-            id: message.id,
+          .upsert({
             group_id: message.group_id,
             user_id: message.user_id,
             content: message.content,
@@ -794,7 +793,7 @@ class SupabasePipeline {
             parent_id: message.parent_id,
             image_url: message.image_url,
             dedupe_key: message.dedupe_key,
-          })
+          }, { onConflict: 'dedupe_key' })
           .select(`
             *,
             reactions(*),
@@ -913,8 +912,7 @@ class SupabasePipeline {
 
           const insertPromise = client
             .from('messages')
-            .insert({
-              id: messageData.id, // Use original message ID
+            .upsert({
               group_id: outboxItem.group_id,
               user_id: outboxItem.user_id,
               content: messageData.content,
@@ -924,7 +922,7 @@ class SupabasePipeline {
               parent_id: messageData.parent_id,
               image_url: messageData.image_url,
               dedupe_key: messageData.dedupe_key,
-            })
+            }, { onConflict: 'dedupe_key' })
             .select(`
               *,
               reactions(*),
