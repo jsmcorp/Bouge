@@ -281,11 +281,22 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
             `)
             .single();
 
-          // Wrap with shorter timeout since session is now properly refreshed after device unlock
+          // Enhanced timeout handling with duration logging for outbox operations
+          const insertStartTime = Date.now();
+          console.log(`[outbox-unified] ${sessionId} - Starting 8-second timeout race for outbox message ${outboxItem.id}`);
+          
           const { data, error } = await Promise.race([
-            insertPromise,
+            insertPromise.then(result => {
+              const duration = Date.now() - insertStartTime;
+              console.log(`[outbox-unified] ${sessionId} - Supabase insert completed for outbox message ${outboxItem.id} in ${duration}ms`);
+              return result;
+            }),
             new Promise<never>((_, reject) => 
-              setTimeout(() => reject(new Error('Supabase insert timeout after 5s')), 5000)
+              setTimeout(() => {
+                const duration = Date.now() - insertStartTime;
+                console.log(`[outbox-unified] ${sessionId} - Supabase insert timeout for outbox message ${outboxItem.id} after ${duration}ms`);
+                reject(new Error(`Supabase insert timeout after 8s for outbox message ${outboxItem.id}`));
+              }, 8000)
             )
           ]) as { data: any; error: any };
 

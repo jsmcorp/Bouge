@@ -6,15 +6,6 @@ import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
 
-// Track device unlock/resume to skip health check
-let lastDeviceUnlockTime = 0;
-export const markDeviceUnlock = () => {
-  lastDeviceUnlockTime = Date.now();
-};
-const isRecentlyUnlocked = () => {
-  return (Date.now() - lastDeviceUnlockTime) < 30000; // 30 seconds
-};
-
 export interface MessageActions {
   sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null) => Promise<void>;
 }
@@ -23,7 +14,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
   sendMessage: async (groupId: string, content: string, isGhost: boolean, messageType = 'text', category: string | null = null, parentId: string | null = null, _pollId: string | null = null, imageFile: File | null = null) => {
     console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType, isOnline: 'checking...' });
     
-    // Declare messageId at the function scope so it's accessible in catch blocks
+    // Declare messageId at function scope so it's accessible in catch block
     let messageId: string = 'unknown';
     
     try {
@@ -309,9 +300,45 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         return;
       }
 
-      // Skip health check after device unlock - go straight to outbox
-      if (isRecentlyUnlocked()) {
-        console.log(`📤 Skipping health check due to recent device unlock - falling back to outbox for message ${messageId}`);
+      // Enhanced client health validation before sending
+      console.log(`📤 Performing client health check before sending message ${messageId}`);
+      
+      // Check 1: Session validity
+      let sessionValid = false;
+      let clientHealthy = false;
+      
+      try {
+        const sessionResult = await supabase.auth.getSession();
+        sessionValid = !!sessionResult?.data?.session?.access_token;
+        console.log(`📤 Session validity check: ${sessionValid}`);
+      } catch (e) {
+        console.warn(`📤 Session check failed for message ${messageId}:`, e);
+      }
+      
+      // Check 2: Quick connectivity test (if session is valid)
+      if (sessionValid) {
+        try {
+          console.log(`📤 Testing client connectivity for message ${messageId}...`);
+          const connectivityTest = await Promise.race([
+            supabase.from('messages').select('id').limit(1).then(() => true),
+            new Promise<boolean>((resolve) => 
+              setTimeout(() => {
+                console.log(`📤 Connectivity test timeout for message ${messageId}`);
+                resolve(false);
+              }, 2000)
+            )
+          ]);
+          clientHealthy = connectivityTest;
+          console.log(`📤 Client health check result: ${clientHealthy}`);
+        } catch (e) {
+          console.warn(`📤 Client health check failed for message ${messageId}:`, e);
+          clientHealthy = false;
+        }
+      }
+      
+      // If client is not healthy, immediately fallback to outbox
+      if (!sessionValid || !clientHealthy) {
+        console.log(`📤 Client unhealthy (session: ${sessionValid}, connectivity: ${clientHealthy}), falling back to outbox for message ${messageId}`);
         
         try {
           const isNative = Capacitor.isNativePlatform();
@@ -328,23 +355,23 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               parent_id: parentId || null,
               image_url: imageUrl || null,
             });
-            console.log(`📤 Message ${messageId} enqueued to outbox due to recent device unlock`);
+            console.log(`📤 Message ${messageId} enqueued to outbox due to unhealthy client`);
             
             // Trigger outbox processing immediately
             try {
               const { triggerOutboxProcessing } = get();
               if (typeof triggerOutboxProcessing === 'function') {
-                triggerOutboxProcessing('device-unlock-skip', 'high');
+                triggerOutboxProcessing('unhealthy-client', 'high');
               }
             } catch {}
             
             return; // Exit early - outbox will handle delivery
           }
         } catch (outboxError) {
-          console.error(`📤 Outbox fallback failed after device unlock - message ${messageId}:`, outboxError);
+          console.error(`📤 Outbox fallback failed for unhealthy client - message ${messageId}:`, outboxError);
         }
         
-        throw new Error(`Skipped health check due to recent device unlock`);
+        throw new Error(`Client unhealthy - session: ${sessionValid}, connectivity: ${clientHealthy}`);
       }
       
       // Client is healthy, proceed with direct send with enhanced retry logic

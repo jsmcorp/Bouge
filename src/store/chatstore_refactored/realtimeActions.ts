@@ -578,27 +578,98 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
 
-              // Try to ensure we have a valid session token before retrying
-              let currentSession: any = null;
-              try {
-                const res = await supabase.auth.getSession();
-                currentSession = res?.data?.session || null;
-              } catch (_) {}
-              if (!currentSession?.access_token) {
+              // Enhanced handling for CHANNEL_ERROR - force complete client rebuild
+              if (status === 'CHANNEL_ERROR') {
+                log('🔧 CHANNEL_ERROR detected - forcing complete client rebuild');
+                
+                // Force session refresh with duration logging for CHANNEL_ERROR
+                const refreshStartTime = Date.now();
+                let refreshSuccess = false;
+                
                 try {
-                  const controller = new AbortController();
-                  const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
-                  const refreshed = await Promise.race([
-                    supabase.auth.refreshSession().then((res) => res?.data?.session || null),
-                    new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
+                  log('🔧 CHANNEL_ERROR: Starting 8-second session refresh');
+                  const refreshResult = await Promise.race([
+                    supabase.auth.refreshSession().then(result => {
+                      const duration = Date.now() - refreshStartTime;
+                      log(`🔧 CHANNEL_ERROR: Session refresh completed in ${duration}ms`);
+                      return result;
+                    }),
+                    new Promise<null>((_, resolve) => 
+                      setTimeout(() => {
+                        const duration = Date.now() - refreshStartTime;
+                        log(`🔧 CHANNEL_ERROR: Session refresh timeout after ${duration}ms`);
+                        resolve(null);
+                      }, 8000)
+                    )
                   ]);
-                  clearTimeout(timeout);
-                  currentSession = refreshed ?? null;
+                  
+                  if (refreshResult?.data?.session?.access_token) {
+                    log('🔧 CHANNEL_ERROR: Session refresh successful, applying to realtime');
+                    try { (supabase as any).realtime?.setAuth?.(refreshResult.data.session.access_token); } catch {}
+                    refreshSuccess = true;
+                  } else {
+                    log('🔧 CHANNEL_ERROR: Session refresh failed or returned no token');
+                  }
+                } catch (e) {
+                  const duration = Date.now() - refreshStartTime;
+                  log(`🔧 CHANNEL_ERROR: Session refresh error after ${duration}ms: ${e}`);
+                }
+                
+                // If refresh failed, try one more time with longer timeout
+                if (!refreshSuccess) {
+                  log('🔧 CHANNEL_ERROR: Retrying session refresh with 10-second timeout');
+                  const retryStartTime = Date.now();
+                  
+                  try {
+                    const retryResult = await Promise.race([
+                      supabase.auth.refreshSession().then(result => {
+                        const duration = Date.now() - retryStartTime;
+                        log(`🔧 CHANNEL_ERROR: Retry session refresh completed in ${duration}ms`);
+                        return result;
+                      }),
+                      new Promise<null>((_, resolve) => 
+                        setTimeout(() => {
+                          const duration = Date.now() - retryStartTime;
+                          log(`🔧 CHANNEL_ERROR: Retry session refresh timeout after ${duration}ms`);
+                          resolve(null);
+                        }, 10000)
+                      )
+                    ]);
+                    
+                    if (retryResult?.data?.session?.access_token) {
+                      log('🔧 CHANNEL_ERROR: Retry session refresh successful');
+                      try { (supabase as any).realtime?.setAuth?.(retryResult.data.session.access_token); } catch {}
+                      refreshSuccess = true;
+                    }
+                  } catch (retryError) {
+                    log(`🔧 CHANNEL_ERROR: Retry session refresh also failed: ${retryError}`);
+                  }
+                }
+                
+                log(`🔧 CHANNEL_ERROR: Client rebuild result: ${refreshSuccess ? 'SUCCESS' : 'FAILED'}`);
+              } else {
+                // Standard session refresh for CLOSED/TIMED_OUT
+                let currentSession: any = null;
+                try {
+                  const res = await supabase.auth.getSession();
+                  currentSession = res?.data?.session || null;
                 } catch (_) {}
-              }
+                if (!currentSession?.access_token) {
+                  try {
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), FEATURES_PUSH.auth.refreshTimeoutMs);
+                    const refreshed = await Promise.race([
+                      supabase.auth.refreshSession().then((res) => res?.data?.session || null),
+                      new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
+                    ]);
+                    clearTimeout(timeout);
+                    currentSession = refreshed ?? null;
+                  } catch (_) {}
+                }
 
-              // Update realtime auth with whatever token we have (may be undefined)
-              try { (supabase as any).realtime?.setAuth?.(currentSession?.access_token); } catch (_) {}
+                // Update realtime auth with whatever token we have (may be undefined)
+                try { (supabase as any).realtime?.setAuth?.(currentSession?.access_token); } catch (_) {}
+              }
 
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId);
