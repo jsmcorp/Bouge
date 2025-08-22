@@ -438,7 +438,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             setTimeout(async () => {
               try {
                 console.log('🔄 Loading remaining messages in background...');
-                const allLocalMessages = await sqliteService.getAllMessagesForGroup(groupId);
+                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 30);
                 
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
@@ -603,11 +603,13 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           users!messages_user_id_fkey(display_name, avatar_url)
         `)
         .eq('group_id', groupId)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: false })
+        .limit(30);
 
       if (error) throw error;
 
-      const messages = await Promise.all((data || []).map(async (msg) => {
+      const rows = (data || []).slice().reverse();
+      const messages = await Promise.all(rows.map(async (msg) => {
         const { count: replyCount } = await client
           .from('messages')
           .select('*', { count: 'exact', head: true })
