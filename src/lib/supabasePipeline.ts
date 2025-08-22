@@ -79,6 +79,7 @@ function stringifyError(error: any): string {
 class SupabasePipeline {
   private client: SupabaseClient<Database> | null = null;
   private isInitialized = false;
+  private initializePromise: Promise<void> | null = null;
   private config: PipelineConfig = {
     sendTimeoutMs: 6000,
     healthCheckTimeoutMs: 3000,
@@ -86,9 +87,9 @@ class SupabasePipeline {
     retryBackoffMs: 1500,
   };
 
-  // Track recent unlock state to force outbox usage
-  private lastUnlockTime = 0;
-  private readonly unlockGracePeriodMs = 8000; // 8 seconds
+  // Unlock gating disabled; keep constant for logging only
+  private readonly unlockGracePeriodMs = 0; // disabled: do not gate sends after unlock
+  private lastResumeAt = 0;
   // Last outbox processing statistics for callers to inspect without changing method signatures
   private lastOutboxStats: { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null = null;
 
@@ -97,39 +98,46 @@ class SupabasePipeline {
   }
 
   /**
-   * Initialize or recreate the Supabase client
+   * Initialize Supabase client (idempotent). Pass force=true to recreate.
    */
-  public async initialize(): Promise<void> {
+  public async initialize(force: boolean = false): Promise<void> {
+    if (!force && this.isInitialized && this.client) return;
+    if (this.initializePromise) {
+      await this.initializePromise;
+      return;
+    }
+
     this.log('🔄 Initializing Supabase client...');
-    
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
     const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-    
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error('Missing Supabase configuration');
     }
 
-    // Destroy old client if it exists
-    if (this.client) {
-      this.log('🗑️ Destroying old client instance');
-      try {
-        await this.client.removeAllChannels();
-      } catch (e) {
-        this.log('⚠️ Error removing channels during client destruction:', e);
+    this.initializePromise = (async () => {
+      // Only tear down existing channels if we truly force a reinit
+      if (force && this.client) {
+        this.log('🗑️ Destroying old client instance (forced)');
+        try { await this.client.removeAllChannels(); } catch (e) {
+          this.log('⚠️ Error removing channels during client destruction:', e);
+        }
       }
-    }
 
-    // Create fresh client
-    this.client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-      },
-    });
+      if (!this.client || force) {
+        this.client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+          auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            detectSessionInUrl: false,
+          },
+        });
+      }
 
-    this.isInitialized = true;
-    this.log('✅ Supabase client initialized successfully');
+      this.isInitialized = true;
+      this.log('✅ Supabase client initialized successfully');
+    })().finally(() => { this.initializePromise = null; });
+
+    await this.initializePromise;
   }
 
   /**
@@ -142,18 +150,12 @@ class SupabasePipeline {
     return this.client!;
   }
 
-  /**
-   * Check if we're in the unlock grace period
-   */
-  private isRecentlyUnlocked(): boolean {
-    return Date.now() - this.lastUnlockTime < this.unlockGracePeriodMs;
-  }
+  // Unlock gating disabled; keep method for future toggling but unused currently
 
   /**
    * Mark that device was recently unlocked
    */
   public markDeviceUnlocked(): void {
-    this.lastUnlockTime = Date.now();
     this.log(`📱 Device unlock marked, will prefer outbox for next ${this.unlockGracePeriodMs}ms`);
   }
 
@@ -161,25 +163,28 @@ class SupabasePipeline {
    * Simple health check with timeout
    */
   public async checkHealth(): Promise<boolean> {
-    this.log('🏥 Starting health check...');
-    
+    // Lightweight health: rely on local session presence and freshness to avoid timeouts.
     try {
       const client = await this.getClient();
-      
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Health check timeout')), this.config.healthCheckTimeoutMs);
-      });
-
-      const sessionPromise = client.auth.getSession();
-      
-      const result = await Promise.race([sessionPromise, timeoutPromise]);
-      const hasSession = !!result?.data?.session?.access_token;
-      
-      this.log(`🏥 Health check completed: ${hasSession ? 'healthy' : 'unhealthy'}`);
-      return hasSession;
+      const { data } = await client.auth.getSession();
+      const session = data?.session;
+      if (!session?.access_token) {
+        this.log('🏥 Health check: no active session');
+        return false;
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = session.expires_at || 0;
+      if (expiresAt > 0 && expiresAt - nowSec <= 0) {
+        this.refreshSession().catch(() => {});
+        this.log('🏥 Health check: session expired');
+        return false;
+      }
+      this.log('🏥 Health check: healthy');
+      return true;
     } catch (error) {
-      this.log('🏥 Health check failed:', stringifyError(error));
-      return false;
+      // Fail open to reduce unnecessary outbox fallbacks during transient issues
+      this.log('🏥 Health check encountered error; assuming healthy:', stringifyError(error));
+      return true;
     }
   }
 
@@ -188,24 +193,44 @@ class SupabasePipeline {
    */
   public async refreshSession(): Promise<boolean> {
     this.log('🔄 Refreshing session...');
-    
     try {
       const client = await this.getClient();
-      
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Session refresh timeout')), this.config.healthCheckTimeoutMs);
-      });
-
-      const refreshPromise = client.auth.refreshSession();
-      
-      const result = await Promise.race([refreshPromise, timeoutPromise]);
-      const success = !!result?.data?.session?.access_token;
-      
+      const { data } = await client.auth.getSession();
+      const current = data?.session;
+      if (!current?.access_token) {
+        this.log('🔄 No active session to refresh');
+        return false;
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = current.expires_at || 0;
+      if (expiresAt > 0 && expiresAt - nowSec > 60) {
+        this.log('🔄 Session is fresh; skipping refresh');
+        return true;
+      }
+      const result = await client.auth.refreshSession();
+      const success = !!result?.data?.session?.access_token && !result?.error;
       this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
       return success;
     } catch (error) {
       this.log('🔄 Session refresh failed:', stringifyError(error));
       return false;
+    }
+  }
+
+  private async ensureSessionFreshness(): Promise<void> {
+    try {
+      const client = await this.getClient();
+      const { data } = await client.auth.getSession();
+      const session = data?.session;
+      if (!session?.access_token) return;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = session.expires_at || 0;
+      if (expiresAt > 0 && expiresAt - nowSec < 60) {
+        this.log('🔐 Session near expiry; refreshing in background');
+        await this.refreshSession();
+      }
+    } catch (error) {
+      this.log('🔐 ensureSessionFreshness error:', stringifyError(error));
     }
   }
 
@@ -760,15 +785,7 @@ class SupabasePipeline {
    * Internal message sending logic - simplified approach
    */
   private async sendMessageInternal(message: Message): Promise<void> {
-    // Check if we should skip direct send due to recent unlock
-    if (this.isRecentlyUnlocked()) {
-      this.log(`📤 Skipping direct send due to recent unlock - message ${message.id}`);
-      await this.fallbackToOutbox(message);
-      const queuedError: any = new Error(`Message ${message.id} queued to outbox (recent unlock)`);
-      queuedError.code = 'QUEUED_OUTBOX';
-      queuedError.name = 'MessageQueuedError';
-      throw queuedError;
-    }
+    // Do not gate sends after unlock; proceed directly
 
     // Check health before attempting direct send
     const isHealthy = await this.checkHealth();
@@ -1024,15 +1041,11 @@ class SupabasePipeline {
    * Reset connection - recreate client and refresh session
    */
   public async resetConnection(): Promise<void> {
-    this.log('🔄 Resetting connection...');
-    
+    // Non-destructive reset: keep existing client and simply ensure session
+    this.log('🔄 Resetting connection (non-destructive)...');
     try {
-      // Force client recreation
-      await this.initialize();
-      
-      // Attempt session refresh
+      await this.initialize(false);
       await this.refreshSession();
-      
       this.log('✅ Connection reset complete');
     } catch (error) {
       this.log('❌ Connection reset failed:', stringifyError(error));
@@ -1046,17 +1059,26 @@ class SupabasePipeline {
   public async onAppResume(): Promise<void> {
     this.log('📱 App resume detected');
     
-    // Mark device as recently unlocked
+    // Mark device as recently unlocked (no gating in send path)
     this.markDeviceUnlocked();
-    
-    // Reset connection to handle stale client issues
-    try {
-      await this.resetConnection();
-    } catch (error) {
-      this.log('⚠️ Connection reset during app resume failed:', stringifyError(error));
+
+    // Debounce duplicate resume spikes
+    const now = Date.now();
+    if (now - this.lastResumeAt < 1500) {
+      this.log('📱 App resume debounced');
+      return;
     }
-    
-    // Trigger outbox processing instead of direct call to avoid blocking
+    this.lastResumeAt = now;
+
+    try {
+      await this.initialize(false);
+      // refresh in background if near expiry
+      this.ensureSessionFreshness().catch(() => {});
+    } catch (error) {
+      this.log('⚠️ Resume handling failed:', stringifyError(error));
+    }
+
+    // Trigger outbox processing instead of blocking
     this.triggerOutboxProcessing('app-resume');
   }
 
@@ -1066,11 +1088,11 @@ class SupabasePipeline {
   public async onNetworkReconnect(): Promise<void> {
     this.log('🌐 Network reconnection detected');
     
-    // Reset connection to ensure fresh client state
     try {
-      await this.resetConnection();
+      await this.initialize(false);
+      this.ensureSessionFreshness().catch(() => {});
     } catch (error) {
-      this.log('⚠️ Connection reset during network reconnect failed:', stringifyError(error));
+      this.log('⚠️ Network reconnect handling failed:', stringifyError(error));
     }
     
     // Trigger outbox processing with high priority
