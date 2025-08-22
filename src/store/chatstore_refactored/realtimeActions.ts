@@ -3,6 +3,7 @@ import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
 import { useAuthStore } from '@/store/authStore';
+import { resetOutboxProcessingState } from './offlineActions';
 import { Message, Poll, TypingUser } from './types';
 
 type Author = { display_name: string; avatar_url: string | null };
@@ -535,6 +536,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 set({ reconnectWatchdogTimer: null });
               }
               resetRetryCount(); // Reset on successful connection
+              resetOutboxProcessingState(); // Reset outbox state on successful connection
               isConnecting = false; // Clear the guard
               set({ 
                 connectionStatus: 'connected', 
@@ -549,11 +551,18 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
               startSimpleHeartbeat(groupId);
 
+              // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
+              try {
+                const { triggerOutboxProcessing } = get();
+                if (typeof triggerOutboxProcessing === 'function') {
+                  setTimeout(() => triggerOutboxProcessing('realtime-connected', 'normal'), 1000);
+                }
+              } catch {}
+
               // Fetch messages if list is empty
               try {
                 const state = get();
                 if (state.messages?.length === 0 && typeof state.fetchMessages === 'function') {
-                  // Use a small delay to ensure any initial realtime inserts are merged before fetch
                   setTimeout(() => state.fetchMessages(groupId), 150);
                 }
               } catch (e) {
@@ -633,6 +642,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       log('Cleaning up realtime subscription');
       isConnecting = false; // Clear connection guard
+      resetOutboxProcessingState(); // Reset outbox state on cleanup
 
       if (typingTimeout) clearTimeout(typingTimeout);
       
@@ -782,6 +792,14 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             log('Token applied, reconnecting realtime');
             get().forceReconnect(activeGroupId);
           }
+          // Reset outbox state and kick processing after token events using unified system (delayed to avoid redundant triggers)
+          resetOutboxProcessingState();
+          try {
+            const { triggerOutboxProcessing } = get();
+            if (typeof triggerOutboxProcessing === 'function') {
+              setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+            }
+          } catch {}
         } else if (event === 'SIGNED_OUT') {
           log('User signed out, cleaning up realtime');
           get().cleanupRealtimeSubscription();

@@ -5,8 +5,6 @@ import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
-import { ensureAuthForWrites } from './utils';
-import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 export interface MessageActions {
   sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null) => Promise<void>;
@@ -239,6 +237,13 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
             });
 
             console.log('✅ Message saved to local storage and outbox');
+            // Immediate outbox trigger for offline messages using unified system
+            try {
+              const { triggerOutboxProcessing } = get();
+              if (typeof triggerOutboxProcessing === 'function') {
+                triggerOutboxProcessing('offline-message', 'high');
+              }
+            } catch {}
           } catch (error) {
             console.error('❌ Error saving offline message:', error);
             // Don't throw error, just log it and continue with optimistic UI update
@@ -291,35 +296,13 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         return;
       }
 
-      // If online, ensure auth for writes before hitting Supabase
-      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
-        const authOk = await ensureAuthForWrites();
-        if (!authOk.canWrite) {
-          // Short defer then enqueue to outbox; return to avoid duplicate online upsert
-          console.log('[outbox] deferred reason=auth_refresh');
-          await new Promise((r) => setTimeout(r, Math.min(1200, Math.max(300, FEATURES_PUSH.outbox.retryShortDelayMs))));
-          try {
-            const isNative = Capacitor.isNativePlatform();
-            const ready = isNative && await sqliteService.isReady();
-            if (ready) {
-              await get().enqueueOutbox({
-                id: messageId,
-                group_id: groupId,
-                user_id: user.id,
-                content,
-                is_ghost: isGhost,
-                message_type: messageType,
-                category: category || null,
-                parent_id: parentId || null,
-                image_url: imageUrl || null,
-              });
-            }
-          } catch {}
-          return; // Let outbox handle delivery
-        }
-      }
+      // Fast direct send - session is refreshed on app resume, so auth should work
+      console.log(`📤 Proceeding with direct Supabase send for message ${messageId}`);
 
-      const { data, error } = await supabase
+      console.log(`📤 Sending message ${messageId} to Supabase...`);
+      
+      // Wrap Supabase call with timeout to prevent hangs after device unlock
+      const insertPromise = supabase
         .from('messages')
         .upsert({
           group_id: groupId,
@@ -338,8 +321,62 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           users!messages_user_id_fkey(display_name, avatar_url)
         `)
         .single();
+      
+      console.log(`📤 Starting 5-second timeout race for Supabase insert of message ${messageId}...`);
+      const { data, error } = await Promise.race([
+        insertPromise.then(result => {
+          console.log(`📤 Supabase insert completed for message ${messageId}`);
+          return result;
+        }),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => {
+            console.log(`📤 Supabase insert timeout reached for message ${messageId}`);
+            reject(new Error('Supabase insert timeout after 5 seconds'));
+          }, 5000)
+        )
+      ]);
 
-      if (error) throw error;
+      if (error) {
+        console.error(`📤 Supabase error for message ${messageId}:`, error);
+        
+        // Fast fallback to outbox for WhatsApp-like reliability
+        console.log(`📤 Direct send failed for ${messageId}, falling back to outbox immediately`);
+        try {
+          const isNative = Capacitor.isNativePlatform();
+          const ready = isNative && await sqliteService.isReady();
+          if (ready) {
+            await get().enqueueOutbox({
+              id: messageId,
+              group_id: groupId,
+              user_id: user.id,
+              content,
+              is_ghost: isGhost,
+              message_type: messageType,
+              category: category || null,
+              parent_id: parentId || null,
+              image_url: imageUrl || null,
+            });
+            console.log(`📤 Message ${messageId} enqueued to outbox after direct send failure`);
+            
+            // Trigger outbox processing immediately
+            try {
+              const { triggerOutboxProcessing } = get();
+              if (typeof triggerOutboxProcessing === 'function') {
+                triggerOutboxProcessing('direct-send-failed', 'high');
+              }
+            } catch {}
+            
+            // Don't throw error - let outbox handle delivery
+            return;
+          }
+        } catch (outboxError) {
+          console.error(`📤 Outbox fallback also failed for ${messageId}:`, outboxError);
+        }
+        
+        throw error;
+      }
+      
+      console.log(`📤 Successfully sent message ${messageId} to Supabase, got server ID: ${data.id}`);
 
       // Replace optimistic message with real message
       const realMessage = {
