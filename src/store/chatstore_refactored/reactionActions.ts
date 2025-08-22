@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { ensureAuthForWrites } from './utils';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { Reaction } from './types';
@@ -12,7 +12,7 @@ export interface ReactionActions {
 export const createReactionActions = (set: any, get: any): ReactionActions => ({
   addOrRemoveReaction: async (messageId: string, emoji: string) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       const state = get();
@@ -41,10 +41,11 @@ export const createReactionActions = (set: any, get: any): ReactionActions => ({
           throw new Error('Auth not ready for writes');
         }
       }
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      const { error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { error } = await client
         .from('reactions')
         .insert({
           message_id: messageId,
@@ -109,10 +110,11 @@ export const createReactionActions = (set: any, get: any): ReactionActions => ({
           throw new Error('Auth not ready for writes');
         }
       }
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      const { error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { error } = await client
         .from('reactions')
         .delete()
         .eq('message_id', messageId)

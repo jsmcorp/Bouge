@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { preloadingService } from '@/lib/preloadingService';
@@ -105,10 +105,11 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // If we're online, fetch from Supabase
       console.log('🌐 Fetching groups from Supabase...');
 
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      const { data: memberGroups, error: memberError } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: memberGroups, error: memberError } = await client
         .from('group_members')
         .select('group_id')
         .eq('user_id', user.id);
@@ -124,7 +125,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       const groupIds = memberGroups.map(mg => mg.group_id);
 
-      const { data: groups, error: groupsError } = await supabase
+      const { data: groups, error: groupsError } = await client
         .from('groups')
         .select('*')
         .in('id', groupIds);
@@ -307,7 +308,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Get current user for vote checking (with timeout to prevent hanging)
             let user = null;
             try {
-              const userPromise = supabase.auth.getUser();
+              const userPromise = supabasePipeline.getUser();
               const timeoutPromise = new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Auth timeout')), 3000)
               );
@@ -463,7 +464,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   
                   let user = null;
                   try {
-                    const { data } = await supabase.auth.getUser();
+                    const { data } = await supabasePipeline.getUser();
                     user = data?.user || null;
                   } catch (error) {
                     console.warn('⚠️ Could not get current user for poll data');
@@ -593,7 +594,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // If we're online, fetch from Supabase
       console.log('🌐 Fetching messages from Supabase...');
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('messages')
         .select(`
           *,
@@ -606,12 +608,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (error) throw error;
 
       const messages = await Promise.all((data || []).map(async (msg) => {
-        const { count: replyCount } = await supabase
+        const { count: replyCount } = await client
           .from('messages')
           .select('*', { count: 'exact', head: true })
           .eq('parent_id', msg.id);
 
-        const { data: replies } = await supabase
+        const { data: replies } = await client
           .from('messages')
           .select(`
             *,
@@ -632,7 +634,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         // Fetch poll data if this is a poll message
         let pollData = null;
         if (msg.message_type === 'poll') {
-          const { data: poll } = await supabase
+          const { data: poll } = await client
             .from('polls')
             .select('*')
             .eq('message_id', msg.id)
@@ -640,7 +642,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
           if (poll) {
             // Fetch vote counts
-            const { data: votes } = await supabase
+            const { data: votes } = await client
               .from('poll_votes')
               .select('option_index')
               .eq('poll_id', poll.id);
@@ -654,8 +656,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             });
 
             // Check user's vote
-            const { data: { user } } = await supabase.auth.getUser();
-            const { data: userVote } = await supabase
+            const { data: { user } } = await supabasePipeline.getUser();
+            const { data: userVote } = await client
               .from('poll_votes')
               .select('option_index')
               .eq('poll_id', poll.id)
@@ -757,7 +759,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
   fetchMessageById: async (messageId: string) => {
     try {
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('messages')
         .select(`
           *,
@@ -783,7 +786,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
   fetchReplies: async (messageId: string) => {
     try {
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('messages')
         .select(`
           *,
@@ -826,7 +830,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   deltaSyncSince: async (groupId: string, sinceIso: string) => {
     try {
       // Fetch only messages created after the given ISO timestamp
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('messages')
         .select(`
           *,

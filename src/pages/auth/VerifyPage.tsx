@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
 import { toast } from 'sonner';
 import { useAuthStore } from '@/store/authStore';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 
 export default function VerifyPage() {
   const [code, setCode] = useState('');
@@ -45,11 +45,7 @@ export default function VerifyPage() {
 
     setIsLoading(true);
     try {
-      const { data, error } = await supabase.auth.verifyOtp({
-        phone,
-        token: code,
-        type: 'sms',
-      });
+      const { data, error } = await supabasePipeline.verifyOtp(phone, code);
 
       if (error) {
         toast.error(error.message || 'Invalid verification code');
@@ -58,7 +54,8 @@ export default function VerifyPage() {
 
       if (data.session && data.user) {
         // Check if user exists in our users table
-        const { data: userData, error: userError } = await supabase
+        const client = await supabasePipeline.getDirectClient();
+        const { data: userData, error: userError } = await client
           .from('users')
           .select('*')
           .eq('id', data.user.id)
@@ -68,7 +65,7 @@ export default function VerifyPage() {
           // Only handle PGRST116 (no rows found) as expected for new users
           if (userError.code === 'PGRST116') {
             // User doesn't exist, create new user record
-            const { data: newUser, error: createError } = await supabase
+            const { data: newUser, error: createError } = await client
               .from('users')
               .insert({
                 id: data.user.id,
@@ -108,9 +105,7 @@ export default function VerifyPage() {
   const handleResend = async () => {
     setIsLoading(true);
     try {
-      const { error } = await supabase.auth.signInWithOtp({
-        phone,
-      });
+      const { error } = await supabasePipeline.signInWithOtp(phone);
 
       if (error) {
         toast.error(error.message || 'Failed to send verification code');

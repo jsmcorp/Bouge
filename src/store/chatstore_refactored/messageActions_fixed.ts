@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { Capacitor } from '@capacitor/core';
@@ -51,14 +51,14 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         } else {
           // Fallback to Supabase methods only if absolutely necessary
           try {
-            const { data: { user: authUser } } = await supabase.auth.getUser();
+            const { data: { user: authUser } } = await supabasePipeline.getUser();
             user = authUser;
             console.log('✅ Got user from server:', !!user);
           } catch (error) {
             console.log('❌ Failed to get user from server:', error instanceof Error ? error.message : String(error));
             try {
               console.log('🔄 Falling back to local session...');
-              const session = await supabase.auth.getSession();
+              const session = await supabasePipeline.getSession();
               user = session.data.session?.user || null;
               console.log('📱 Got user from local session fallback:', !!user);
             } catch (sessionError) {
@@ -123,20 +123,21 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           // Create file name
           const fileName = `${user.id}/${Date.now()}_${imageFile.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
 
-          // Upload to Supabase Storage
-          const { data: uploadData, error: uploadError } = await supabase.storage
-            .from('chat-media')
-            .upload(fileName, blob, {
+          // Upload to Supabase Storage via pipeline
+          const { data: uploadData, error: uploadError } = await supabasePipeline.uploadFile(
+            'chat-media',
+            fileName,
+            blob,
+            {
               contentType: 'image/jpeg',
               upsert: false
-            });
+            }
+          );
 
           if (uploadError) throw uploadError;
 
-          // Get public URL
-          const { data: { publicUrl } } = supabase.storage
-            .from('chat-media')
-            .getPublicUrl(uploadData.path);
+          // Get public URL via pipeline
+          const { data: { publicUrl } } = await supabasePipeline.getPublicUrl('chat-media', uploadData.path);
 
           imageUrl = publicUrl;
 
@@ -308,7 +309,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       let clientHealthy = false;
       
       try {
-        const sessionResult = await supabase.auth.getSession();
+        const sessionResult = await supabasePipeline.getSession();
         sessionValid = !!sessionResult?.data?.session?.access_token;
         console.log(`📤 Session validity check: ${sessionValid}`);
       } catch (e) {
@@ -320,7 +321,10 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         try {
           console.log(`📤 Testing client connectivity for message ${messageId}...`);
           const connectivityTest = await Promise.race([
-            supabase.from('messages').select('id').limit(1).then(() => true),
+            (async () => {
+              const client = await supabasePipeline.getDirectClient();
+              return client.from('messages').select('id').limit(1).then(() => true);
+            })(),
             new Promise<boolean>((resolve) => 
               setTimeout(() => {
                 console.log(`📤 Connectivity test timeout for message ${messageId}`);
@@ -390,7 +394,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           console.log(`📤 Attempt ${attemptNum}/${maxRetries + 1}: Sending message ${messageId} to Supabase...`);
           
           // Create the insert promise
-          const insertPromise = supabase
+          const client = await supabasePipeline.getDirectClient();
+          const insertPromise = client
             .from('messages')
             .upsert({
               group_id: groupId,

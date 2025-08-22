@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabasePipeline } from './supabasePipeline';
 
 interface PseudonymCacheEntry {
   pseudonym: string;
@@ -29,8 +29,8 @@ class PseudonymService {
     try {
       console.log('🎭 Fetching pseudonym from Supabase for', cacheKey);
       
-      // Call the Supabase RPC function
-      const { data, error } = await supabase.rpc('upsert_pseudonym', {
+      // Call the Supabase RPC function via pipeline
+      const { data, error } = await supabasePipeline.rpc<string>('upsert_pseudonym', {
         q_group_id: groupId,
         q_user_id: userId
       });

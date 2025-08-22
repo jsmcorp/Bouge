@@ -26,12 +26,53 @@ export interface OutboxMessage {
   next_retry_at: number;
 }
 
+// Auth operation interfaces
+export interface AuthOperationResult {
+  data?: any;
+  error?: any;
+  user?: any;
+  session?: any;
+}
+
+export interface GroupInsertData {
+  name: string;
+  description?: string;
+  invite_code: string;
+  created_by: string;
+  avatar_url?: string | null;
+}
+
+export interface MessageInsertData {
+  group_id: string;
+  user_id: string;
+  content: string;
+  is_ghost?: boolean;
+  message_type?: string;
+  category?: string | null;
+  parent_id?: string | null;
+  image_url?: string | null;
+  dedupe_key?: string | null;
+}
+
 interface PipelineConfig {
-  masterTimeoutMs: number;
+  sendTimeoutMs: number;
   healthCheckTimeoutMs: number;
-  sessionRefreshTimeoutMs: number;
   maxRetries: number;
   retryBackoffMs: number;
+}
+
+// Utility function to safely stringify errors
+function stringifyError(error: any): string {
+  if (error === null || error === undefined) return 'null/undefined error';
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}${error.stack ? '\n' + error.stack : ''}`;
+  }
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 // Singleton pipeline orchestrator
@@ -39,19 +80,18 @@ class SupabasePipeline {
   private client: SupabaseClient<Database> | null = null;
   private isInitialized = false;
   private config: PipelineConfig = {
-    masterTimeoutMs: 8000,
+    sendTimeoutMs: 6000,
     healthCheckTimeoutMs: 3000,
-    sessionRefreshTimeoutMs: 5000,
-    maxRetries: 3,
-    retryBackoffMs: 2000,
+    maxRetries: 2,
+    retryBackoffMs: 1500,
   };
 
   // Track recent unlock state to force outbox usage
   private lastUnlockTime = 0;
-  private readonly unlockGracePeriodMs = 10000; // 10 seconds
+  private readonly unlockGracePeriodMs = 8000; // 8 seconds
 
   constructor() {
-    this.log('Pipeline initialized');
+    this.log('🚀 Pipeline initialized');
   }
 
   /**
@@ -112,42 +152,31 @@ class SupabasePipeline {
    */
   public markDeviceUnlocked(): void {
     this.lastUnlockTime = Date.now();
-    this.log('📱 Device unlock marked, will prefer outbox for next', this.unlockGracePeriodMs + 'ms');
+    this.log(`📱 Device unlock marked, will prefer outbox for next ${this.unlockGracePeriodMs}ms`);
   }
 
   /**
-   * Health check with AbortController and timeout
+   * Simple health check with timeout
    */
   public async checkHealth(): Promise<boolean> {
     this.log('🏥 Starting health check...');
     
     try {
       const client = await this.getClient();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.healthCheckTimeoutMs);
-
-      const healthPromise = Promise.race([
-        // Simple session check
-        client.auth.getSession().then((result) => {
-          const hasSession = !!result?.data?.session?.access_token;
-          this.log(`🏥 Session check: ${hasSession ? 'valid' : 'invalid'}`);
-          return hasSession;
-        }),
-        // Abort signal
-        new Promise<never>((_, reject) => {
-          controller.signal.addEventListener('abort', () => {
-            reject(new Error('Health check timeout'));
-          });
-        })
-      ]);
-
-      const isHealthy = await healthPromise;
-      clearTimeout(timeoutId);
       
-      this.log(`🏥 Health check completed: ${isHealthy ? 'healthy' : 'unhealthy'}`);
-      return isHealthy;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Health check timeout')), this.config.healthCheckTimeoutMs);
+      });
+
+      const sessionPromise = client.auth.getSession();
+      
+      const result = await Promise.race([sessionPromise, timeoutPromise]);
+      const hasSession = !!result?.data?.session?.access_token;
+      
+      this.log(`🏥 Health check completed: ${hasSession ? 'healthy' : 'unhealthy'}`);
+      return hasSession;
     } catch (error) {
-      this.log('🏥 Health check failed:', error);
+      this.log('🏥 Health check failed:', stringifyError(error));
       return false;
     }
   }
@@ -160,53 +189,569 @@ class SupabasePipeline {
     
     try {
       const client = await this.getClient();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.sessionRefreshTimeoutMs);
+      
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Session refresh timeout')), this.config.healthCheckTimeoutMs);
+      });
 
-      const refreshPromise = Promise.race([
-        client.auth.refreshSession().then((result) => {
-          const success = !!result?.data?.session?.access_token;
-          this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
-          return success;
-        }),
-        new Promise<never>((_, reject) => {
-          controller.signal.addEventListener('abort', () => {
-            reject(new Error('Session refresh timeout'));
-          });
-        })
-      ]);
-
-      const success = await refreshPromise;
-      clearTimeout(timeoutId);
+      const refreshPromise = client.auth.refreshSession();
+      
+      const result = await Promise.race([refreshPromise, timeoutPromise]);
+      const success = !!result?.data?.session?.access_token;
+      
+      this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
       return success;
     } catch (error) {
-      this.log('🔄 Session refresh failed:', error);
+      this.log('🔄 Session refresh failed:', stringifyError(error));
       return false;
     }
   }
 
-  /**
-   * Send message with direct send → fallback to outbox pipeline
-   */
-  public async sendMessage(message: Message): Promise<void> {
-    this.log(`📤 Sending message ${message.id}...`);
-    
-    // Wrap entire operation in master timeout
-    const masterTimeout = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Master timeout reached')), this.config.masterTimeoutMs);
-    });
+  // ============================================================================
+  // AUTH OPERATIONS - All authentication should go through these methods
+  // ============================================================================
 
+  /**
+   * Sign in with OTP (phone)
+   */
+  public async signInWithOtp(phone: string): Promise<AuthOperationResult> {
+    this.log('🔐 Signing in with OTP for phone:', phone.substring(0, 6) + '...');
+    
     try {
-      await Promise.race([this.sendMessageInternal(message), masterTimeout]);
-      this.log(`✅ Message ${message.id} sent successfully`);
+      const client = await this.getClient();
+      const result = await client.auth.signInWithOtp({ phone });
+      this.log('🔐 OTP sign in result:', result.error ? 'error' : 'success');
+      return result;
     } catch (error) {
-      this.log(`❌ Message ${message.id} send failed:`, error);
+      this.log('🔐 OTP sign in failed:', error);
+      return { error };
+    }
+  }
+
+  /**
+   * Verify OTP
+   */
+  public async verifyOtp(phone: string, token: string): Promise<AuthOperationResult> {
+    this.log('🔐 Verifying OTP for phone:', phone.substring(0, 6) + '...');
+    
+    try {
+      const client = await this.getClient();
+      const result = await client.auth.verifyOtp({ phone, token, type: 'sms' });
+      this.log('🔐 OTP verification result:', result.error ? 'error' : 'success');
+      return result;
+    } catch (error) {
+      this.log('🔐 OTP verification failed:', error);
+      return { error };
+    }
+  }
+
+  /**
+   * Sign out user
+   */
+  public async signOut(): Promise<AuthOperationResult> {
+    this.log('🔐 Signing out user');
+    
+    try {
+      const client = await this.getClient();
+      const result = await client.auth.signOut();
+      this.log('🔐 Sign out result:', result.error ? 'error' : 'success');
+      return result;
+    } catch (error) {
+      this.log('🔐 Sign out failed:', error);
+      return { error };
+    }
+  }
+
+  /**
+   * Get current user
+   */
+  public async getUser(): Promise<AuthOperationResult> {
+    try {
+      const client = await this.getClient();
+      const result = await client.auth.getUser();
+      return result;
+    } catch (error) {
+      this.log('🔐 Get user failed:', error);
+      return { error };
+    }
+  }
+
+  /**
+   * Get current session
+   */
+  public async getSession(): Promise<AuthOperationResult> {
+    try {
+      const client = await this.getClient();
+      const result = await client.auth.getSession();
+      return result;
+    } catch (error) {
+      this.log('🔐 Get session failed:', error);
+      return { error };
+    }
+  }
+
+  /**
+   * Listen to auth state changes
+   */
+  public async onAuthStateChange(callback: (event: string, session: any) => void): Promise<{ data: { subscription: any } }> {
+    try {
+      const client = await this.getClient();
+      return client.auth.onAuthStateChange(callback);
+    } catch (error) {
+      this.log('🔐 Auth state change listener failed:', error);
+      throw error;
+    }
+  }
+
+  // ============================================================================
+  // DATABASE OPERATIONS - All database queries should go through these methods
+  // ============================================================================
+
+  /**
+   * Generic database query with timeout and error handling
+   */
+  private async executeQuery<T>(
+    queryBuilder: () => Promise<{ data: T; error: any }>,
+    operation: string,
+    timeoutMs: number = this.config.sendTimeoutMs
+  ): Promise<{ data: T | null; error: any }> {
+    this.log(`🗄️ Executing ${operation}...`);
+    
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
+      });
+
+      const result = await Promise.race([queryBuilder(), timeoutPromise]);
+      
+      if (result.error) {
+        this.log(`🗄️ ${operation} error:`, stringifyError(result.error));
+        return { data: null, error: result.error };
+      }
+      
+      this.log(`🗄️ ${operation} success`);
+      return result;
+    } catch (error) {
+      this.log(`🗄️ ${operation} failed:`, stringifyError(error));
+      return { data: null, error };
+    }
+  }
+
+  /**
+   * Fetch user groups
+   */
+  public async fetchGroups(): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('groups')
+        .select(`
+          *,
+          group_members!inner(user_id)
+        `)
+        .order('created_at', { ascending: false });
+    }, 'fetch groups');
+  }
+
+  /**
+   * Create new group
+   */
+  public async createGroup(groupData: GroupInsertData): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('groups')
+        .insert(groupData)
+        .select()
+        .single();
+    }, 'create group');
+  }
+
+  /**
+   * Join group by invite code
+   */
+  public async joinGroup(inviteCode: string, userId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      
+      // First find the group
+      const { data: group, error: groupError } = await client
+        .from('groups')
+        .select('id')
+        .eq('invite_code', inviteCode)
+        .single();
+        
+      if (groupError) return { data: null, error: groupError };
+      
+      // Then add user as member
+      const { error: memberError } = await client
+        .from('group_members')
+        .insert({
+          group_id: group.id,
+          user_id: userId,
+          role: 'participant'
+        });
+        
+      if (memberError) return { data: null, error: memberError };
+      
+      // Return the group data
+      return client
+        .from('groups')
+        .select('*')
+        .eq('id', group.id)
+        .single();
+    }, 'join group');
+  }
+
+  /**
+   * Fetch messages for a group
+   */
+  public async fetchMessages(groupId: string, limit: number = 50): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('group_id', groupId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+    }, 'fetch messages');
+  }
+
+  /**
+   * Fetch message by ID
+   */
+  public async fetchMessageById(messageId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('id', messageId)
+        .single();
+    }, 'fetch message by ID');
+  }
+
+  /**
+   * Fetch replies for a message
+   */
+  public async fetchReplies(parentMessageId: string): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('parent_id', parentMessageId)
+        .order('created_at', { ascending: true });
+    }, 'fetch replies');
+  }
+
+  /**
+   * Fetch group members
+   */
+  public async fetchGroupMembers(groupId: string): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('group_members')
+        .select(`
+          *,
+          users!group_members_user_id_fkey(*)
+        `)
+        .eq('group_id', groupId);
+    }, 'fetch group members');
+  }
+
+  /**
+   * Fetch group media
+   */
+  public async fetchGroupMedia(groupId: string): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('group_media')
+        .select(`
+          *,
+          users!group_media_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('group_id', groupId)
+        .order('uploaded_at', { ascending: false });
+    }, 'fetch group media');
+  }
+
+  /**
+   * Fetch polls for a group
+   */
+  public async fetchPolls(groupId: string): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('polls')
+        .select(`
+          *,
+          messages!polls_message_id_fkey(group_id)
+        `)
+        .eq('messages.group_id', groupId);
+    }, 'fetch polls');
+  }
+
+  /**
+   * Create poll
+   */
+  public async createPoll(pollData: {
+    message_id: string;
+    question: string;
+    options: string[];
+    closes_at: string;
+  }): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('polls')
+        .insert(pollData)
+        .select()
+        .single();
+    }, 'create poll');
+  }
+
+  /**
+   * Vote on poll
+   */
+  public async votePoll(pollId: string, userId: string, optionIndex: number): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('poll_votes')
+        .upsert({
+          poll_id: pollId,
+          user_id: userId,
+          option_index: optionIndex
+        }, { onConflict: 'poll_id,user_id' })
+        .select()
+        .single();
+    }, 'vote poll');
+  }
+
+  /**
+   * Add reaction to message
+   */
+  public async addReaction(messageId: string, userId: string, emoji: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('reactions')
+        .upsert({
+          message_id: messageId,
+          user_id: userId,
+          emoji: emoji
+        }, { onConflict: 'message_id,user_id,emoji' })
+        .select()
+        .single();
+    }, 'add reaction');
+  }
+
+  /**
+   * Remove reaction from message
+   */
+  public async removeReaction(messageId: string, userId: string, emoji: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('reactions')
+        .delete()
+        .eq('message_id', messageId)
+        .eq('user_id', userId)
+        .eq('emoji', emoji);
+    }, 'remove reaction');
+  }
+
+  /**
+   * Update user profile
+   */
+  public async updateUser(userId: string, updates: any): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('users')
+        .update(updates)
+        .eq('id', userId)
+        .select()
+        .single();
+    }, 'update user');
+  }
+
+  /**
+   * Upsert user device token
+   */
+  public async upsertDeviceToken(tokenData: {
+    user_id: string;
+    platform: string;
+    token: string;
+    app_version: string;
+    active: boolean;
+    last_seen_at: string;
+  }): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('user_devices')
+        .upsert(tokenData, { onConflict: 'token' });
+    }, 'upsert device token');
+  }
+
+  /**
+   * Deactivate device token
+   */
+  public async deactivateDeviceToken(token: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('user_devices')
+        .update({ active: false })
+        .eq('token', token);
+    }, 'deactivate device token');
+  }
+
+  /**
+   * Upload file to storage
+   */
+  public async uploadFile(
+    bucket: string, 
+    path: string, 
+    file: File | Blob, 
+    options?: any
+  ): Promise<{ data: any | null; error: any }> {
+    this.log(`📁 Uploading file to ${bucket}/${path}...`);
+    
+    try {
+      const client = await this.getClient();
+      const result = await client.storage
+        .from(bucket)
+        .upload(path, file, options);
+      
+      if (result.error) {
+        this.log('📁 File upload error:', result.error);
+        return { data: null, error: result.error };
+      }
+      
+      this.log('📁 File upload success');
+      return result;
+    } catch (error) {
+      this.log('📁 File upload failed:', error);
+      return { data: null, error };
+    }
+  }
+
+  /**
+   * Get public URL for file
+   */
+  public async getPublicUrl(bucket: string, path: string): Promise<{ data: { publicUrl: string } }> {
+    try {
+      const client = await this.getClient();
+      return client.storage.from(bucket).getPublicUrl(path);
+    } catch (error) {
+      this.log('📁 Get public URL failed:', error);
       throw error;
     }
   }
 
   /**
-   * Internal message sending logic
+   * Delta sync - fetch messages since a timestamp
+   */
+  public async deltaSyncMessages(groupId: string, sinceIso: string): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .eq('group_id', groupId)
+        .gt('created_at', sinceIso)
+        .order('created_at', { ascending: true });
+    }, 'delta sync messages');
+  }
+
+  /**
+   * Call RPC function
+   */
+  public async rpc<T>(functionName: string, params?: any): Promise<{ data: T | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client.rpc(functionName, params);
+    }, `RPC ${functionName}`);
+  }
+
+  /**
+   * Create realtime channel
+   */
+  public async createChannel(channelName: string, config?: any): Promise<any> {
+    try {
+      const client = await this.getClient();
+      return client.channel(channelName, config);
+    } catch (error) {
+      this.log('📡 Create channel failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Remove realtime channel
+   */
+  public async removeChannel(channel: any): Promise<void> {
+    try {
+      const client = await this.getClient();
+      client.removeChannel(channel);
+    } catch (error) {
+      this.log('📡 Remove channel failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Remove all realtime channels
+   */
+  public async removeAllChannels(): Promise<void> {
+    try {
+      const client = await this.getClient();
+      client.removeAllChannels();
+    } catch (error) {
+      this.log('📡 Remove all channels failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send message with simplified direct send → fallback to outbox pipeline
+   */
+  public async sendMessage(message: Message): Promise<void> {
+    this.log(`📤 Sending message ${message.id}...`);
+    
+    try {
+      await this.sendMessageInternal(message);
+      this.log(`✅ Message ${message.id} sent successfully`);
+    } catch (error) {
+      this.log(`❌ Message ${message.id} send failed:`, stringifyError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Internal message sending logic - simplified approach
    */
   private async sendMessageInternal(message: Message): Promise<void> {
     // Check if we should skip direct send due to recent unlock
@@ -225,11 +770,17 @@ class SupabasePipeline {
     }
 
     // Attempt direct send with retries
+    let lastError: any = null;
     for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         
         const client = await this.getClient();
+        
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Direct send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
+        });
+
         const sendPromise = client
           .from('messages')
           .insert({
@@ -251,10 +802,6 @@ class SupabasePipeline {
           `)
           .single();
 
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Direct send timeout')), this.config.masterTimeoutMs);
-        });
-
         const { error } = await Promise.race([sendPromise, timeoutPromise]);
 
         if (error) {
@@ -264,22 +811,18 @@ class SupabasePipeline {
         this.log(`✅ Direct send successful - message ${message.id}`);
         return; // Success!
       } catch (error) {
-        this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, error);
+        lastError = error;
+        this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
         
         if (attempt < this.config.maxRetries) {
+          this.log(`⏳ Waiting ${this.config.retryBackoffMs}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, this.config.retryBackoffMs));
-        }
-        
-        // If this was the last attempt, continue to fallback
-        if (attempt === this.config.maxRetries) {
-          this.log(`📤 All direct send attempts failed for ${message.id}, falling back to outbox`);
-          break;
         }
       }
     }
 
     // All direct send attempts failed, fallback to outbox
-    this.log(`📤 All direct send attempts failed, falling back to outbox - message ${message.id}`);
+    this.log(`📤 All direct send attempts failed for ${message.id}, falling back to outbox. Last error:`, stringifyError(lastError));
     await this.fallbackToOutbox(message);
   }
 
@@ -295,7 +838,7 @@ class SupabasePipeline {
         throw new Error('SQLite not ready for outbox storage');
       }
 
-      // Store message in outbox (without id field as it's auto-generated)
+      // Store message in outbox with all original data
       await sqliteService.addToOutbox({
         group_id: message.group_id,
         user_id: message.user_id,
@@ -307,20 +850,24 @@ class SupabasePipeline {
           category: message.category,
           parent_id: message.parent_id,
           image_url: message.image_url,
+          dedupe_key: message.dedupe_key,
         }),
         retry_count: 0,
         next_retry_at: Date.now(), // Immediate retry
       });
 
       this.log(`📦 Message ${message.id} stored in outbox`);
+      
+      // Trigger outbox processing immediately
+      this.triggerOutboxProcessing('pipeline-fallback');
     } catch (error) {
-      this.log(`❌ Outbox fallback failed for message ${message.id}:`, error);
+      this.log(`❌ Outbox fallback failed for message ${message.id}:`, stringifyError(error));
       throw error;
     }
   }
 
   /**
-   * Process outbox messages with retries
+   * Process outbox messages with retries - simplified and more reliable
    */
   public async processOutbox(): Promise<void> {
     const sessionId = `outbox-${Date.now()}`;
@@ -342,6 +889,14 @@ class SupabasePipeline {
       }
 
       this.log(`📦 Processing ${outboxMessages.length} outbox messages`);
+
+      // Check health before processing
+      const isHealthy = await this.checkHealth();
+      if (!isHealthy) {
+        this.log('📦 Client unhealthy, skipping outbox processing');
+        return;
+      }
+
       const client = await this.getClient();
 
       for (let i = 0; i < outboxMessages.length; i++) {
@@ -351,10 +906,15 @@ class SupabasePipeline {
         try {
           const messageData = JSON.parse(outboxItem.content);
 
-          // Send to Supabase with timeout race
+          // Send to Supabase with simpler timeout
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error(`Outbox send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
+          });
+
           const insertPromise = client
             .from('messages')
             .insert({
+              id: messageData.id, // Use original message ID
               group_id: outboxItem.group_id,
               user_id: outboxItem.user_id,
               content: messageData.content,
@@ -363,6 +923,7 @@ class SupabasePipeline {
               category: messageData.category,
               parent_id: messageData.parent_id,
               image_url: messageData.image_url,
+              dedupe_key: messageData.dedupe_key,
             })
             .select(`
               *,
@@ -370,10 +931,6 @@ class SupabasePipeline {
               users!messages_user_id_fkey(display_name, avatar_url)
             `)
             .single();
-
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Outbox send timeout')), this.config.masterTimeoutMs);
-          });
 
           const { error } = await Promise.race([insertPromise, timeoutPromise]);
 
@@ -388,7 +945,7 @@ class SupabasePipeline {
           }
 
         } catch (error) {
-          this.log(`❌ Outbox message ${outboxItem.id} failed:`, error);
+          this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
           
           if (outboxItem.id !== undefined) {
             // Update retry count and schedule next retry
@@ -411,9 +968,23 @@ class SupabasePipeline {
 
       this.log(`📦 Outbox processing complete - session ${sessionId}`);
     } catch (error) {
-      this.log(`❌ Outbox processing failed - session ${sessionId}:`, error);
+      this.log(`❌ Outbox processing failed - session ${sessionId}:`, stringifyError(error));
       throw error;
     }
+  }
+
+  /**
+   * Trigger outbox processing externally
+   */
+  private triggerOutboxProcessing(context: string): void {
+    this.log(`📦 Triggering outbox processing from: ${context}`);
+    
+    // Use dynamic import to avoid circular dependencies
+    import('../store/chatstore_refactored/offlineActions').then(({ triggerOutboxProcessing }) => {
+      triggerOutboxProcessing(context, 'high');
+    }).catch(error => {
+      this.log(`❌ Failed to trigger outbox processing:`, stringifyError(error));
+    });
   }
 
   /**
@@ -431,7 +1002,7 @@ class SupabasePipeline {
       
       this.log('✅ Connection reset complete');
     } catch (error) {
-      this.log('❌ Connection reset failed:', error);
+      this.log('❌ Connection reset failed:', stringifyError(error));
       throw error;
     }
   }
@@ -446,14 +1017,31 @@ class SupabasePipeline {
     this.markDeviceUnlocked();
     
     // Reset connection to handle stale client issues
-    await this.resetConnection();
-    
-    // Process any pending outbox items
     try {
-      await this.processOutbox();
+      await this.resetConnection();
     } catch (error) {
-      this.log('⚠️ Outbox processing during app resume failed:', error);
+      this.log('⚠️ Connection reset during app resume failed:', stringifyError(error));
     }
+    
+    // Trigger outbox processing instead of direct call to avoid blocking
+    this.triggerOutboxProcessing('app-resume');
+  }
+
+  /**
+   * Handle network reconnection events
+   */
+  public async onNetworkReconnect(): Promise<void> {
+    this.log('🌐 Network reconnection detected');
+    
+    // Reset connection to ensure fresh client state
+    try {
+      await this.resetConnection();
+    } catch (error) {
+      this.log('⚠️ Connection reset during network reconnect failed:', stringifyError(error));
+    }
+    
+    // Trigger outbox processing with high priority
+    this.triggerOutboxProcessing('network-reconnect');
   }
 
   /**
@@ -465,10 +1053,16 @@ class SupabasePipeline {
   }
 
   /**
-   * Centralized logging
+   * Centralized logging with better error handling
    */
   private log(message: string, ...args: any[]): void {
-    console.log(`[supabase-pipeline] ${message}`, ...args);
+    const logArgs = args.map(arg => {
+      if (arg instanceof Error || (arg && typeof arg === 'object' && arg.name && arg.message)) {
+        return stringifyError(arg);
+      }
+      return arg;
+    });
+    console.log(`[supabase-pipeline] ${message}`, ...logArgs);
   }
 }
 

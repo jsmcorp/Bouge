@@ -232,6 +232,13 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     console.log('[realtime-v2] Network came online');
     const { triggerOutboxProcessing, activeGroup, connectionStatus } = get();
     
+    // Notify pipeline about network reconnection
+    import('@/lib/supabasePipeline').then(({ supabasePipeline }) => {
+      supabasePipeline.onNetworkReconnect();
+    }).catch(error => {
+      console.warn('[realtime-v2] Failed to notify pipeline of network reconnect:', error);
+    });
+    
     // Only trigger outbox processing, don't reset state as that causes redundant triggers
     console.log('[realtime-v2] Network online - triggering outbox processing only');
     if (typeof triggerOutboxProcessing === 'function') {

@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { App } from '@capacitor/app';
 import { Network } from '@capacitor/network';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { useAuthStore } from '@/store/authStore';
 import { useChatStore } from '@/store/chatstore_refactored';
@@ -22,14 +22,14 @@ async function upsertDeviceToken(token: string): Promise<void> {
 		if (!user) return;
 		const platform = Capacitor.getPlatform() === 'android' ? 'android' : (Capacitor.getPlatform() === 'ios' ? 'ios' : 'web');
 		const appVersion = (window as any).APP_VERSION || 'web';
-		await supabase.from('user_devices').upsert({
+		await supabasePipeline.upsertDeviceToken({
 			user_id: user.id,
 			platform: platform === 'web' ? 'android' : platform, // default to android for web dev
 			token,
 			app_version: appVersion,
 			active: true,
 			last_seen_at: new Date().toISOString(),
-		}, { onConflict: 'token' });
+		});
 		console.log(`[push] token:registered ${platform} ${truncateToken(token)}`);
 	} catch (e) {
 		console.warn('Push token upsert failed:', e);
@@ -99,11 +99,11 @@ export async function initPush(): Promise<void> {
 
 		// Associate token after auth events to ensure row exists in user_devices
 		try {
-			supabase.auth.onAuthStateChange((event, session) => {
+			(await supabasePipeline.onAuthStateChange((event, session) => {
 				if (currentToken && session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
 					upsertDeviceToken(currentToken);
 				}
-			});
+			})).data.subscription;
 		} catch {}
 	} catch (e) {
 		console.warn('Push init skipped (plugin missing or error):', e);
