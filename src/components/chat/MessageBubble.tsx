@@ -25,6 +25,7 @@ import { useIsMobile } from '@/hooks/useMediaQuery';
 import { PollComponent } from '@/components/chat/PollComponent';
 import { ReactionMenu } from '@/components/chat/ReactionMenu';
 import { MessageReactions } from '@/components/chat/MessageReactions';
+import { ReactionBar } from '@/components/chat/ui/ReactionBar';
 import { pseudonymService } from '@/lib/pseudonymService';
 import { cn } from '@/lib/utils';
 import { Reaction } from '@/store/chat/reactions';
@@ -94,6 +95,7 @@ export function MessageBubble({
   const hasReplies = message.reply_count && message.reply_count > 0;
   const hasMoreReplies = message.reply_count && message.reply_count > 3;
   const isOwnMessage = user?.id === message.user_id;
+  const isRightAligned = isOwnMessage && !isGhost; // Normal self messages on right; ghost always left
   
   // Get reactions for this message
   const reactions = messageReactions[message.id] || [];
@@ -226,9 +228,9 @@ export function MessageBubble({
     
     e.stopPropagation();
   };
-  const handleReply = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const handleReply = (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     setReplyingTo(message);
   };
 
@@ -416,7 +418,12 @@ export function MessageBubble({
         className="relative w-full"
       >
         {/* Message Container */}
-        <div className="flex items-start space-x-3 max-w-full">
+        <div className={cn(
+          "flex items-start max-w-full gap-3",
+          {
+            "flex-row-reverse": isRightAligned && !isThreadReply,
+          }
+        )}>
           {/* Avatar */}
           <div className="flex-shrink-0 pt-1">
             {isGhost ? (
@@ -455,39 +462,8 @@ export function MessageBubble({
           </div>
 
           {/* Message Content */}
-          <div className="flex-1 min-w-0">
-            {/* Header with name and badges outside bubble */}
-            <div className="flex items-center space-x-2 mb-2">
-              <span className={cn(
-                "font-bold text-foreground",
-                isThreadReply ? "text-xs" : "text-sm"
-              )}>
-                {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
-              </span>
-              
-              {/* Badges */}
-              {isConfession && !isThreadReply && (
-                <span className="badge-anony-ultra">
-                  Anony
-                </span>
-              )}
-              {message.category && !isThreadReply && (
-                <span className={cn(
-                  "text-xs",
-                  message.category === 'funny' ? 'badge-funny-ultra' : CATEGORY_COLORS[message.category as keyof typeof CATEGORY_COLORS] || 'bg-muted'
-                )}>
-                  {message.category}
-                </span>
-              )}
-              {isImage && !isThreadReply && (
-                <Badge variant="secondary" className="text-xs bg-blue-500/20 text-blue-500 border-blue-500/30">
-                  <ImageIcon className="w-3 h-3 mr-1" />
-                  Image
-                </Badge>
-              )}
-            </div>
-
-            {/* Message Bubble with ultra-faded styling */}
+          <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
+            {/* Message Bubble with header inside */}
             <div className={cn(
               "rounded-2xl px-4 py-3 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
@@ -499,9 +475,44 @@ export function MessageBubble({
                 "chat-bubble-confession-ultra": isConfession,
                 "chat-bubble-ultra-fade": isImage,
                 "chat-bubble-thread-reply": isThreadReply,
-              }
+              },
+              isRightAligned ? "bubble-right ml-auto" : "bubble-left"
             )}>
               <div className="chat-bubble-content">
+                {/* Header inside bubble */}
+                <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
+                  <span className={cn(
+                    "font-bold text-foreground",
+                    isThreadReply ? "text-xs" : "text-sm"
+                  )}>
+                    {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
+                  </span>
+                </div>
+                {/* Badges inside bubble */}
+                {!isThreadReply && (
+                  <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isOwnMessage && !isThreadReply })}>
+                    {isConfession && (
+                      <span className="badge-confession-ultra">Confession</span>
+                    )}
+                    {message.category && (
+                      <span className={cn(
+                        "text-xs",
+                        message.category === 'funny' ? 'badge-funny-ultra' : CATEGORY_COLORS[message.category as keyof typeof CATEGORY_COLORS] || 'bg-muted'
+                      )}>
+                        {message.category === 'funny' ? 'Funny' : message.category}
+                      </span>
+                    )}
+                    {isGhost && (
+                      <span className="badge-anony-ultra">Anony</span>
+                    )}
+                    {isImage && (
+                      <Badge variant="secondary" className="text-xs bg-blue-500/20 text-blue-500 border-blue-500/30">
+                        <ImageIcon className="w-3 h-3 mr-1" />
+                        Image
+                      </Badge>
+                    )}
+                  </div>
+                )}
                 {/* Message Content */}
                 {message.image_url ? (
                   <div className="space-y-2">
@@ -544,7 +555,7 @@ export function MessageBubble({
             </div>
 
             {/* Timestamp and delivery status */}
-            <div className="flex items-center space-x-2 mt-1">
+            <div className={cn("flex items-center space-x-2 mt-1", { "justify-end": isRightAligned && !isThreadReply })}>
               <span className="timestamp">
                 {formatDistanceToNow(new Date(message.created_at), { addSuffix: true })}
               </span>
@@ -572,69 +583,56 @@ export function MessageBubble({
 
             {/* Message Actions */}
             {!isThreadOriginal && !isThreadReply && (
-              <div className="flex items-center space-x-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-xs hover:bg-background/80"
+              <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                <ReactionBar
+                  onReact={() => setShowReactionMenu(true)}
+                  onReply={handleReply}
+                >
+                  {hasReplies && (
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-6 px-2 text-xs text-green-500 hover:text-green-400 hover:bg-green-500/10"
+                      onClick={handleViewThread}
                     >
-                      <Smile className="w-3 h-3 mr-1" />
-                      React
+                      <MessageCircle className="w-3 h-3 mr-1" />
+                      View Thread
                     </Button>
-                  </PopoverTrigger>
+                  )}
+                  {message.delivery_status === 'failed' && (
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-6 px-2 text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10"
+                      onClick={() => {
+                        // TODO: Implement retry functionality
+                        console.log('Retry sending message:', message.id);
+                      }}
+                    >
+                      <AlertCircle className="w-3 h-3 mr-1" />
+                      Retry
+                    </Button>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-background/80">
+                        <MoreHorizontal className="w-3 h-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem>Copy Message</DropdownMenuItem>
+                      <DropdownMenuItem className="text-destructive">
+                        Report
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </ReactionBar>
+                <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
+                  <PopoverTrigger />
                   <PopoverContent className="w-auto p-0 border-0 shadow-lg" align="start">
                     <ReactionMenu onSelectEmoji={handleReaction} />
                   </PopoverContent>
                 </Popover>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="h-6 px-2 text-xs hover:bg-background/80"
-                  onClick={handleReply}
-                >
-                  <Reply className="w-3 h-3 mr-1" />
-                  Reply
-                </Button>
-                {hasReplies && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="h-6 px-2 text-xs text-green-500 hover:text-green-400 hover:bg-green-500/10"
-                    onClick={handleViewThread}
-                  >
-                    <MessageCircle className="w-3 h-3 mr-1" />
-                    View Thread
-                  </Button>
-                )}
-                {message.delivery_status === 'failed' && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="h-6 px-2 text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10"
-                    onClick={() => {
-                      // TODO: Implement retry functionality
-                      console.log('Retry sending message:', message.id);
-                    }}
-                  >
-                    <AlertCircle className="w-3 h-3 mr-1" />
-                    Retry
-                  </Button>
-                )}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-background/80">
-                      <MoreHorizontal className="w-3 h-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem>Copy Message</DropdownMenuItem>
-                    <DropdownMenuItem className="text-destructive">
-                      Report
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
               </div>
             )}
 
