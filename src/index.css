@@ -181,9 +181,9 @@ button:focus-visible {
   z-index: 0;
   pointer-events: none;
   background: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.15)) 0%,
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.15)) var(--fade-hold),
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.60)) calc(var(--fade-hold) + 10%),
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.35)) 0%,
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.25)) calc(var(--fade-hold) - 4%),
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.50)) calc(var(--fade-hold) + 12%),
     transparent 100%);
 }
 
@@ -214,20 +214,22 @@ button:focus-visible {
 }
 
 /* Very subtle shine effect */
+/* Fading border: strong near the bubble origin, dissolves into background at the fade side */
 .chat-bubble-base::before {
   content: '';
   position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.02), transparent);
-  transition: left 0.8s ease;
-  z-index: 0;
-}
-
-.chat-bubble-base:hover::before {
-  left: 100%;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  /* draw the border via inset shadow so we can mask it */
+  box-shadow: inset 0 0 0 1px hsl(var(--bubble-accent) / 0.14);
+  /* keep border for first ~fade-hold, then fade it out */
+  -webkit-mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    #000 calc(var(--fade-hold) - 6%),
+    transparent calc(var(--fade-hold) + 8%));
+  mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    #000 calc(var(--fade-hold) - 6%),
+    transparent calc(var(--fade-hold) + 8%));
 }
 
 /* Animations */
@@ -754,7 +756,8 @@ button:focus-visible {
   background: rgba(255, 255, 255, 0.006);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
-  border: 1px solid hsl(var(--bubble-accent) / 0.012);
+  /* real border made transparent; we draw a controlled border with ::before */
+  border: 1px solid transparent;
   box-shadow:
     0 1px 3px hsl(var(--bubble-accent) / 0.01),
     0 1px 2px hsl(var(--bubble-accent) / 0.005),
