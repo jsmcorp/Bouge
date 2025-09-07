@@ -9,7 +9,7 @@
 
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #0a0a0a;
+  background-color: #cfc5ba;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -92,10 +92,12 @@ button:focus-visible {
     --chart-4: 35 91% 65%;
     --chart-5: 43 74% 66%;
     --radius: 0.75rem;
+    /* app background for dark */
+    --app-bg: hsl(var(--background));
   }
   
   .light {
-    --background: 0 0% 98%;
+    --background: 60 20% 95%;
     --foreground: 0 0% 8%;
     --card: 0 0% 100%;
     --card-foreground: 0 0% 8%;
@@ -119,15 +121,20 @@ button:focus-visible {
     --chart-3: 175 70% 41%;
     --chart-4: 35 91% 65%;
     --chart-5: 43 74% 66%;
+    /* warm subtle gradient similar to reference */
+    --app-bg: radial-gradient(140% 120% at 12% 10%, #fff5e9 0%, #ffffff 46%),
+              radial-gradient(120% 120% at 86% 88%, #e9fff7 0%, rgba(233,255,247,0) 55%),
+              linear-gradient(180deg, #ffffff 0%, #fffaf4 100%);
   }
 }
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
   body {
-    @apply bg-background text-foreground;
+    background: var(--app-bg);
+    color: hsl(var(--foreground));
   }
 }
 
@@ -157,8 +164,9 @@ button:focus-visible {
   overflow: hidden;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   /* default fade controls */
-  --fade-origin-x: 8%;
-  --fade-strength: 0.12;
+  --fade-origin-x: 25%;
+  --fade-strength: 0.67; /* increase = stronger/darker tint, decrease = lighter */
+  --fade-hold: 60%; /* keep solid tint until this percentage of radius */
 }
 
 /* Orientation helpers to shift the hotspot without fading text */
@@ -172,10 +180,11 @@ button:focus-visible {
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background: radial-gradient(140% 120% at var(--fade-origin-x) 12%,
-    hsl(var(--bubble-accent) / var(--fade-strength)) 0%,
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.55)) 28%,
-    transparent 76%);
+  background: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.15)) 0%,
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.15)) var(--fade-hold),
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.60)) calc(var(--fade-hold) + 10%),
+    transparent 100%);
 }
 
 /* Ghost message bubbles - Subtle blue fade like in image */
@@ -247,9 +256,7 @@ button:focus-visible {
   }
 }
 
-.message-enter {
-  animation: message-slide-in 0.3s ease-out;
-}
+.message-enter { animation: message-slide-in 0.25s ease-out; }
 
 /* Gradient text */
 .gradient-text {
@@ -425,7 +432,8 @@ button:focus-visible {
 
 /* Focus states */
 .focus-ring {
-  @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background;
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--primary)), 0 0 0 4px hsl(var(--background));
 }
 
 /* Ghost mode indicator */
@@ -467,10 +475,21 @@ button:focus-visible {
 
 /* Modern button styles */
 .btn-modern {
-  @apply relative overflow-hidden rounded-xl px-6 py-3 font-medium transition-all duration-300;
-  @apply bg-gradient-to-r from-primary to-primary/80 text-primary-foreground;
-  @apply hover:shadow-lg hover:shadow-primary/25 hover:scale-105;
-  @apply active:scale-95;
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1.5rem;
+  font-weight: 500;
+  transition: all 300ms;
+  background: linear-gradient(90deg, hsl(var(--primary)), hsl(var(--primary) / 0.8));
+  color: hsl(var(--primary-foreground));
+}
+.btn-modern:hover {
+  box-shadow: 0 10px 25px hsl(var(--primary) / 0.25);
+  transform: scale(1.05);
+}
+.btn-modern:active {
+  transform: scale(0.95);
 }
 
 .btn-modern::before {
@@ -490,7 +509,11 @@ button:focus-visible {
 
 /* Card hover effects */
 .card-hover {
-  @apply transition-all duration-300 hover:shadow-xl hover:shadow-primary/10 hover:-translate-y-1;
+  transition: all 300ms;
+}
+.card-hover:hover {
+  box-shadow: 0 20px 35px hsl(var(--primary) / 0.1);
+  transform: translateY(-4px);
 }
 
 /* Floating elements */
@@ -739,15 +762,14 @@ button:focus-visible {
 }
 
 /* Accent assignments */
-.chat-bubble-ghost-ultra { --bubble-accent: 217 91% 60%; }
-.chat-bubble-emma-ultra { --bubble-accent: 158 64% 52%; }
-.chat-bubble-anonymous-ultra { --bubble-accent: 27 96% 61%; }
-.chat-bubble-confession-ultra { --bubble-accent: 258 90% 66%; }
+.chat-bubble-ghost-ultra { --bubble-accent: 213 94% 68%; }
+.chat-bubble-emma-ultra { --bubble-accent: 156 72% 40%; }
+.chat-bubble-anonymous-ultra { --bubble-accent: 32 95% 62%; }
+.chat-bubble-confession-ultra { --bubble-accent: 220 86% 60%; }
 .chat-bubble-ultra-fade { --bubble-accent: 158 64% 52%; }
 
 /* Badge styles matching the image */
 /* Unified chip badge base + accent variants */
-.badge-anony-ultra,
 .badge-funny-ultra,
 .badge-confession-ultra {
   display: inline-flex;
@@ -759,11 +781,6 @@ button:focus-visible {
   border-width: 1px;
 }
 
-.badge-anony-ultra {
-  background: linear-gradient(135deg, rgba(251, 146, 60, 0.05) 0%, rgba(251, 146, 60, 0.03) 50%, rgba(251, 146, 60, 0.02) 100%);
-  border-color: rgba(251, 146, 60, 0.08);
-  color: rgba(251, 146, 60, 0.85);
-}
 .badge-funny-ultra {
   background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, rgba(251, 191, 36, 0.03) 50%, rgba(251, 191, 36, 0.02) 100%);
   border-color: rgba(251, 191, 36, 0.08);
@@ -776,7 +793,7 @@ button:focus-visible {
 }
 
 /* Light mode adjustments for ultra faded bubbles */
-.light .chat-bubble-base { --fade-strength: 0.1; }
+.light .chat-bubble-base { --fade-strength: 0.10; }
 .light .chat-bubble-ghost-ultra,
 .light .chat-bubble-emma-ultra,
 .light .chat-bubble-anonymous-ultra,
@@ -878,7 +895,7 @@ button:focus-visible {
 /* Time stamps styling */
 .timestamp {
   color: rgba(255, 255, 255, 0.4);
-  font-size: 0.75rem;
+  font-size: 0.65rem;
   font-weight: 400;
 }
 

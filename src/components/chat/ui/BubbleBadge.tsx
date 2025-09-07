@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 
-type BubbleBadgeType = 'anony' | 'funny' | 'confession' | 'neutral';
+type BubbleBadgeType = 'funny' | 'confession' | 'neutral';
 
 interface BubbleBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   type?: BubbleBadgeType;
@@ -11,9 +11,7 @@ interface BubbleBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 export function BubbleBadge({ type = 'neutral', className, children, ...props }: BubbleBadgeProps) {
   const base = 'inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium';
   const typeClass =
-    type === 'anony'
-      ? 'badge-anony-ultra'
-      : type === 'funny'
+    type === 'funny'
       ? 'badge-funny-ultra'
       : type === 'confession'
       ? 'badge-confession-ultra'

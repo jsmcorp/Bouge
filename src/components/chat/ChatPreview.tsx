@@ -50,7 +50,6 @@ export function ChatPreview() {
           <div className="text-sm font-bold mb-2">Anonymus</div>
           <ChatBubble variant="anonymous">
             <div className="flex items-center gap-2 mb-1">
-              <BubbleBadge type="anony">Anony</BubbleBadge>
               <BubbleBadge type="funny">Funny</BubbleBadge>
             </div>
             <div className="text-sm">I once accidentally called my teacher ‘mom’ in class!</div>

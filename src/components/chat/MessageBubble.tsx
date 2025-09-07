@@ -1,11 +1,10 @@
 import { useState } from 'react';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { formatDistanceToNow } from 'date-fns';
-import { Ghost, Smile, MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
+import { format } from 'date-fns';
+import { Smile, MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
 import { motion, useMotionValue, useTransform, useSpring, PanInfo } from 'framer-motion';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -383,7 +382,7 @@ export function MessageBubble({
   // Regular message rendering with ultra-faded design
   return (
     <div className={cn(
-      "group relative mb-4",
+      "group relative mb-1",
       {
         "bg-card/50 border-l-4 border-l-green-500 pl-4 rounded-lg p-3": isThreadOriginal,
         "ml-8 pl-4 thread-reply-line": isThreadReply,
@@ -424,48 +423,13 @@ export function MessageBubble({
             "flex-row-reverse": isRightAligned && !isThreadReply,
           }
         )}>
-          {/* Avatar */}
-          <div className="flex-shrink-0 pt-1">
-            {isGhost ? (
-              <div className={cn(
-                "flex items-center justify-center rounded-full avatar-ghost",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <Ghost className={cn("text-white", isThreadReply ? "w-3 h-3" : "w-4 h-4")} />
-              </div>
-            ) : isConfession ? (
-              <div className={cn(
-                "flex items-center justify-center rounded-full avatar-confession",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <span className={cn(
-                  "text-white font-bold",
-                  isThreadReply ? "text-xs" : "text-sm"
-                )}>
-                  {message.author?.display_name?.charAt(0) || 'A'}
-                </span>
-              </div>
-            ) : (
-              <Avatar className={cn(
-                "avatar-emma",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <AvatarImage src={message.author?.avatar_url || undefined} />
-                <AvatarFallback className={cn(
-                  "bg-primary/10 text-primary font-semibold",
-                  isThreadReply ? "text-xs" : "text-sm"
-                )}>
-                  {message.author?.display_name?.charAt(0) || 'U'}
-                </AvatarFallback>
-              </Avatar>
-            )}
-          </div>
+          {/* Avatar removed for cleaner look as requested */}
 
           {/* Message Content */}
           <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
             {/* Message Bubble with header inside */}
             <div className={cn(
-              "rounded-2xl px-4 py-3 transition-all duration-200 max-w-[85%] w-fit relative",
+              "rounded-2xl px-4 pt-3 pb-5 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
               {
                 // Apply ultra-faded classes based on message type
@@ -478,7 +442,7 @@ export function MessageBubble({
               },
               isRightAligned ? "bubble-right ml-auto" : "bubble-left"
             )}>
-              <div className="chat-bubble-content">
+              <div className="chat-bubble-content pr-14">
                 {/* Header inside bubble */}
                 <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
                   <span className={cn(
@@ -502,9 +466,7 @@ export function MessageBubble({
                         {message.category === 'funny' ? 'Funny' : message.category}
                       </span>
                     )}
-                    {isGhost && (
-                      <span className="badge-anony-ultra">Anony</span>
-                    )}
+                    {/* Anony tag removed as requested */}
                     {isImage && (
                       <Badge variant="secondary" className="text-xs bg-blue-500/20 text-blue-500 border-blue-500/30">
                         <ImageIcon className="w-3 h-3 mr-1" />
@@ -552,24 +514,20 @@ export function MessageBubble({
                   </div>
                 )}
               </div>
+              {/* Timestamp and delivery status inside bubble */}
+              <div className={cn("absolute bottom-2 right-3 flex items-center space-x-2", { "right-3": !isRightAligned })}>
+                <span className="timestamp">
+                  {format(new Date(message.created_at), 'h:mm a')}
+                </span>
+                {message.delivery_status && (
+                  <div className="flex items-center space-x-1">
+                    <DeliveryStatusIcon status={message.delivery_status} />
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Timestamp and delivery status */}
-            <div className={cn("flex items-center space-x-2 mt-1", { "justify-end": isRightAligned && !isThreadReply })}>
-              <span className="timestamp">
-                {formatDistanceToNow(new Date(message.created_at), { addSuffix: true })}
-              </span>
-              
-              {/* Delivery Status */}
-              {message.delivery_status && (
-                <div className="flex items-center space-x-1">
-                  <DeliveryStatusIcon status={message.delivery_status} />
-                  {message.delivery_status === 'failed' && (
-                    <span className="text-xs text-red-500">Failed</span>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Timestamp moved inside bubble; removing external gap */}
 
             {/* Reactions */}
             {reactions.length > 0 && !isThreadReply && (
@@ -583,7 +541,7 @@ export function MessageBubble({
 
             {/* Message Actions */}
             {!isThreadOriginal && !isThreadReply && (
-              <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="hidden group-hover:block">
                 <ReactionBar
                   onReact={() => setShowReactionMenu(true)}
                   onReply={handleReply}
