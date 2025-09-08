@@ -429,7 +429,7 @@ export function MessageBubble({
           <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
             {/* Message Bubble with header inside */}
             <div className={cn(
-              "rounded-2xl px-4 pt-3 pb-5 transition-all duration-200 max-w-[85%] w-fit relative",
+              "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
               {
                 // Apply ultra-faded classes based on message type
@@ -442,7 +442,7 @@ export function MessageBubble({
               },
               isRightAligned ? "bubble-right ml-auto" : "bubble-left"
             )}>
-              <div className="chat-bubble-content pr-14">
+              <div className="chat-bubble-content">
                 {/* Header inside bubble */}
                 <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
                   <span className={cn(
@@ -514,15 +514,18 @@ export function MessageBubble({
                   </div>
                 )}
               </div>
-              {/* Timestamp and delivery status inside bubble */}
-              <div className={cn("absolute bottom-2 right-3 flex items-center space-x-2", { "right-3": !isRightAligned })}>
+              {/* Timestamp and delivery status below content */}
+              <div
+                className={cn(
+                  "mt-1 flex items-center gap-1",
+                  isRightAligned ? "justify-end text-right" : "justify-start text-left"
+                )}
+              >
                 <span className="timestamp">
                   {format(new Date(message.created_at), 'h:mm a')}
                 </span>
                 {message.delivery_status && (
-                  <div className="flex items-center space-x-1">
-                    <DeliveryStatusIcon status={message.delivery_status} />
-                  </div>
+                  <DeliveryStatusIcon status={message.delivery_status} />
                 )}
               </div>
             </div>
