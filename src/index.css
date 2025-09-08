@@ -9,7 +9,7 @@
 
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #cfc5ba;
+  background-color: #9d7549;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -121,10 +121,8 @@ button:focus-visible {
     --chart-3: 175 70% 41%;
     --chart-4: 35 91% 65%;
     --chart-5: 43 74% 66%;
-    /* warm subtle gradient similar to reference */
-    --app-bg: radial-gradient(140% 120% at 12% 10%, #fff5e9 0%, #ffffff 46%),
-              radial-gradient(120% 120% at 86% 88%, #e9fff7 0%, rgba(233,255,247,0) 55%),
-              linear-gradient(180deg, #ffffff 0%, #fffaf4 100%);
+    /* flat, no-glow background for reduced eye strain */
+    --app-bg: hsl(var(--background));
   }
 }
 

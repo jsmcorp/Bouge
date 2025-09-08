@@ -21,6 +21,7 @@ interface DbMessageRow {
   parent_id: string | null;
   image_url: string | null;
   created_at: string;
+  dedupe_key?: string | null;
 }
 
 interface DbPollRow {
@@ -224,6 +225,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       reply_count: 0,
       replies: [],
       delivery_status: 'delivered',
+      dedupe_key: row.dedupe_key ?? null,
       // Do NOT attach poll here to avoid double-fetch; poll handler will attach
     } as Message;
   }
@@ -233,54 +235,102 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     if (message.parent_id) {
       const parentMessage = state.messages.find((m: Message) => m.id === message.parent_id);
-      const replyExists = parentMessage?.replies?.some((r: Message) => r.id === message.id);
-      if (!replyExists) {
-        const updatedMessages = state.messages.map((m: Message) => {
-          if (m.id === message.parent_id) {
+
+      // If parent present, attempt dedupe/replace by dedupe_key first
+      if (parentMessage) {
+        const replies = parentMessage.replies || [];
+        const idxByDedupe = message.dedupe_key
+          ? replies.findIndex((r: Message) => r.dedupe_key && r.dedupe_key === message.dedupe_key)
+          : -1;
+        const existsById = replies.some((r: Message) => r.id === message.id);
+
+        let updatedMessages: Message[] = state.messages;
+
+        if (idxByDedupe !== -1) {
+          // Replace optimistic reply with server reply; do NOT increment reply_count
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = [...(m.replies || [])];
+            newReplies[idxByDedupe] = message;
+            return { ...m, replies: newReplies } as Message;
+          });
+        } else if (!existsById) {
+          // Append new reply and increment reply_count; keep only first 3 in preview
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = [...(m.replies || []), message];
             return {
               ...m,
               reply_count: (m.reply_count || 0) + 1,
-              replies: [...(m.replies || []), message].slice(0, 3),
-            };
-          }
-          return m;
-        });
+              replies: newReplies.slice(0, 3),
+            } as Message;
+          });
+        } else {
+          // Already present by id – ensure status is delivered
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = (m.replies || []).map((r: Message) => (
+              r.id === message.id ? { ...r, delivery_status: 'delivered' as const } : r
+            ));
+            return { ...m, replies: newReplies } as Message;
+          });
+        }
+
         set({ messages: updatedMessages });
         try {
           messageCache.setCachedMessages(message.group_id, [...updatedMessages]);
         } catch (err) {
           console.error('❌ Message cache update failed:', err);
         }
-      }
 
-      if (state.activeThread?.id === message.parent_id) {
-        const threadReplyExists = state.threadReplies.some((r: Message) => r.id === message.id);
-        if (!threadReplyExists) {
-          const updatedReplies = [...state.threadReplies, message];
-          set({ threadReplies: updatedReplies });
+        // Update active thread replies if open
+        if (state.activeThread?.id === message.parent_id) {
+          const idxThreadByDedupe = message.dedupe_key
+            ? state.threadReplies.findIndex((r: Message) => r.dedupe_key && r.dedupe_key === message.dedupe_key)
+            : -1;
+          const existsThreadById = state.threadReplies.some((r: Message) => r.id === message.id);
+          if (idxThreadByDedupe !== -1) {
+            const updatedReplies = [...state.threadReplies];
+            updatedReplies[idxThreadByDedupe] = message;
+            set({ threadReplies: updatedReplies });
+          } else if (!existsThreadById) {
+            set({ threadReplies: [...state.threadReplies, message] });
+          } else {
+            const updatedReplies = state.threadReplies.map((r: Message) => (
+              r.id === message.id ? { ...r, delivery_status: 'delivered' as const } : r
+            ));
+            set({ threadReplies: updatedReplies });
+          }
         }
       }
     } else {
-      const exists = state.messages.some((m: Message) => m.id === message.id);
-      if (!exists) {
-        const messagesAfter = [...state.messages, message];
-        set({ messages: messagesAfter });
-        try {
-          messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
-          console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
-        } catch (err) {
-          console.error('❌ Message cache update failed:', err);
-        }
-      } else {
-        const messagesAfter = state.messages.map((m: Message) => (
+      // Root message: dedupe by id first, then by dedupe_key
+      const existsById = state.messages.some((m: Message) => m.id === message.id);
+      let messagesAfter: Message[] = state.messages;
+
+      if (existsById) {
+        messagesAfter = state.messages.map((m: Message) => (
           m.id === message.id ? { ...m, delivery_status: 'delivered' } : m
         ));
-        set({ messages: messagesAfter });
-        try {
-          messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
-        } catch (err) {
-          console.error('❌ Message cache update failed:', err);
+      } else {
+        const idxByDedupe = message.dedupe_key
+          ? state.messages.findIndex((m: Message) => m.dedupe_key && m.dedupe_key === message.dedupe_key)
+          : -1;
+        if (idxByDedupe !== -1) {
+          messagesAfter = state.messages.map((m: Message, idx: number) => (
+            idx === idxByDedupe ? { ...message } : m
+          ));
+        } else {
+          messagesAfter = [...state.messages, message];
         }
+      }
+
+      set({ messages: messagesAfter });
+      try {
+        messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
+        console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
+      } catch (err) {
+        console.error('❌ Message cache update failed:', err);
       }
     }
   }
