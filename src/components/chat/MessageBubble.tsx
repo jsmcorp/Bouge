@@ -1,9 +1,11 @@
+import * as React from 'react';
 import { useState } from 'react';
 import { useEffect } from 'react';
+import { useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
-import { Smile, MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
-import { motion, useMotionValue, useTransform, useSpring, PanInfo } from 'framer-motion';
+import { MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
+import { motion, useMotionValue, useTransform, useSpring, PanInfo, AnimatePresence } from 'framer-motion';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -13,16 +15,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
 import { Message, useChatStore } from '@/store/chatStore';
 import { useAuthStore } from '@/store/authStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { PollComponent } from '@/components/chat/PollComponent';
-import { ReactionMenu } from '@/components/chat/ReactionMenu';
 import { MessageReactions } from '@/components/chat/MessageReactions';
 import { ReactionBar } from '@/components/chat/ui/ReactionBar';
 import { pseudonymService } from '@/lib/pseudonymService';
@@ -69,7 +65,12 @@ export function MessageBubble({
   isThreadReply = false,
   showInlineReplies = true 
 }: MessageBubbleProps) {
-  const [showReactionMenu, setShowReactionMenu] = useState(false);
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
+  const [hoveredReactionIndex, setHoveredReactionIndex] = useState<number | null>(null);
+  const [activeEmoji, setActiveEmoji] = useState<string | null>(null);
+  const longPressTimeoutRef = useRef<number | null>(null);
+  const reactionPickerRef = useRef<HTMLDivElement | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
   const [isSwipeActive, setIsSwipeActive] = useState(false);
   const [isSwipeCancelled, setIsSwipeCancelled] = useState(false);
   const [ghostPseudonym, setGhostPseudonym] = useState<string>('Ghost');
@@ -104,6 +105,8 @@ export function MessageBubble({
     ...r,
     created_at: new Date().toISOString() // Add required created_at field
   }));
+
+  const REACTION_EMOJIS = ['👍', '❤️', '😂', '😢', '😮', '😡', '🔥', '👏', '🎉', '💯'];
 
   // Fetch pseudonym for ghost messages
   useEffect(() => {
@@ -227,6 +230,80 @@ export function MessageBubble({
     
     e.stopPropagation();
   };
+
+  // Long-press reaction picker handlers
+  const cancelLongPressTimer = () => {
+    if (longPressTimeoutRef.current) {
+      window.clearTimeout(longPressTimeoutRef.current);
+      longPressTimeoutRef.current = null;
+    }
+  };
+
+  const startLongPress = (e: React.PointerEvent) => {
+    if (isThreadOriginal || isThreadReply) return;
+    e.stopPropagation();
+    cancelLongPressTimer();
+    longPressTimeoutRef.current = window.setTimeout(async () => {
+      setShowReactionPicker(true);
+      setHoveredReactionIndex(null);
+      setIsSwipeCancelled(true);
+      setIsSwipeActive(false);
+      try {
+        await Haptics.impact({ style: ImpactStyle.Medium });
+      } catch (_) {}
+    }, 350);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (showReactionPicker && hoveredReactionIndex !== null) {
+      const emoji = REACTION_EMOJIS[hoveredReactionIndex];
+      addOrRemoveReaction(message.id, emoji);
+      setActiveEmoji(emoji);
+      setTimeout(() => setActiveEmoji(null), 800);
+      setShowReactionPicker(false);
+      setHoveredReactionIndex(null);
+    }
+    cancelLongPressTimer();
+  };
+
+  const handlePointerCancel = (e?: React.PointerEvent) => {
+    e?.stopPropagation();
+    setShowReactionPicker(false);
+    setHoveredReactionIndex(null);
+    cancelLongPressTimer();
+  };
+
+  useEffect(() => {
+    if (!showReactionPicker) return;
+    const onMove = (ev: PointerEvent) => {
+      if (!reactionPickerRef.current) return;
+      const rect = reactionPickerRef.current.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const widthPer = rect.width / REACTION_EMOJIS.length;
+      const idx = Math.floor(x / widthPer);
+      if (idx < 0 || idx >= REACTION_EMOJIS.length || Number.isNaN(idx)) {
+        setHoveredReactionIndex(null);
+      } else {
+        setHoveredReactionIndex(idx);
+      }
+    };
+    const onDownOutside = (ev: PointerEvent) => {
+      const target = ev.target as Node | null;
+      const insidePicker = reactionPickerRef.current?.contains(target as Node) ?? false;
+      const insideBubble = bubbleRef.current?.contains(target as Node) ?? false;
+      if (!insidePicker && !insideBubble) {
+        setShowReactionPicker(false);
+        setHoveredReactionIndex(null);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerdown', onDownOutside, true);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDownOutside, true);
+    };
+  }, [showReactionPicker]);
   const handleReply = (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
@@ -257,7 +334,8 @@ export function MessageBubble({
   };
   const handleReaction = (emoji: string) => {
     addOrRemoveReaction(message.id, emoji);
-    setShowReactionMenu(false);
+    setActiveEmoji(emoji);
+    setTimeout(() => setActiveEmoji(null), 800);
   };
   
   const handleToggleReaction = (emoji: string) => {
@@ -281,24 +359,9 @@ export function MessageBubble({
           {/* Poll Component */}
           <PollComponent poll={message.poll} />
 
-          {/* Message Actions for Polls */}
+          {/* Message Actions for Polls (React removed) */}
           {!isThreadOriginal && !isThreadReply && (
             <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                  >
-                    <Smile className="w-3 h-3 mr-1" />
-                    React
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0 border-0 shadow-lg" align="start">
-                  <ReactionMenu onSelectEmoji={handleReaction} />
-                </PopoverContent>
-              </Popover>
               <Button 
                 variant="ghost" 
                 size="sm" 
@@ -428,7 +491,14 @@ export function MessageBubble({
           {/* Message Content */}
           <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
             {/* Message Bubble with header inside */}
-            <div className={cn(
+            <div
+              ref={bubbleRef}
+              onPointerDown={startLongPress}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
+              onPointerLeave={handlePointerCancel}
+              onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
+              className={cn(
               "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
               {
@@ -441,7 +511,55 @@ export function MessageBubble({
                 "chat-bubble-thread-reply": isThreadReply,
               },
               isRightAligned ? "bubble-right ml-auto" : "bubble-left"
-            )}>
+            )}
+            >
+              {/* Long-press Reaction Picker */}
+              <AnimatePresence>
+                {showReactionPicker && (
+                  <motion.div
+                    ref={reactionPickerRef}
+                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                    transition={{ duration: 0.15 }}
+                    className={cn(
+                      "absolute -top-12 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1",
+                      "rounded-full bg-background/95 border border-border/50 shadow-lg backdrop-blur-sm"
+                    )}
+                  >
+                    {REACTION_EMOJIS.map((emoji, index) => (
+                      <motion.button
+                        key={emoji}
+                        type="button"
+                        onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleReaction(emoji); setShowReactionPicker(false); setHoveredReactionIndex(null); }}
+                        className={cn("h-8 w-8 rounded-full flex items-center justify-center", hoveredReactionIndex === index ? "bg-muted" : "bg-transparent")}
+                        animate={hoveredReactionIndex === index ? { y: -4, scale: 1.15 } : { y: 0, scale: 1 }}
+                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                      >
+                        <span className="text-lg">{emoji}</span>
+                      </motion.button>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Emoji pop animation */}
+              <AnimatePresence>
+                {activeEmoji && (
+                  <motion.div
+                    key={activeEmoji}
+                    initial={{ opacity: 0, scale: 0.2, y: 0 }}
+                    animate={{ opacity: 1, scale: 1.3, y: -12 }}
+                    exit={{ opacity: 0, scale: 0.8, y: -20 }}
+                    transition={{ type: "spring", stiffness: 400, damping: 20, duration: 0.6 }}
+                    className="absolute -top-8 left-1/2 -translate-x-1/2 z-20"
+                  >
+                    <div className="h-8 w-8 rounded-full bg-background/80 border border-border/50 shadow flex items-center justify-center">
+                      <span className="text-xl">{activeEmoji}</span>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <div className="chat-bubble-content">
                 {/* Header inside bubble */}
                 <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
@@ -542,13 +660,10 @@ export function MessageBubble({
               </div>
             )}
 
-            {/* Message Actions */}
+            {/* Message Actions (React removed) */}
             {!isThreadOriginal && !isThreadReply && (
               <div className="hidden group-hover:block">
-                <ReactionBar
-                  onReact={() => setShowReactionMenu(true)}
-                  onReply={handleReply}
-                >
+                <ReactionBar onReply={handleReply}>
                   {hasReplies && (
                     <Button 
                       variant="ghost" 
@@ -588,12 +703,6 @@ export function MessageBubble({
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </ReactionBar>
-                <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
-                  <PopoverTrigger />
-                  <PopoverContent className="w-auto p-0 border-0 shadow-lg" align="start">
-                    <ReactionMenu onSelectEmoji={handleReaction} />
-                  </PopoverContent>
-                </Popover>
               </div>
             )}
 
