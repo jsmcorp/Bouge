@@ -111,7 +111,23 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>): Promis
 	const url = `https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`;
 	const invalid: string[] = [];
 	for (const token of tokens) {
-		const body = { message: { token, data } };
+		const body = {
+			message: {
+				token,
+				data,
+				notification: {
+					title: 'New message',
+					body: 'You have a new message',
+				},
+				android: {
+					priority: 'HIGH',
+				},
+				apns: {
+					headers: { 'apns-priority': '10' },
+					payload: { aps: { sound: 'default' } },
+				},
+			}
+		};
 		const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` }, body: JSON.stringify(body) });
 		if (!res.ok) {
 			const txt = await res.text();
@@ -129,7 +145,17 @@ async function sendFcm(tokens: string[], data: Record<string, string>): Promise<
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
-	const payload = { registration_ids: tokens, priority: 'high', data };
+	const payload = {
+		registration_ids: tokens,
+		priority: 'high',
+		data,
+		notification: {
+			title: 'New message',
+			body: 'You have a new message',
+		},
+		android: { priority: 'high' },
+		apns: { headers: { 'apns-priority': '10' }, payload: { aps: { sound: 'default' } } },
+	};
 	const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `key=${FCM_SERVER_KEY}` }, body: JSON.stringify(payload) });
 	if (!res.ok) {
 		console.error('FCM error', res.status, await res.text());

@@ -78,6 +78,20 @@ export async function initPush(): Promise<void> {
 			} catch {}
 		});
 
+		// Notification tap (explicit listener provided by plugin)
+		try {
+			FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
+				try {
+					const data = event?.notification?.data || {};
+					const groupId = data?.group_id;
+					if (groupId) {
+						console.log('[push] wake reason=notification_tap');
+						window.dispatchEvent(new CustomEvent('push:wakeup', { detail: { type: 'tap', group_id: groupId } }));
+					}
+				} catch {}
+			});
+		} catch {}
+
 		// App launch from notification tap
 		App.addListener('appUrlOpen', (data) => {
 			try {

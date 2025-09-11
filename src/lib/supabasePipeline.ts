@@ -996,6 +996,24 @@ class SupabasePipeline {
     try {
       await this.sendMessageInternal(message);
       this.log(`✅ Message ${message.id} sent successfully`);
+      // Fire-and-forget: fan out push notification (best-effort)
+      try {
+        const client = await this.getClient();
+        const createdAt = new Date().toISOString();
+        await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+          },
+          body: JSON.stringify({
+            message_id: message.id,
+            group_id: message.group_id,
+            sender_id: message.user_id,
+            created_at: createdAt,
+          }),
+        }).catch(() => {});
+      } catch {}
     } catch (error) {
       if ((error as any)?.code === 'QUEUED_OUTBOX' || (error as any)?.name === 'MessageQueuedError') {
         this.log(`📦 Message ${message.id} queued to outbox`);
@@ -1229,6 +1247,24 @@ class SupabasePipeline {
           if (outboxItem.group_id) {
             groupsWithSent.add(outboxItem.group_id);
           }
+
+          // Fire-and-forget: fan out push notification for outbox item
+          try {
+            const client = await this.getClient();
+            await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+              },
+              body: JSON.stringify({
+                message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
+                group_id: outboxItem.group_id,
+                sender_id: outboxItem.user_id,
+                created_at: new Date().toISOString(),
+              }),
+            }).catch(() => {});
+          } catch {}
 
         } catch (error) {
           this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
