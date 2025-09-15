@@ -1618,7 +1618,7 @@ class SupabasePipeline {
   }
 
   /**
-   * Simplified app resume handler - just refresh session
+   * Simplified app resume handler - refresh session and ensure Realtime has a valid token
    */
   public async onAppResume(): Promise<void> {
     this.log('📱 App resume detected - refreshing session');
@@ -1626,6 +1626,22 @@ class SupabasePipeline {
     try {
       // Simple session refresh
       await this.refreshSession();
+
+      // Ensure Realtime has the latest access token (important on Android WebView)
+      try {
+        const client = await this.getClient();
+        const session = await this.getWorkingSession();
+        const token = session?.access_token;
+        if (token && (client as any)?.realtime?.setAuth) {
+          (client as any).realtime.setAuth(token);
+          this.log('✅ App resume: token applied to realtime');
+        } else {
+          this.log('⚠️ App resume: no token or realtime client to apply');
+        }
+      } catch (e) {
+        this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
+      }
+
       this.log('✅ App resume session refresh completed');
     } catch (error) {
       this.log('❌ App resume session refresh failed:', stringifyError(error));

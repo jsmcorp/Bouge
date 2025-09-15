@@ -93,6 +93,15 @@ class ReconnectionManager {
     // Step 8: Begin reconnect only after cleanup is complete
     await this.reconnectRealtime();
 
+    // Guard: if no active group, skip waiting for SUBSCRIBED entirely
+    if (!(await this.shouldWaitForSubscription())) {
+      this.log('🟡 No active group/channel – skipping SUBSCRIBED wait');
+      // Start outbox processing even if no channel (it uses HTTP path)
+      await this.startOutboxProcessing();
+      this.log(`✅ Reconnection sequence completed (no active group) - reason: ${reason}`);
+      return;
+    }
+
     // Step 9: Wait for subscription confirmation (SUBSCRIBED state)
     await this.waitForSubscriptionConfirmation();
 
@@ -302,6 +311,21 @@ class ReconnectionManager {
     } catch (error) {
       this.log(`❌ Subscription confirmation failed: ${error}`);
       throw error;
+    }
+  }
+
+  /**
+   * Determine if we should wait for SUBSCRIBED (i.e., a channel was requested)
+   */
+  private async shouldWaitForSubscription(): Promise<boolean> {
+    try {
+      const mod = await import('@/store/chatstore_refactored');
+      const state = (mod as any).useChatStore?.getState?.();
+      const hasActiveGroup = !!state?.activeGroup?.id;
+      // Only wait when there is an active group; otherwise there's no channel to subscribe to
+      return hasActiveGroup;
+    } catch {
+      return false;
     }
   }
 

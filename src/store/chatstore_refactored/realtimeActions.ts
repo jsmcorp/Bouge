@@ -203,8 +203,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       log(`Reconnect attempt ${retryCount} starting...`);
 
       // Validate network using cached status
-      const { isOnline } = get();
-      if (!isOnline) {
+      const { online } = get();
+      if (!online) {
         log('Device offline during reconnect attempt, rescheduling');
         scheduleReconnect(groupId, 5000);
         return;
@@ -1006,8 +1006,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       log('Force reconnect requested - delegating to reconnection manager');
 
       // Validate network connectivity using cached status
-      const { isOnline } = get();
-      if (!isOnline) {
+      const { online } = get();
+      if (!online) {
         log('Force reconnect: Device is offline, setting disconnected status');
         set({ connectionStatus: 'disconnected' });
         return;

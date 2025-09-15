@@ -66,8 +66,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             console.log('� B ackground syncing groups with Supabase...');
           } else {
             // No local groups found, check cached network status
-            const { isOnline } = get();
-            if (!isOnline) {
+            const { online } = get();
+            if (!online) {
               set({ groups: [], isLoading: false });
               console.log('📵 No local groups found and offline');
               return;
@@ -76,8 +76,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         } catch (error) {
           console.error('❌ Error loading groups from local storage:', error);
           // If there's an error loading from local storage and we're offline, show empty state
-          const { isOnline } = get();
-          if (!isOnline) {
+          const { online } = get();
+          if (!online) {
             set({ groups: [], isLoading: false });
             return;
           }
@@ -90,10 +90,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       }
 
       // Check cached network status
-      const { isOnline } = get();
+      const { online } = get();
 
       // If offline and we couldn't load from local storage, show empty state
-      if (!isOnline) {
+      if (!online) {
         console.log('📵 Offline and no local group data available');
         if (!localDataLoaded) {
           set({ groups: [], isLoading: false });
