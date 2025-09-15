@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { Capacitor } from '@capacitor/core';
 
 export interface User {
@@ -69,8 +69,8 @@ export const useAuthStore = create<AuthState>()(
         try {
           set({ isLoading: true });
           
-          // Sign out from Supabase
-          const { error } = await supabase.auth.signOut();
+          // Sign out from Supabase via pipeline
+          const { error } = await supabasePipeline.signOut();
           if (error) {
             console.error('❌ Logout error:', error);
           }
@@ -78,11 +78,11 @@ export const useAuthStore = create<AuthState>()(
             // Best-effort deactivate device tokens on logout
             const isNative = Capacitor.isNativePlatform();
             if (isNative) {
-              const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+              const { FirebaseMessaging } = await import(/* @vite-ignore */ '@capacitor-firebase/messaging');
               const tokenRes = await FirebaseMessaging.getToken();
               const token = tokenRes?.token;
               if (token) {
-                await supabase.from('user_devices').update({ active: false }).eq('token', token);
+                await supabasePipeline.deactivateDeviceToken(token);
               }
             }
           } catch {}
@@ -112,12 +112,7 @@ export const useAuthStore = create<AuthState>()(
         console.log('📝 Updating user profile:', updates);
         
         try {
-          const { data, error } = await supabase
-            .from('users')
-            .update(updates)
-            .eq('id', user.id)
-            .select()
-            .single();
+          const { data, error } = await supabasePipeline.updateUser(user.id, updates);
 
           if (error) {
             console.error('❌ User update error:', error);
@@ -136,8 +131,9 @@ export const useAuthStore = create<AuthState>()(
         console.log('🔄 Syncing user profile for:', sessionUser.id);
         
         try {
-          // First check if user exists in our database
-          const { data: userData, error: fetchError } = await supabase
+          // First check if user exists in our database via pipeline
+          const client = await supabasePipeline.getDirectClient();
+          const { data: userData, error: fetchError } = await client
             .from('users')
             .select('*')
             .eq('id', sessionUser.id)
@@ -164,7 +160,7 @@ export const useAuthStore = create<AuthState>()(
               is_onboarded: false,
             };
 
-            const { data: newUser, error: createError } = await supabase
+            const { data: newUser, error: createError } = await client
               .from('users')
               .insert(newUserData)
               .select()
@@ -191,8 +187,8 @@ export const useAuthStore = create<AuthState>()(
           // Explicitly set loading state at the beginning
           set({ isLoading: true, isInitialized: false });
           
-          // Get current session
-          const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+          // Get current session via pipeline
+          const { data: { session }, error: sessionError } = await supabasePipeline.getSession();
           
           if (sessionError) {
             console.error('❌ Session fetch error:', sessionError);
@@ -241,7 +237,7 @@ export const useAuthStore = create<AuthState>()(
 );
 
 // Singleton auth listener to prevent multiple listeners
-export const initializeAuthListener = () => {
+export const initializeAuthListener = async () => {
   if (globalAuthListener) {
     console.log('⚠️ Auth listener already exists, returning existing cleanup');
     return () => {
@@ -255,7 +251,7 @@ export const initializeAuthListener = () => {
 
   console.log('🎧 Setting up auth state listener...');
   
-  globalAuthListener = supabase.auth.onAuthStateChange(
+  const authListener = await supabasePipeline.onAuthStateChange(
     async (event, session) => {
       console.log('🔄 Auth state changed:', event, session?.user?.id || 'no-user');
       
@@ -297,7 +293,9 @@ export const initializeAuthListener = () => {
           console.log('📡 Auth event:', event);
       }
     }
-  ).data.subscription;
+  );
+  
+  globalAuthListener = authListener.data.subscription;
 
   // Return cleanup function
   return () => {

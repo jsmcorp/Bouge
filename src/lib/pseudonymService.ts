@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabasePipeline } from './supabasePipeline';
 
 interface PseudonymCacheEntry {
   pseudonym: string;
@@ -7,6 +7,7 @@ interface PseudonymCacheEntry {
 
 class PseudonymService {
   private cache: Map<string, PseudonymCacheEntry> = new Map();
+  private inFlight: Map<string, Promise<string>> = new Map();
   private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
 
   /**
@@ -22,40 +23,42 @@ class PseudonymService {
     // Check if we have a valid cached entry
     const cachedEntry = this.cache.get(cacheKey);
     if (cachedEntry && (now - cachedEntry.timestamp) < this.CACHE_DURATION) {
-      console.log('🎭 Returning cached pseudonym for', cacheKey);
+      if (import.meta.env.DEV) console.log('🎭 Returning cached pseudonym for', cacheKey);
       return cachedEntry.pseudonym;
     }
 
-    try {
-      console.log('🎭 Fetching pseudonym from Supabase for', cacheKey);
-      
-      // Call the Supabase RPC function
-      const { data, error } = await supabase.rpc('upsert_pseudonym', {
-        q_group_id: groupId,
-        q_user_id: userId
-      });
+    // Deduplicate concurrent fetches for the same key
+    const existing = this.inFlight.get(cacheKey);
+    if (existing) return existing;
 
-      if (error) {
-        console.error('❌ Error fetching pseudonym:', error);
-        // Fallback to a generic pseudonym if the RPC fails
+    const fetchPromise = (async () => {
+      try {
+        if (import.meta.env.DEV) console.log('🎭 Fetching pseudonym from Supabase for', cacheKey);
+
+        const { data, error } = await supabasePipeline.rpc<string>('upsert_pseudonym', {
+          q_group_id: groupId,
+          q_user_id: userId
+        });
+
+        if (error) {
+          if (import.meta.env.DEV) console.error('❌ Error fetching pseudonym:', error);
+          return 'Anonymous Ghost';
+        }
+
+        const pseudonym = data as string;
+        this.cache.set(cacheKey, { pseudonym, timestamp: now });
+        if (import.meta.env.DEV) console.log('✅ Cached new pseudonym:', pseudonym, 'for', cacheKey);
+        return pseudonym;
+      } catch (error) {
+        if (import.meta.env.DEV) console.error('💥 Unexpected error fetching pseudonym:', error);
         return 'Anonymous Ghost';
+      } finally {
+        this.inFlight.delete(cacheKey);
       }
+    })();
 
-      const pseudonym = data as string;
-      
-      // Cache the result
-      this.cache.set(cacheKey, {
-        pseudonym,
-        timestamp: now
-      });
-
-      console.log('✅ Cached new pseudonym:', pseudonym, 'for', cacheKey);
-      return pseudonym;
-    } catch (error) {
-      console.error('💥 Unexpected error fetching pseudonym:', error);
-      // Fallback to a generic pseudonym
-      return 'Anonymous Ghost';
-    }
+    this.inFlight.set(cacheKey, fetchPromise);
+    return fetchPromise;
   }
 
   /**

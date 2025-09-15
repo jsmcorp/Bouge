@@ -126,7 +126,7 @@ export function MessageList() {
         </div>
       )}
 
-      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-4 overflow-x-hidden">
+      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-2 overflow-x-hidden">
         {messages.map((message) => (
           <div key={message.id}>
             <MessageBubble message={message} />

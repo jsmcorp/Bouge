@@ -1,9 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Note: The actual Supabase client is now managed exclusively by supabasePipeline.ts
+// This file only exports types and feature flags for consistency across the app
 
 // Feature flag for new simplified realtime connection logic
 export const FEATURES = {

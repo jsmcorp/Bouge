@@ -6,10 +6,11 @@ import { useIsMobile } from '@/hooks/useMediaQuery';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
-import { Network } from '@capacitor/network';
+
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from '@/components/theme-provider';
 import { CacheStatus } from '@/components/debug/CacheStatus';
+import { ConnectionStatus, DebugConnectionStatus } from '@/components/ConnectionStatus';
 
 // Create context for mobile detection
 export const MobileContext = createContext(false);
@@ -39,15 +40,11 @@ function AppContent() {
     isInitialized,
     initializeAuth 
   } = useAuthStore();
-  const { 
-    setOnlineStatus, 
-    startOutboxProcessor, 
+  const {
+    startOutboxProcessor,
     stopOutboxProcessor,
     setupRealtimeSubscription,
-    setConnectionStatus,
-    cleanupRealtimeSubscription,
-    onAppResume,
-    onNetworkOnline
+    setConnectionStatus
   } = useChatStore();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -78,20 +75,28 @@ function AppContent() {
 
       const handleAppStateChange = ({ isActive }: { isActive: boolean }) => {
         console.log('📱 App state changed:', isActive ? 'active' : 'inactive');
-        
-        if (isActive) {
-          // App came to foreground - delegate to connection manager
-          setTimeout(() => { onAppResume(); }, 500);
 
-          // If user is on dashboard, kick off a background preload of top groups
+        if (isActive) {
+          // App resume is handled centrally in main.tsx - only handle dashboard-specific preloading here
           const currentPath = window.location.pathname;
           if (currentPath === '/dashboard') {
             try {
               console.log('🚀 App resumed on dashboard: triggering background preload');
-              useChatStore.getState().preloadTopGroupMessages();
+              // Delay preload to avoid interfering with main resume logic
+              setTimeout(() => {
+                useChatStore.getState().preloadTopGroupMessages();
+              }, 1000);
             } catch (error) {
               console.error('❌ Failed to trigger preload on resume:', error);
             }
+          }
+        } else {
+          // Handle app going to background/pause
+          try {
+            console.log('📱 App going to background/pause');
+            useChatStore.getState().onAppPause?.();
+          } catch (error) {
+            console.error('❌ Failed to handle app pause:', error);
           }
         }
       };
@@ -135,39 +140,10 @@ function AppContent() {
             // Continue without SQLite - app should still work with remote data only
           }
           
-          // Initialize network status monitoring
-          try {
-            const status = await Network.getStatus();
-            setOnlineStatus(status.connected);
-            console.log('🌐 Initial network status:', status.connected ? 'online' : 'offline');
-
-            // Reflect connection banner and realtime on initial state via connection manager
-            if (status.connected) {
-              setConnectionStatus('connecting');
-              onAppResume();
-            } else {
-              setConnectionStatus('disconnected');
-              cleanupRealtimeSubscription();
-            }
-            
-            // Ensure a single network listener (remove older listeners first)
-            Network.removeAllListeners();
-
-            // Listen for network status changes
-            Network.addListener('networkStatusChange', async (status) => {
-              console.log('🌐 Network status changed:', status.connected ? 'online' : 'offline');
-              setOnlineStatus(status.connected);
-              if (status.connected) {
-                // Delegate to centralized connection manager
-                onNetworkOnline();
-              } else {
-                setConnectionStatus('disconnected');
-                cleanupRealtimeSubscription();
-              }
-            });
-          } catch (error) {
-            console.error('❌ Network status setup failed:', error);
-          }
+          // Network status is now handled centrally in main.tsx
+          // Set initial connection status to connecting
+          setConnectionStatus('connecting');
+          console.log('🌐 Network status monitoring handled centrally in main.tsx');
         }
 
         // Initialize auth listener first
@@ -374,15 +350,21 @@ function AppContent() {
 function App() {
   return (
     <ThemeProvider defaultTheme="light" storageKey="confessr-theme">
-      <Router 
-        future={{ 
+      <Router
+        future={{
           v7_startTransition: true,
-          v7_relativeSplatPath: true 
+          v7_relativeSplatPath: true
         }}
       >
+        {/* WhatsApp-style connection status */}
+        <ConnectionStatus />
+
         <AppContent />
         <Toaster />
         <CacheStatus />
+
+        {/* Debug connection status for development */}
+        <DebugConnectionStatus />
       </Router>
     </ThemeProvider>
   );

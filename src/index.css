@@ -9,7 +9,7 @@
 
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #0a0a0a;
+  background-color: #cfc5ba;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -92,10 +92,12 @@ button:focus-visible {
     --chart-4: 35 91% 65%;
     --chart-5: 43 74% 66%;
     --radius: 0.75rem;
+    /* app background for dark */
+    --app-bg: hsl(var(--background));
   }
   
   .light {
-    --background: 0 0% 98%;
+    --background: 60 20% 95%;
     --foreground: 0 0% 8%;
     --card: 0 0% 100%;
     --card-foreground: 0 0% 8%;
@@ -119,15 +121,18 @@ button:focus-visible {
     --chart-3: 175 70% 41%;
     --chart-4: 35 91% 65%;
     --chart-5: 43 74% 66%;
+    /* flat, no-glow background for reduced eye strain */
+    --app-bg: hsl(var(--background));
   }
 }
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
   body {
-    @apply bg-background text-foreground;
+    background: var(--app-bg);
+    color: hsl(var(--foreground));
   }
 }
 
@@ -156,117 +161,31 @@ button:focus-visible {
   position: relative;
   overflow: hidden;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* default fade controls */
+  --fade-origin-x: 25%;
+  --fade-strength: 0.67; /* increase = stronger/darker tint, decrease = lighter */
+  --fade-hold: 60%; /* keep solid tint until this percentage of radius */
+}
+
+/* Orientation helpers to shift the hotspot without fading text */
+.bubble-left { --fade-origin-x: 10%; }
+.bubble-right { --fade-origin-x: 90%; }
+
+/* Background overlay that tints from a corner but does not fade text */
+.chat-bubble-base::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.35)) 0%,
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.25)) calc(var(--fade-hold) - 4%),
+    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.50)) calc(var(--fade-hold) + 12%),
+    transparent 100%);
 }
 
 /* Ghost message bubbles - Subtle blue fade like in image */
-.chat-bubble-ghost {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.03) 0%, 
-    rgba(147, 197, 253, 0.015) 30%, 
-    rgba(219, 234, 254, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
-.chat-bubble-ghost:hover {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.05) 0%, 
-    rgba(147, 197, 253, 0.025) 30%, 
-    rgba(219, 234, 254, 0.015) 60%,
-    rgba(255, 255, 255, 0.01) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.08);
-  transform: translateY(-1px);
-}
-
-/* Regular message bubbles - Subtle gray fade to match image */
-.chat-bubble-regular {
-  background: linear-gradient(135deg, 
-    rgba(255, 255, 255, 0.015) 0%, 
-    rgba(249, 250, 251, 0.01) 30%, 
-    rgba(243, 244, 246, 0.008) 60%,
-    rgba(229, 231, 235, 0.005) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
-.chat-bubble-regular:hover {
-  background: linear-gradient(135deg, 
-    rgba(255, 255, 255, 0.025) 0%, 
-    rgba(249, 250, 251, 0.015) 30%, 
-    rgba(243, 244, 246, 0.012) 60%,
-    rgba(229, 231, 235, 0.008) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transform: translateY(-1px);
-}
-
-/* User's own messages - Light green fade on right side */
-.chat-bubble-own {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.02) 0%, 
-    rgba(110, 231, 183, 0.015) 30%, 
-    rgba(209, 250, 229, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
-.chat-bubble-own:hover {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.04) 0%, 
-    rgba(110, 231, 183, 0.025) 30%, 
-    rgba(209, 250, 229, 0.015) 60%,
-    rgba(255, 255, 255, 0.01) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.08);
-  transform: translateY(-1px);
-}
-
-/* Confession message bubbles - Subtle purple fade */
-.chat-bubble-confession {
-  background: linear-gradient(135deg, 
-    rgba(139, 92, 246, 0.025) 0%, 
-    rgba(196, 181, 253, 0.015) 30%, 
-    rgba(233, 213, 255, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(139, 92, 246, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
-.chat-bubble-confession:hover {
-  background: linear-gradient(135deg, 
-    rgba(139, 92, 246, 0.04) 0%, 
-    rgba(196, 181, 253, 0.025) 30%, 
-    rgba(233, 213, 255, 0.015) 60%,
-    rgba(255, 255, 255, 0.01) 100%);
-  border: 1px solid rgba(139, 92, 246, 0.08);
-  transform: translateY(-1px);
-}
-
-/* Image message bubbles - Subtle green fade */
-.chat-bubble-image {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.025) 0%, 
-    rgba(110, 231, 183, 0.015) 30%, 
-    rgba(209, 250, 229, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-}
-
-.chat-bubble-image:hover {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.04) 0%, 
-    rgba(110, 231, 183, 0.025) 30%, 
-    rgba(209, 250, 229, 0.015) 60%,
-    rgba(255, 255, 255, 0.01) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.08);
-  transform: translateY(-1px);
-}
 
 /* Thread reply bubbles - Even more subtle */
 .chat-bubble-thread-reply {
@@ -284,59 +203,7 @@ button:focus-visible {
 }
 
 /* Light mode adjustments for faded look */
-.light .chat-bubble-regular {
-  background: linear-gradient(135deg, 
-    rgba(0, 0, 0, 0.008) 0%, 
-    rgba(55, 65, 81, 0.005) 30%, 
-    rgba(75, 85, 99, 0.003) 60%,
-    rgba(107, 114, 128, 0.001) 100%);
-  border: 1px solid rgba(0, 0, 0, 0.03);
-}
 
-.light .chat-bubble-regular:hover {
-  background: linear-gradient(135deg, 
-    rgba(0, 0, 0, 0.015) 0%, 
-    rgba(55, 65, 81, 0.01) 30%, 
-    rgba(75, 85, 99, 0.008) 60%,
-    rgba(107, 114, 128, 0.005) 100%);
-  border: 1px solid rgba(0, 0, 0, 0.05);
-}
-
-.light .chat-bubble-ghost {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.02) 0%, 
-    rgba(147, 197, 253, 0.015) 30%, 
-    rgba(219, 234, 254, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.08);
-}
-
-.light .chat-bubble-confession {
-  background: linear-gradient(135deg, 
-    rgba(139, 92, 246, 0.02) 0%, 
-    rgba(196, 181, 253, 0.015) 30%, 
-    rgba(233, 213, 255, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(139, 92, 246, 0.08);
-}
-
-.light .chat-bubble-image {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.02) 0%, 
-    rgba(110, 231, 183, 0.015) 30%, 
-    rgba(209, 250, 229, 0.01) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.08);
-}
-
-.light .chat-bubble-own {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.015) 0%, 
-    rgba(110, 231, 183, 0.01) 30%, 
-    rgba(209, 250, 229, 0.008) 60%,
-    rgba(255, 255, 255, 0.005) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.06);
-}
 
 /* Bubble content animation */
 .chat-bubble-content {
@@ -345,20 +212,22 @@ button:focus-visible {
 }
 
 /* Very subtle shine effect */
+/* Fading border: strong near the bubble origin, dissolves into background at the fade side */
 .chat-bubble-base::before {
   content: '';
   position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.02), transparent);
-  transition: left 0.8s ease;
-  z-index: 0;
-}
-
-.chat-bubble-base:hover::before {
-  left: 100%;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  /* draw the border via inset shadow so we can mask it */
+  box-shadow: inset 0 0 0 1px hsl(var(--bubble-accent) / 0.14);
+  /* keep border for first ~fade-hold, then fade it out */
+  -webkit-mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    #000 calc(var(--fade-hold) - 6%),
+    transparent calc(var(--fade-hold) + 8%));
+  mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
+    #000 calc(var(--fade-hold) - 6%),
+    transparent calc(var(--fade-hold) + 8%));
 }
 
 /* Animations */
@@ -387,9 +256,7 @@ button:focus-visible {
   }
 }
 
-.message-enter {
-  animation: message-slide-in 0.3s ease-out;
-}
+.message-enter { animation: message-slide-in 0.25s ease-out; }
 
 /* Gradient text */
 .gradient-text {
@@ -565,7 +432,8 @@ button:focus-visible {
 
 /* Focus states */
 .focus-ring {
-  @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background;
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--primary)), 0 0 0 4px hsl(var(--background));
 }
 
 /* Ghost mode indicator */
@@ -607,10 +475,21 @@ button:focus-visible {
 
 /* Modern button styles */
 .btn-modern {
-  @apply relative overflow-hidden rounded-xl px-6 py-3 font-medium transition-all duration-300;
-  @apply bg-gradient-to-r from-primary to-primary/80 text-primary-foreground;
-  @apply hover:shadow-lg hover:shadow-primary/25 hover:scale-105;
-  @apply active:scale-95;
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1.5rem;
+  font-weight: 500;
+  transition: all 300ms;
+  background: linear-gradient(90deg, hsl(var(--primary)), hsl(var(--primary) / 0.8));
+  color: hsl(var(--primary-foreground));
+}
+.btn-modern:hover {
+  box-shadow: 0 10px 25px hsl(var(--primary) / 0.25);
+  transform: scale(1.05);
+}
+.btn-modern:active {
+  transform: scale(0.95);
 }
 
 .btn-modern::before {
@@ -630,7 +509,11 @@ button:focus-visible {
 
 /* Card hover effects */
 .card-hover {
-  @apply transition-all duration-300 hover:shadow-xl hover:shadow-primary/10 hover:-translate-y-1;
+  transition: all 300ms;
+}
+.card-hover:hover {
+  box-shadow: 0 20px 35px hsl(var(--primary) / 0.1);
+  transform: translateY(-4px);
 }
 
 /* Floating elements */
@@ -861,173 +744,68 @@ button:focus-visible {
 }
 
 /* Enhanced chat bubble styles to match the image exactly */
+/* Unified ultra bubble surface using a single accent variable */
+.chat-bubble-ghost-ultra,
+.chat-bubble-emma-ultra,
+.chat-bubble-anonymous-ultra,
+.chat-bubble-confession-ultra,
 .chat-bubble-ultra-fade {
-  background: linear-gradient(135deg, 
-    rgba(255, 255, 255, 0.006) 0%, 
-    rgba(255, 255, 255, 0.003) 30%, 
-    rgba(255, 255, 255, 0.001) 70%,
-    transparent 100%);
+  --bubble-accent: var(--primary);
+  background: rgba(255, 255, 255, 0.006);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(255, 255, 255, 0.008);
-  box-shadow: 
-    0 1px 3px rgba(0, 0, 0, 0.015),
-    0 1px 2px rgba(0, 0, 0, 0.008),
-    inset 0 0 1px rgba(255, 255, 255, 0.02);
+  /* real border made transparent; we draw a controlled border with ::before */
+  border: 1px solid transparent;
+  box-shadow:
+    0 1px 3px hsl(var(--bubble-accent) / 0.01),
+    0 1px 2px hsl(var(--bubble-accent) / 0.005),
+    inset 0 0 1px hsl(var(--bubble-accent) / 0.03);
 }
 
-/* Ghost message - matching the blue fade in image */
-.chat-bubble-ghost-ultra {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.008) 0%, 
-    rgba(147, 197, 253, 0.005) 30%, 
-    rgba(219, 234, 254, 0.003) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(59, 130, 246, 0.012);
-  box-shadow: 
-    0 1px 3px rgba(59, 130, 246, 0.01),
-    0 1px 2px rgba(59, 130, 246, 0.005),
-    inset 0 0 1px rgba(59, 130, 246, 0.03);
-}
-
-/* Emma's messages - right side green fade */
-.chat-bubble-emma-ultra {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.008) 0%, 
-    rgba(110, 231, 183, 0.005) 30%, 
-    rgba(209, 250, 229, 0.003) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(16, 185, 129, 0.012);
-  box-shadow: 
-    0 1px 3px rgba(16, 185, 129, 0.01),
-    0 1px 2px rgba(16, 185, 129, 0.005),
-    inset 0 0 1px rgba(16, 185, 129, 0.03);
-}
-
-/* Anonymous message - orange fade */
-.chat-bubble-anonymous-ultra {
-  background: linear-gradient(135deg, 
-    rgba(251, 146, 60, 0.008) 0%, 
-    rgba(251, 146, 60, 0.005) 30%, 
-    rgba(251, 146, 60, 0.003) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(251, 146, 60, 0.012);
-  box-shadow: 
-    0 1px 3px rgba(251, 146, 60, 0.01),
-    0 1px 2px rgba(251, 146, 60, 0.005),
-    inset 0 0 1px rgba(251, 146, 60, 0.03);
-}
-
-/* Confession message - purple fade */
-.chat-bubble-confession-ultra {
-  background: linear-gradient(135deg, 
-    rgba(139, 92, 246, 0.008) 0%, 
-    rgba(196, 181, 253, 0.005) 30%, 
-    rgba(233, 213, 255, 0.003) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(139, 92, 246, 0.012);
-  box-shadow: 
-    0 1px 3px rgba(139, 92, 246, 0.01),
-    0 1px 2px rgba(139, 92, 246, 0.005),
-    inset 0 0 1px rgba(139, 92, 246, 0.03);
-}
+/* Accent assignments */
+.chat-bubble-ghost-ultra { --bubble-accent: 213 94% 68%; }
+.chat-bubble-emma-ultra { --bubble-accent: 156 72% 40%; }
+.chat-bubble-anonymous-ultra { --bubble-accent: 32 95% 62%; }
+.chat-bubble-confession-ultra { --bubble-accent: 220 86% 60%; }
+.chat-bubble-ultra-fade { --bubble-accent: 158 64% 52%; }
 
 /* Badge styles matching the image */
-.badge-anony-ultra {
-  background: linear-gradient(135deg, 
-    rgba(251, 146, 60, 0.05) 0%, 
-    rgba(251, 146, 60, 0.03) 50%, 
-    rgba(251, 146, 60, 0.02) 100%);
-  border: 1px solid rgba(251, 146, 60, 0.08);
-  color: rgba(251, 146, 60, 0.85);
+/* Unified chip badge base + accent variants */
+.badge-funny-ultra,
+.badge-confession-ultra {
+  display: inline-flex;
+  align-items: center;
   font-size: 0.75rem;
   font-weight: 500;
   padding: 0.25rem 0.5rem;
   border-radius: 0.375rem;
+  border-width: 1px;
 }
 
 .badge-funny-ultra {
-  background: linear-gradient(135deg, 
-    rgba(251, 191, 36, 0.05) 0%, 
-    rgba(251, 191, 36, 0.03) 50%, 
-    rgba(251, 191, 36, 0.02) 100%);
-  border: 1px solid rgba(251, 191, 36, 0.08);
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, rgba(251, 191, 36, 0.03) 50%, rgba(251, 191, 36, 0.02) 100%);
+  border-color: rgba(251, 191, 36, 0.08);
   color: rgba(251, 191, 36, 0.85);
-  font-size: 0.75rem;
-  font-weight: 500;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.375rem;
 }
-
 .badge-confession-ultra {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.05) 0%, 
-    rgba(59, 130, 246, 0.03) 50%, 
-    rgba(59, 130, 246, 0.02) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.08);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(59, 130, 246, 0.03) 50%, rgba(59, 130, 246, 0.02) 100%);
+  border-color: rgba(59, 130, 246, 0.08);
   color: rgba(59, 130, 246, 0.85);
-  font-size: 0.75rem;
-  font-weight: 500;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.375rem;
 }
 
 /* Light mode adjustments for ultra faded bubbles */
+.light .chat-bubble-base { --fade-strength: 0.10; }
+.light .chat-bubble-ghost-ultra,
+.light .chat-bubble-emma-ultra,
+.light .chat-bubble-anonymous-ultra,
+.light .chat-bubble-confession-ultra,
 .light .chat-bubble-ultra-fade {
-  background: linear-gradient(135deg, 
-    rgba(0, 0, 0, 0.004) 0%, 
-    rgba(0, 0, 0, 0.002) 30%, 
-    rgba(0, 0, 0, 0.001) 70%,
-    transparent 100%);
-  border: 1px solid rgba(0, 0, 0, 0.008);
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid hsl(var(--bubble-accent) / 0.01);
   box-shadow: 
     0 1px 3px rgba(0, 0, 0, 0.01),
     0 1px 2px rgba(0, 0, 0, 0.005),
     inset 0 0 1px rgba(0, 0, 0, 0.02);
-}
-
-.light .chat-bubble-ghost-ultra {
-  background: linear-gradient(135deg, 
-    rgba(59, 130, 246, 0.006) 0%, 
-    rgba(147, 197, 253, 0.004) 30%, 
-    rgba(219, 234, 254, 0.002) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.01);
-}
-
-.light .chat-bubble-emma-ultra {
-  background: linear-gradient(135deg, 
-    rgba(16, 185, 129, 0.006) 0%, 
-    rgba(110, 231, 183, 0.004) 30%, 
-    rgba(209, 250, 229, 0.002) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.01);
-}
-
-.light .chat-bubble-anonymous-ultra {
-  background: linear-gradient(135deg, 
-    rgba(251, 146, 60, 0.006) 0%, 
-    rgba(251, 146, 60, 0.004) 30%, 
-    rgba(251, 146, 60, 0.002) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  border: 1px solid rgba(251, 146, 60, 0.01);
-}
-
-.light .chat-bubble-confession-ultra {
-  background: linear-gradient(135deg, 
-    rgba(139, 92, 246, 0.006) 0%, 
-    rgba(196, 181, 253, 0.004) 30%, 
-    rgba(233, 213, 255, 0.002) 60%,
-    rgba(255, 255, 255, 0.001) 100%);
-  border: 1px solid rgba(139, 92, 246, 0.01);
 }
 
 /* Enhanced hover effects for ultra faded bubbles */
@@ -1118,7 +896,7 @@ button:focus-visible {
 /* Time stamps styling */
 .timestamp {
   color: rgba(255, 255, 255, 0.4);
-  font-size: 0.75rem;
+  font-size: 0.65rem;
   font-weight: 400;
 }
 

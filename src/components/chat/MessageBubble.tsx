@@ -1,11 +1,12 @@
+import * as React from 'react';
 import { useState } from 'react';
 import { useEffect } from 'react';
+import { useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { formatDistanceToNow } from 'date-fns';
-import { Ghost, Smile, MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
-import { motion, useMotionValue, useTransform, useSpring, PanInfo } from 'framer-motion';
+import { format } from 'date-fns';
+import { MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
+import { motion, useMotionValue, useTransform, useSpring, PanInfo, AnimatePresence } from 'framer-motion';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -14,17 +15,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
 import { Message, useChatStore } from '@/store/chatStore';
 import { useAuthStore } from '@/store/authStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { PollComponent } from '@/components/chat/PollComponent';
-import { ReactionMenu } from '@/components/chat/ReactionMenu';
 import { MessageReactions } from '@/components/chat/MessageReactions';
+import { ReactionBar } from '@/components/chat/ui/ReactionBar';
 import { pseudonymService } from '@/lib/pseudonymService';
 import { cn } from '@/lib/utils';
 import { Reaction } from '@/store/chat/reactions';
@@ -69,7 +65,12 @@ export function MessageBubble({
   isThreadReply = false,
   showInlineReplies = true 
 }: MessageBubbleProps) {
-  const [showReactionMenu, setShowReactionMenu] = useState(false);
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
+  const [hoveredReactionIndex, setHoveredReactionIndex] = useState<number | null>(null);
+  const [activeEmoji, setActiveEmoji] = useState<string | null>(null);
+  const longPressTimeoutRef = useRef<number | null>(null);
+  const reactionPickerRef = useRef<HTMLDivElement | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
   const [isSwipeActive, setIsSwipeActive] = useState(false);
   const [isSwipeCancelled, setIsSwipeCancelled] = useState(false);
   const [ghostPseudonym, setGhostPseudonym] = useState<string>('Ghost');
@@ -94,6 +95,7 @@ export function MessageBubble({
   const hasReplies = message.reply_count && message.reply_count > 0;
   const hasMoreReplies = message.reply_count && message.reply_count > 3;
   const isOwnMessage = user?.id === message.user_id;
+  const isRightAligned = isOwnMessage && !isGhost; // Normal self messages on right; ghost always left
   
   // Get reactions for this message
   const reactions = messageReactions[message.id] || [];
@@ -103,6 +105,8 @@ export function MessageBubble({
     ...r,
     created_at: new Date().toISOString() // Add required created_at field
   }));
+
+  const REACTION_EMOJIS = ['👍', '❤️', '😂', '😢', '😮', '😡', '🔥', '👏', '🎉', '💯'];
 
   // Fetch pseudonym for ghost messages
   useEffect(() => {
@@ -226,9 +230,83 @@ export function MessageBubble({
     
     e.stopPropagation();
   };
-  const handleReply = (e: React.MouseEvent) => {
-    e.preventDefault();
+
+  // Long-press reaction picker handlers
+  const cancelLongPressTimer = () => {
+    if (longPressTimeoutRef.current) {
+      window.clearTimeout(longPressTimeoutRef.current);
+      longPressTimeoutRef.current = null;
+    }
+  };
+
+  const startLongPress = (e: React.PointerEvent) => {
+    if (isThreadOriginal || isThreadReply) return;
     e.stopPropagation();
+    cancelLongPressTimer();
+    longPressTimeoutRef.current = window.setTimeout(async () => {
+      setShowReactionPicker(true);
+      setHoveredReactionIndex(null);
+      setIsSwipeCancelled(true);
+      setIsSwipeActive(false);
+      try {
+        await Haptics.impact({ style: ImpactStyle.Medium });
+      } catch (_) {}
+    }, 350);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (showReactionPicker && hoveredReactionIndex !== null) {
+      const emoji = REACTION_EMOJIS[hoveredReactionIndex];
+      addOrRemoveReaction(message.id, emoji);
+      setActiveEmoji(emoji);
+      setTimeout(() => setActiveEmoji(null), 800);
+      setShowReactionPicker(false);
+      setHoveredReactionIndex(null);
+    }
+    cancelLongPressTimer();
+  };
+
+  const handlePointerCancel = (e?: React.PointerEvent) => {
+    e?.stopPropagation();
+    setShowReactionPicker(false);
+    setHoveredReactionIndex(null);
+    cancelLongPressTimer();
+  };
+
+  useEffect(() => {
+    if (!showReactionPicker) return;
+    const onMove = (ev: PointerEvent) => {
+      if (!reactionPickerRef.current) return;
+      const rect = reactionPickerRef.current.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const widthPer = rect.width / REACTION_EMOJIS.length;
+      const idx = Math.floor(x / widthPer);
+      if (idx < 0 || idx >= REACTION_EMOJIS.length || Number.isNaN(idx)) {
+        setHoveredReactionIndex(null);
+      } else {
+        setHoveredReactionIndex(idx);
+      }
+    };
+    const onDownOutside = (ev: PointerEvent) => {
+      const target = ev.target as Node | null;
+      const insidePicker = reactionPickerRef.current?.contains(target as Node) ?? false;
+      const insideBubble = bubbleRef.current?.contains(target as Node) ?? false;
+      if (!insidePicker && !insideBubble) {
+        setShowReactionPicker(false);
+        setHoveredReactionIndex(null);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerdown', onDownOutside, true);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDownOutside, true);
+    };
+  }, [showReactionPicker]);
+  const handleReply = (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     setReplyingTo(message);
   };
 
@@ -256,7 +334,8 @@ export function MessageBubble({
   };
   const handleReaction = (emoji: string) => {
     addOrRemoveReaction(message.id, emoji);
-    setShowReactionMenu(false);
+    setActiveEmoji(emoji);
+    setTimeout(() => setActiveEmoji(null), 800);
   };
   
   const handleToggleReaction = (emoji: string) => {
@@ -280,24 +359,9 @@ export function MessageBubble({
           {/* Poll Component */}
           <PollComponent poll={message.poll} />
 
-          {/* Message Actions for Polls */}
+          {/* Message Actions for Polls (React removed) */}
           {!isThreadOriginal && !isThreadReply && (
             <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                  >
-                    <Smile className="w-3 h-3 mr-1" />
-                    React
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0 border-0 shadow-lg" align="start">
-                  <ReactionMenu onSelectEmoji={handleReaction} />
-                </PopoverContent>
-              </Popover>
               <Button 
                 variant="ghost" 
                 size="sm" 
@@ -381,7 +445,7 @@ export function MessageBubble({
   // Regular message rendering with ultra-faded design
   return (
     <div className={cn(
-      "group relative mb-4",
+      "group relative mb-1",
       {
         "bg-card/50 border-l-4 border-l-green-500 pl-4 rounded-lg p-3": isThreadOriginal,
         "ml-8 pl-4 thread-reply-line": isThreadReply,
@@ -416,80 +480,26 @@ export function MessageBubble({
         className="relative w-full"
       >
         {/* Message Container */}
-        <div className="flex items-start space-x-3 max-w-full">
-          {/* Avatar */}
-          <div className="flex-shrink-0 pt-1">
-            {isGhost ? (
-              <div className={cn(
-                "flex items-center justify-center rounded-full avatar-ghost",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <Ghost className={cn("text-white", isThreadReply ? "w-3 h-3" : "w-4 h-4")} />
-              </div>
-            ) : isConfession ? (
-              <div className={cn(
-                "flex items-center justify-center rounded-full avatar-confession",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <span className={cn(
-                  "text-white font-bold",
-                  isThreadReply ? "text-xs" : "text-sm"
-                )}>
-                  {message.author?.display_name?.charAt(0) || 'A'}
-                </span>
-              </div>
-            ) : (
-              <Avatar className={cn(
-                "avatar-emma",
-                isThreadReply ? "w-6 h-6" : "w-8 h-8"
-              )}>
-                <AvatarImage src={message.author?.avatar_url || undefined} />
-                <AvatarFallback className={cn(
-                  "bg-primary/10 text-primary font-semibold",
-                  isThreadReply ? "text-xs" : "text-sm"
-                )}>
-                  {message.author?.display_name?.charAt(0) || 'U'}
-                </AvatarFallback>
-              </Avatar>
-            )}
-          </div>
+        <div className={cn(
+          "flex items-start max-w-full gap-3",
+          {
+            "flex-row-reverse": isRightAligned && !isThreadReply,
+          }
+        )}>
+          {/* Avatar removed for cleaner look as requested */}
 
           {/* Message Content */}
-          <div className="flex-1 min-w-0">
-            {/* Header with name and badges outside bubble */}
-            <div className="flex items-center space-x-2 mb-2">
-              <span className={cn(
-                "font-bold text-foreground",
-                isThreadReply ? "text-xs" : "text-sm"
-              )}>
-                {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
-              </span>
-              
-              {/* Badges */}
-              {isConfession && !isThreadReply && (
-                <span className="badge-anony-ultra">
-                  Anony
-                </span>
-              )}
-              {message.category && !isThreadReply && (
-                <span className={cn(
-                  "text-xs",
-                  message.category === 'funny' ? 'badge-funny-ultra' : CATEGORY_COLORS[message.category as keyof typeof CATEGORY_COLORS] || 'bg-muted'
-                )}>
-                  {message.category}
-                </span>
-              )}
-              {isImage && !isThreadReply && (
-                <Badge variant="secondary" className="text-xs bg-blue-500/20 text-blue-500 border-blue-500/30">
-                  <ImageIcon className="w-3 h-3 mr-1" />
-                  Image
-                </Badge>
-              )}
-            </div>
-
-            {/* Message Bubble with ultra-faded styling */}
-            <div className={cn(
-              "rounded-2xl px-4 py-3 transition-all duration-200 max-w-[85%] w-fit relative",
+          <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
+            {/* Message Bubble with header inside */}
+            <div
+              ref={bubbleRef}
+              onPointerDown={startLongPress}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
+              onPointerLeave={handlePointerCancel}
+              onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
+              className={cn(
+              "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
               {
                 // Apply ultra-faded classes based on message type
@@ -499,9 +509,90 @@ export function MessageBubble({
                 "chat-bubble-confession-ultra": isConfession,
                 "chat-bubble-ultra-fade": isImage,
                 "chat-bubble-thread-reply": isThreadReply,
-              }
-            )}>
+              },
+              isRightAligned ? "bubble-right ml-auto" : "bubble-left"
+            )}
+            >
+              {/* Long-press Reaction Picker */}
+              <AnimatePresence>
+                {showReactionPicker && (
+                  <motion.div
+                    ref={reactionPickerRef}
+                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                    transition={{ duration: 0.15 }}
+                    className={cn(
+                      "absolute -top-12 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1",
+                      "rounded-full bg-background/95 border border-border/50 shadow-lg backdrop-blur-sm"
+                    )}
+                  >
+                    {REACTION_EMOJIS.map((emoji, index) => (
+                      <motion.button
+                        key={emoji}
+                        type="button"
+                        onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleReaction(emoji); setShowReactionPicker(false); setHoveredReactionIndex(null); }}
+                        className={cn("h-8 w-8 rounded-full flex items-center justify-center", hoveredReactionIndex === index ? "bg-muted" : "bg-transparent")}
+                        animate={hoveredReactionIndex === index ? { y: -4, scale: 1.15 } : { y: 0, scale: 1 }}
+                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                      >
+                        <span className="text-lg">{emoji}</span>
+                      </motion.button>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Emoji pop animation */}
+              <AnimatePresence>
+                {activeEmoji && (
+                  <motion.div
+                    key={activeEmoji}
+                    initial={{ opacity: 0, scale: 0.2, y: 0 }}
+                    animate={{ opacity: 1, scale: 1.3, y: -12 }}
+                    exit={{ opacity: 0, scale: 0.8, y: -20 }}
+                    transition={{ type: "spring", stiffness: 400, damping: 20, duration: 0.6 }}
+                    className="absolute -top-8 left-1/2 -translate-x-1/2 z-20"
+                  >
+                    <div className="h-8 w-8 rounded-full bg-background/80 border border-border/50 shadow flex items-center justify-center">
+                      <span className="text-xl">{activeEmoji}</span>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <div className="chat-bubble-content">
+                {/* Header inside bubble */}
+                <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
+                  <span className={cn(
+                    "font-bold text-foreground",
+                    isThreadReply ? "text-xs" : "text-sm"
+                  )}>
+                    {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
+                  </span>
+                </div>
+                {/* Badges inside bubble */}
+                {!isThreadReply && (
+                  <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isOwnMessage && !isThreadReply })}>
+                    {isConfession && (
+                      <span className="badge-confession-ultra">Confession</span>
+                    )}
+                    {message.category && (
+                      <span className={cn(
+                        "text-xs",
+                        message.category === 'funny' ? 'badge-funny-ultra' : CATEGORY_COLORS[message.category as keyof typeof CATEGORY_COLORS] || 'bg-muted'
+                      )}>
+                        {message.category === 'funny' ? 'Funny' : message.category}
+                      </span>
+                    )}
+                    {/* Anony tag removed as requested */}
+                    {isImage && (
+                      <Badge variant="secondary" className="text-xs bg-blue-500/20 text-blue-500 border-blue-500/30">
+                        <ImageIcon className="w-3 h-3 mr-1" />
+                        Image
+                      </Badge>
+                    )}
+                  </div>
+                )}
                 {/* Message Content */}
                 {message.image_url ? (
                   <div className="space-y-2">
@@ -541,24 +632,23 @@ export function MessageBubble({
                   </div>
                 )}
               </div>
+              {/* Timestamp and delivery status below content */}
+              <div
+                className={cn(
+                  "mt-1 flex items-center gap-1",
+                  isRightAligned ? "justify-end text-right" : "justify-start text-left"
+                )}
+              >
+                <span className="timestamp">
+                  {format(new Date(message.created_at), 'h:mm a')}
+                </span>
+                {message.delivery_status && (
+                  <DeliveryStatusIcon status={message.delivery_status} />
+                )}
+              </div>
             </div>
 
-            {/* Timestamp and delivery status */}
-            <div className="flex items-center space-x-2 mt-1">
-              <span className="timestamp">
-                {formatDistanceToNow(new Date(message.created_at), { addSuffix: true })}
-              </span>
-              
-              {/* Delivery Status */}
-              {message.delivery_status && (
-                <div className="flex items-center space-x-1">
-                  <DeliveryStatusIcon status={message.delivery_status} />
-                  {message.delivery_status === 'failed' && (
-                    <span className="text-xs text-red-500">Failed</span>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Timestamp moved inside bubble; removing external gap */}
 
             {/* Reactions */}
             {reactions.length > 0 && !isThreadReply && (
@@ -570,71 +660,49 @@ export function MessageBubble({
               </div>
             )}
 
-            {/* Message Actions */}
+            {/* Message Actions (React removed) */}
             {!isThreadOriginal && !isThreadReply && (
-              <div className="flex items-center space-x-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Popover open={showReactionMenu} onOpenChange={setShowReactionMenu}>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-xs hover:bg-background/80"
+              <div className="hidden group-hover:block">
+                <ReactionBar onReply={handleReply}>
+                  {hasReplies && (
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-6 px-2 text-xs text-green-500 hover:text-green-400 hover:bg-green-500/10"
+                      onClick={handleViewThread}
                     >
-                      <Smile className="w-3 h-3 mr-1" />
-                      React
+                      <MessageCircle className="w-3 h-3 mr-1" />
+                      View Thread
                     </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0 border-0 shadow-lg" align="start">
-                    <ReactionMenu onSelectEmoji={handleReaction} />
-                  </PopoverContent>
-                </Popover>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="h-6 px-2 text-xs hover:bg-background/80"
-                  onClick={handleReply}
-                >
-                  <Reply className="w-3 h-3 mr-1" />
-                  Reply
-                </Button>
-                {hasReplies && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="h-6 px-2 text-xs text-green-500 hover:text-green-400 hover:bg-green-500/10"
-                    onClick={handleViewThread}
-                  >
-                    <MessageCircle className="w-3 h-3 mr-1" />
-                    View Thread
-                  </Button>
-                )}
-                {message.delivery_status === 'failed' && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="h-6 px-2 text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10"
-                    onClick={() => {
-                      // TODO: Implement retry functionality
-                      console.log('Retry sending message:', message.id);
-                    }}
-                  >
-                    <AlertCircle className="w-3 h-3 mr-1" />
-                    Retry
-                  </Button>
-                )}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-background/80">
-                      <MoreHorizontal className="w-3 h-3" />
+                  )}
+                  {message.delivery_status === 'failed' && (
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-6 px-2 text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10"
+                      onClick={() => {
+                        // TODO: Implement retry functionality
+                        console.log('Retry sending message:', message.id);
+                      }}
+                    >
+                      <AlertCircle className="w-3 h-3 mr-1" />
+                      Retry
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem>Copy Message</DropdownMenuItem>
-                    <DropdownMenuItem className="text-destructive">
-                      Report
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-background/80">
+                        <MoreHorizontal className="w-3 h-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem>Copy Message</DropdownMenuItem>
+                      <DropdownMenuItem className="text-destructive">
+                        Report
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </ReactionBar>
               </div>
             )}
 

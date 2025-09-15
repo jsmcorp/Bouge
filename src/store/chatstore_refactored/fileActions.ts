@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { compressImage, generateUniqueFileName } from './utils';
 
 export interface FileActions {
@@ -13,7 +13,7 @@ export const createFileActions = (_set: any, _get: any): FileActions => ({
 
   uploadFileToStorage: async (file: File) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       console.log('📤 Starting file upload process...');
@@ -27,13 +27,16 @@ export const createFileActions = (_set: any, _get: any): FileActions => ({
       const fileName = generateUniqueFileName(file.name, user.id);
       console.log('📝 Generated file name:', fileName);
 
-      // Upload to Supabase Storage
-      const { data, error } = await supabase.storage
-        .from('chat-media')
-        .upload(fileName, compressedBlob, {
+      // Upload to Supabase Storage via pipeline
+      const { data, error } = await supabasePipeline.uploadFile(
+        'chat-media',
+        fileName,
+        compressedBlob,
+        {
           contentType: 'image/jpeg',
           upsert: false,
-        });
+        }
+      );
 
       if (error) {
         console.error('❌ Upload error:', error);
@@ -42,10 +45,8 @@ export const createFileActions = (_set: any, _get: any): FileActions => ({
 
       console.log('✅ Upload successful:', data.path);
 
-      // Get public URL
-      const { data: { publicUrl } } = supabase.storage
-        .from('chat-media')
-        .getPublicUrl(data.path);
+      // Get public URL via pipeline
+      const { data: { publicUrl } } = await supabasePipeline.getPublicUrl('chat-media', data.path);
 
       console.log('🔗 Public URL:', publicUrl);
       return publicUrl;

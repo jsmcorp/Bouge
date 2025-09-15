@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { Json } from '@/lib/supabase';
 import { Poll } from './types';
 
@@ -13,11 +13,12 @@ export const createPollActions = (set: any, get: any): PollActions => ({
     try {
       set({ isLoadingPolls: true });
 
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       // Fetch polls for messages in this group
-      const { data: polls, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: polls, error } = await client
         .from('polls')
         .select(`
           *,
@@ -29,7 +30,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
       const pollsWithVotes = await Promise.all((polls || []).map(async (poll: any) => {
         // Fetch vote counts
-        const { data: votes } = await supabase
+        const { data: votes } = await client
           .from('poll_votes')
           .select('option_index')
           .eq('poll_id', poll.id);
@@ -43,7 +44,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
         });
 
         // Check user's vote
-        const { data: userVote } = await supabase
+        const { data: userVote } = await client
           .from('poll_votes')
           .select('option_index')
           .eq('poll_id', poll.id)
@@ -83,11 +84,12 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
   createPoll: async (groupId: string, question: string, options: string[]) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       // First create a message for the poll
-      const { data: message, error: messageError } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: message, error: messageError } = await client
         .from('messages')
         .insert({
           group_id: groupId,
@@ -102,7 +104,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
       if (messageError) throw messageError;
 
       // Then create the poll
-      const { data: poll, error: pollError } = await supabase
+      const { data: poll, error: pollError } = await client
         .from('polls')
         .insert({
           message_id: message.id,
@@ -146,11 +148,12 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
   voteOnPoll: async (pollId: string, optionIndex: number) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       // Check if user has already voted
-      const { data: existingVote } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: existingVote } = await client
         .from('poll_votes')
         .select('*')
         .eq('poll_id', pollId)
@@ -212,7 +215,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
       set({ userVotes: { ...currentVotes, [pollId]: optionIndex } });
 
       // Submit vote to database
-      const { error } = await supabase
+      const { error } = await client
         .from('poll_votes')
         .insert({
           poll_id: pollId,

@@ -6,6 +6,11 @@ import { App as CapApp } from '@capacitor/app';
 import { Network } from '@capacitor/network';
 import { initPush } from '@/lib/push';
 import { useChatStore } from '@/store/chatstore_refactored';
+// Import WhatsApp-style connection system
+import { whatsappConnection } from '@/lib/whatsappStyleConnection';
+import { mobileLogger } from '@/lib/mobileLogger';
+// Import connectivity tester for debugging
+import '@/lib/connectivityTest';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -19,17 +24,100 @@ createRoot(document.getElementById('root')!).render(
 		initPush();
 	} catch {}
 
-	// App resume
-	CapApp.addListener('appStateChange', ({ isActive }) => {
-		if (isActive) {
-			try { useChatStore.getState().onWake?.('resume'); } catch {}
+	// Initialize WhatsApp-style connection system
+	mobileLogger.log('info', 'general', 'Initializing WhatsApp-style connection system');
+
+	// Setup connection status monitoring
+	whatsappConnection.onStatusChange((status) => {
+		mobileLogger.log('info', 'connection', `Connection status: ${status.state} - ${status.message}`, {
+			progress: status.progress,
+			isUserVisible: status.isUserVisible,
+		});
+
+		// Update chat store connection status
+		try {
+			const chatStore = useChatStore.getState();
+			chatStore.setConnectionStatus?.(status.state === 'connected' ? 'connected' :
+				status.state === 'connecting' || status.state === 'reconnecting' ? 'connecting' : 'disconnected');
+		} catch (error) {
+			mobileLogger.log('error', 'connection', 'Failed to update chat store status', { error });
 		}
 	});
 
-	// Network online
-	Network.addListener('networkStatusChange', (status) => {
-		if (status.connected) {
-			try { useChatStore.getState().onWake?.('network'); } catch {}
+	// Setup reconnection metrics monitoring
+	whatsappConnection.onReconnectionComplete((metrics) => {
+		mobileLogger.log('info', 'timing', 'Reconnection completed', metrics);
+	});
+
+	// Debounced resume handler to prevent duplicate calls
+	let lastResumeTime = 0;
+	let resumeTimeout: NodeJS.Timeout | null = null;
+
+	const handleAppResume = (source: string) => {
+		const now = Date.now();
+		const timeSinceLastResume = now - lastResumeTime;
+
+		mobileLogger.log('info', 'device-lifecycle', `App resume from ${source}`, {
+			timeSinceLastResume,
+			source
+		});
+
+		// Clear any pending resume call
+		if (resumeTimeout) {
+			clearTimeout(resumeTimeout);
+			resumeTimeout = null;
+		}
+
+		// Debounce rapid resume events (common during lock/unlock cycles)
+		if (timeSinceLastResume < 3000) {
+			mobileLogger.log('debug', 'device-lifecycle', 'Resume debounced (too soon after last resume)');
+			return;
+		}
+
+		lastResumeTime = now;
+
+		// The WhatsApp-style connection system will handle the reconnection
+		// We just need to mark activity and let the device lock detection handle it
+		mobileLogger.log('info', 'device-lifecycle', `App resume processed from ${source}`);
+	};
+
+	// App resume - primary handler
+	CapApp.addListener('appStateChange', ({ isActive }) => {
+		if (isActive) {
+			handleAppResume('appStateChange');
+		}
+	});
+
+	// Some Android builds emit 'resume' separately; handle it too but with same debouncing
+	CapApp.addListener('resume', () => {
+		handleAppResume('resume');
+	});
+
+	// Network status changes - simplified with reconnection manager
+	Network.addListener('networkStatusChange', async (status) => {
+		try {
+			const chatStore = useChatStore.getState();
+			mobileLogger.logNetworkStatusChange(status.connected, status.connectionType);
+
+			// Update online status in store
+			chatStore.setOnlineStatus?.(status.connected);
+
+			if (status.connected) {
+				// Handle network coming online with single reconnection manager
+				const { reconnectionManager } = await import('@/lib/reconnectionManager');
+				mobileLogger.log('info', 'network', 'Network reconnected');
+
+				reconnectionManager.reconnect('network-online').catch(error => {
+					mobileLogger.log('error', 'network', 'Network reconnection failed', { error });
+				});
+			} else {
+				// Handle network going offline
+				mobileLogger.log('warn', 'network', 'Network disconnected');
+				chatStore.setConnectionStatus?.('disconnected');
+				chatStore.cleanupRealtimeSubscription?.();
+			}
+		} catch (error) {
+			mobileLogger.log('error', 'network', 'Network status change handler error', { error });
 		}
 	});
 
@@ -37,7 +125,10 @@ createRoot(document.getElementById('root')!).render(
 	window.addEventListener('push:wakeup', (e: any) => {
 		try {
 			const detail = e?.detail || {};
+			console.log('📱 Push wakeup received:', detail);
 			useChatStore.getState().onWake?.(detail?.type || 'data', detail?.group_id);
-		} catch {}
+		} catch (error) {
+			console.error('Push wakeup handler error:', error);
+		}
 	});
 })();

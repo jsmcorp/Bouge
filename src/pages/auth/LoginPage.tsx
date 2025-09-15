@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 
 export default function LoginPage() {
   const [phone, setPhone] = useState('');
@@ -19,9 +19,7 @@ export default function LoginPage() {
 
     setIsLoading(true);
     try {
-      const { error } = await supabase.auth.signInWithOtp({
-        phone: phone.trim(),
-      });
+      const { error } = await supabasePipeline.signInWithOtp(phone.trim());
 
       if (error) {
         toast.error(error.message || 'Failed to send verification code');

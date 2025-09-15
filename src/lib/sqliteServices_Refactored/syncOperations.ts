@@ -1,5 +1,5 @@
 import { DatabaseManager } from './database';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 export class SyncOperations {
@@ -43,16 +43,17 @@ export class SyncOperations {
 
     console.log(`[sync] start group=${groupId} since=${sinceIso || 'none'}`);
 
-    // Fetch from Supabase
+    // Fetch from Supabase via pipeline
     const limit = FEATURES_PUSH.sync.maxBatch;
-    const query = supabase
+    const client = await supabasePipeline.getDirectClient();
+    const query = client
       .from('messages')
       .select('*')
       .eq('group_id', groupId)
       .order('created_at', { ascending: true })
       .limit(limit);
 
-    const { data, error } = sinceIso ? query.gt('created_at', sinceIso) : query;
+    const { data, error } = await (sinceIso ? query.gt('created_at', sinceIso) : query);
     if (error) throw error;
 
     const rows = data || [];

@@ -1,5 +1,5 @@
 import { Message } from './types';
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 
 // Helper function to structure messages with replies nested under parent messages
@@ -112,38 +112,49 @@ export const setOutboxProcessorInterval = (interval: NodeJS.Timeout | null) => {
 
 // Writes auth safety gate — ensures a valid token for WRITES ONLY
 export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrite: boolean; reason?: string }> {
+	const sessionId = `auth-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	console.log(`[auth-debug] ${sessionId} - Starting ensureAuthForWrites`);
+	
 	if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
+		console.log(`[auth-debug] ${sessionId} - Feature disabled, allowing writes`);
 		return { canWrite: true };
 	}
 
 	const limit = typeof timeoutMs === 'number' ? timeoutMs : FEATURES_PUSH.auth.refreshTimeoutMs;
+	console.log(`[auth-debug] ${sessionId} - Using timeout: ${limit}ms`);
 
+	// Initial session check with detailed logging using pipeline
 	try {
-		const sessionResult = await supabase.auth.getSession();
+		console.log(`[auth-debug] ${sessionId} - Getting current session via pipeline...`);
+		const sessionResult = await supabasePipeline.getSession();
+		console.log(`[auth-debug] ${sessionId} - Session result received, checking token...`);
 		const token = sessionResult?.data?.session?.access_token;
 		if (token) {
+			console.log(`[auth-debug] ${sessionId} - Valid token found, writes ready`);
 			console.log('[auth] writes:ready');
 			return { canWrite: true };
 		}
-	} catch {}
-
-	// Try refresh with timeout but do not block UI beyond limit
-	try {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), limit);
-		const refreshPromise = supabase.auth.refreshSession();
-		const outcome = await Promise.race([
-			refreshPromise.then((res) => ({ ok: !!res?.data?.session?.access_token })),
-			new Promise<{ ok: boolean }>((resolve) => controller.signal.addEventListener('abort', () => resolve({ ok: false }))),
-		]);
-		clearTimeout(timeout);
-		if (outcome.ok) {
-			console.log('[auth] writes:ready');
-			return { canWrite: true };
-		}
-		console.log('[auth] writes:blocked reason=refresh_timeout');
-		return { canWrite: false, reason: 'refresh_timeout' };
+		console.log(`[auth-debug] ${sessionId} - No valid token, attempting refresh...`);
 	} catch (e) {
+		console.log(`[auth-debug] ${sessionId} - Session check failed:`, e);
+	}
+
+	// Try refresh with pipeline (already has timeout handling)
+	try {
+		console.log(`[auth-debug] ${sessionId} - Starting pipeline refresh...`);
+		const refreshSuccess = await supabasePipeline.refreshSession();
+		console.log(`[auth-debug] ${sessionId} - Pipeline refresh result: ${refreshSuccess}`);
+		
+		if (refreshSuccess) {
+			console.log(`[auth-debug] ${sessionId} - Refresh successful, writes ready`);
+			console.log('[auth] writes:ready');
+			return { canWrite: true };
+		}
+		console.log(`[auth-debug] ${sessionId} - Refresh failed`);
+		console.log('[auth] writes:blocked reason=refresh_failed');
+		return { canWrite: false, reason: 'refresh_failed' };
+	} catch (e) {
+		console.log(`[auth-debug] ${sessionId} - Refresh error:`, e);
 		console.log('[auth] writes:blocked reason=refresh_error');
 		return { canWrite: false, reason: 'refresh_error' };
 	}

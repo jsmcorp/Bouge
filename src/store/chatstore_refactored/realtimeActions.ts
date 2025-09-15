@@ -1,9 +1,13 @@
-import { supabase, FEATURES } from '@/lib/supabase';
+import { supabasePipeline } from '@/lib/supabasePipeline';
+import { FEATURES } from '@/lib/supabase';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
 import { messageCache } from '@/lib/messageCache';
 import { sqliteService } from '@/lib/sqliteService';
 import { useAuthStore } from '@/store/authStore';
+import { resetOutboxProcessingState } from './offlineActions';
 import { Message, Poll, TypingUser } from './types';
+import { webViewLifecycle } from '@/lib/webViewLifecycle';
+import { mobileLogger } from '@/lib/mobileLogger';
 
 type Author = { display_name: string; avatar_url: string | null };
 
@@ -19,6 +23,7 @@ interface DbMessageRow {
   parent_id: string | null;
   image_url: string | null;
   created_at: string;
+  dedupe_key?: string | null;
 }
 
 interface DbPollRow {
@@ -50,38 +55,161 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let reconnectTimeout: NodeJS.Timeout | null = null;
   let authStateListener: any = null;
   let retryCount = 0;
+  const maxRetries = 5;
   let isConnecting = false; // Guard against overlapping connection attempts
+  let lastForceReconnectAt = 0; // Debounce force reconnects
+  let healthCheckInterval: NodeJS.Timeout | null = null;
+  let lastHealthCheck = 0;
+  let lastMessageReceived = 0;
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
+
+  // Health monitoring functions
+  const startHealthMonitoring = (groupId: string) => {
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+    }
+
+    log('Starting connection health monitoring');
+    healthCheckInterval = setInterval(() => {
+      const now = Date.now();
+      const { connectionStatus } = get();
+
+      // Only monitor if we think we're connected
+      if (connectionStatus !== 'connected') {
+        return;
+      }
+
+      // Check if we haven't received any messages in a while (5 minutes)
+      const timeSinceLastMessage = now - lastMessageReceived;
+      const timeSinceLastHealthCheck = now - lastHealthCheck;
+
+      // If it's been more than 5 minutes since last message and 2 minutes since last health check
+      if (timeSinceLastMessage > 300000 && timeSinceLastHealthCheck > 120000) {
+        log(`Health check: No messages received for ${Math.round(timeSinceLastMessage / 1000)}s, checking connection`);
+        lastHealthCheck = now;
+
+        // Perform a lightweight health check by trying to get session
+        supabasePipeline.getWorkingSession()
+          .then(session => {
+            if (!session) {
+              log('Health check: No valid session, triggering reconnect');
+              get().forceReconnect(groupId);
+            } else {
+              log('Health check: Session valid, connection appears healthy');
+            }
+          })
+          .catch(error => {
+            log(`Health check: Session check failed, triggering reconnect: ${error}`);
+            get().forceReconnect(groupId);
+          });
+      }
+    }, 60000); // Check every minute
+  };
+
+  const stopHealthMonitoring = () => {
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+      healthCheckInterval = null;
+      log('Stopped connection health monitoring');
+    }
+  };
+
+  const recordMessageReceived = () => {
+    lastMessageReceived = Date.now();
+  };
+
+  // Get a usable access token with a bounded wait. Returns null if unavailable in time.
+  async function getAccessTokenBounded(limitMs: number): Promise<string | null> {
+    try {
+      const sessionRace = Promise.race([
+        (async () => {
+          const session = await supabasePipeline.getWorkingSession();
+          return session?.access_token || null;
+        })(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(800, limitMs))),
+      ]);
+      let token = await sessionRace;
+      if (token) return token;
+
+      // Try refresh with abortable timeout
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), Math.max(800, limitMs));
+        const refreshRace = Promise.race([
+          (async () => {
+            const success = await supabasePipeline.refreshSession();
+            if (success) {
+              const session = await supabasePipeline.getWorkingSession();
+              return session?.access_token || null;
+            }
+            return null;
+          })(),
+          new Promise<null>((resolve) => controller.signal.addEventListener('abort', () => resolve(null))),
+        ]);
+        token = await refreshRace;
+        clearTimeout(timeout);
+        return token || null;
+      } catch {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
 
   // Simple retry mechanism - 3 second timeout
   const scheduleReconnect = (groupId: string, delayMs?: number) => {
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
     }
-    
-    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 3000, 3000];
+
+    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 6000, 12000, 24000];
     const maxRetries = backoffList.length;
     const nextDelay = typeof delayMs === 'number' ? delayMs : backoffList[Math.min(retryCount, backoffList.length - 1)];
 
     if (retryCount >= maxRetries) {
-      log(`Max retries (${maxRetries}) reached, stopping reconnection attempts`);
+      log(`Max retries (${maxRetries}) reached, attempting hard recovery`);
       set({ connectionStatus: 'disconnected', isReconnecting: false });
-      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
-        console.log(`[rt] degraded backoff=${nextDelay}`);
-        // Start poll fallback
-        try { (get() as any).startPollFallback?.(); } catch {}
-      }
+
+      // Try hard recovery before giving up
+      setTimeout(async () => {
+        try {
+          log('Attempting hard client recreation for recovery');
+          await supabasePipeline.hardRecreateClient('max-retries-recovery');
+
+          // Wait a bit then try one more time
+          setTimeout(() => {
+            log('Retrying connection after hard recreation');
+            retryCount = 0; // Reset retry count
+            get().setupRealtimeSubscription(groupId);
+          }, 2000);
+        } catch (error) {
+          log(`Hard recovery failed, starting poll fallback: ${error}`);
+          if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+            try { (get() as any).startPollFallback?.(); } catch {}
+          }
+        }
+      }, 5000);
       return;
     }
 
     retryCount++;
     log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${nextDelay}ms`);
-    
+
     set({ connectionStatus: 'reconnecting', isReconnecting: true });
-    reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = setTimeout(async () => {
       log(`Reconnect attempt ${retryCount} starting...`);
+
+      // Validate network using cached status
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Device offline during reconnect attempt, rescheduling');
+        scheduleReconnect(groupId, 5000);
+        return;
+      }
+
       get().setupRealtimeSubscription(groupId);
     }, nextDelay);
   };
@@ -122,7 +250,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // Fallback to Supabase query (single, cached thereafter)
     try {
-      const { data, error } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data, error } = await client
         .from('users')
         .select('display_name, avatar_url')
         .eq('id', userId)
@@ -179,6 +308,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       reply_count: 0,
       replies: [],
       delivery_status: 'delivered',
+      dedupe_key: row.dedupe_key ?? null,
       // Do NOT attach poll here to avoid double-fetch; poll handler will attach
     } as Message;
   }
@@ -188,38 +318,99 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     if (message.parent_id) {
       const parentMessage = state.messages.find((m: Message) => m.id === message.parent_id);
-      const replyExists = parentMessage?.replies?.some((r: Message) => r.id === message.id);
-      if (!replyExists) {
-        const updatedMessages = state.messages.map((m: Message) => {
-          if (m.id === message.parent_id) {
+
+      // If parent present, attempt dedupe/replace by dedupe_key first
+      if (parentMessage) {
+        const replies = parentMessage.replies || [];
+        const idxByDedupe = message.dedupe_key
+          ? replies.findIndex((r: Message) => r.dedupe_key && r.dedupe_key === message.dedupe_key)
+          : -1;
+        const existsById = replies.some((r: Message) => r.id === message.id);
+
+        let updatedMessages: Message[] = state.messages;
+
+        if (idxByDedupe !== -1) {
+          // Replace optimistic reply with server reply; do NOT increment reply_count
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = [...(m.replies || [])];
+            newReplies[idxByDedupe] = message;
+            return { ...m, replies: newReplies } as Message;
+          });
+        } else if (!existsById) {
+          // Append new reply and increment reply_count; keep only first 3 in preview
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = [...(m.replies || []), message];
             return {
               ...m,
               reply_count: (m.reply_count || 0) + 1,
-              replies: [...(m.replies || []), message].slice(0, 3),
-            };
-          }
-          return m;
-        });
-        set({ messages: updatedMessages });
-      }
+              replies: newReplies.slice(0, 3),
+            } as Message;
+          });
+        } else {
+          // Already present by id – ensure status is delivered
+          updatedMessages = state.messages.map((m: Message) => {
+            if (m.id !== message.parent_id) return m;
+            const newReplies = (m.replies || []).map((r: Message) => (
+              r.id === message.id ? { ...r, delivery_status: 'delivered' as const } : r
+            ));
+            return { ...m, replies: newReplies } as Message;
+          });
+        }
 
-      if (state.activeThread?.id === message.parent_id) {
-        const threadReplyExists = state.threadReplies.some((r: Message) => r.id === message.id);
-        if (!threadReplyExists) {
-          set({ threadReplies: [...state.threadReplies, message] });
+        set({ messages: updatedMessages });
+        try {
+          messageCache.setCachedMessages(message.group_id, [...updatedMessages]);
+        } catch (err) {
+          console.error('❌ Message cache update failed:', err);
+        }
+
+        // Update active thread replies if open
+        if (state.activeThread?.id === message.parent_id) {
+          const idxThreadByDedupe = message.dedupe_key
+            ? state.threadReplies.findIndex((r: Message) => r.dedupe_key && r.dedupe_key === message.dedupe_key)
+            : -1;
+          const existsThreadById = state.threadReplies.some((r: Message) => r.id === message.id);
+          if (idxThreadByDedupe !== -1) {
+            const updatedReplies = [...state.threadReplies];
+            updatedReplies[idxThreadByDedupe] = message;
+            set({ threadReplies: updatedReplies });
+          } else if (!existsThreadById) {
+            set({ threadReplies: [...state.threadReplies, message] });
+          } else {
+            const updatedReplies = state.threadReplies.map((r: Message) => (
+              r.id === message.id ? { ...r, delivery_status: 'delivered' as const } : r
+            ));
+            set({ threadReplies: updatedReplies });
+          }
         }
       }
     } else {
-      const exists = state.messages.some((m: Message) => m.id === message.id);
-      if (!exists) {
-        get().addMessage(message);
+      // Root message: dedupe by id first, then by dedupe_key
+      const existsById = state.messages.some((m: Message) => m.id === message.id);
+      let messagesAfter: Message[] = state.messages;
+
+      if (existsById) {
+        messagesAfter = state.messages.map((m: Message) => (
+          m.id === message.id ? { ...m, delivery_status: 'delivered' } : m
+        ));
       } else {
-        get().updateMessage(message.id, { delivery_status: 'delivered' });
+        const idxByDedupe = message.dedupe_key
+          ? state.messages.findIndex((m: Message) => m.dedupe_key && m.dedupe_key === message.dedupe_key)
+          : -1;
+        if (idxByDedupe !== -1) {
+          messagesAfter = state.messages.map((m: Message, idx: number) => (
+            idx === idxByDedupe ? { ...message } : m
+          ));
+        } else {
+          messagesAfter = [...state.messages, message];
+        }
       }
 
+      set({ messages: messagesAfter });
       try {
-        const latestMessages = get().messages;
-        messageCache.setCachedMessages(message.group_id, [...latestMessages]);
+        messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
         console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
       } catch (err) {
         console.error('❌ Message cache update failed:', err);
@@ -233,7 +424,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // Verify poll belongs to the current group
     try {
-      const { data: msgRef, error: msgErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: msgRef, error: msgErr } = await client
         .from('messages')
         .select('group_id')
         .eq('id', pollRow.message_id)
@@ -251,7 +443,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     let votesCount = 0;
     let voteCounts: number[] = [];
     try {
-      const { data: votes, error: votesErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: votes, error: votesErr } = await client
         .from('poll_votes')
         .select('option_index')
         .eq('poll_id', pollRow.id);
@@ -272,7 +465,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     let userVoteIndex: number | null = null;
     try {
-      const { data: uv, error: uvErr } = await supabase
+      const client = await supabasePipeline.getDirectClient();
+      const { data: uv, error: uvErr } = await client
         .from('poll_votes')
         .select('option_index')
         .eq('poll_id', pollRow.id)
@@ -325,7 +519,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       
       // For simplified version, just check if we have a session
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        const client = await supabasePipeline.getDirectClient();
+        const { data: { session } } = await client.auth.getSession();
         return { ok: !!session?.access_token };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
@@ -346,9 +541,35 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         log('Connection already in progress, skipping');
         return;
       }
-      
+
+      // Check WebView readiness first
+      mobileLogger.log('info', 'webview', 'Checking WebView readiness for realtime setup');
+      const webViewReady = await webViewLifecycle.waitForReady(5000);
+      if (!webViewReady) {
+        log('WebView not ready, skipping realtime setup');
+        mobileLogger.log('warn', 'webview', 'WebView not ready for realtime setup');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Check network connectivity using cached status from store
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Device is offline (cached status), skipping realtime setup');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Check if we already have a healthy connection for this group
+      const { connectionStatus, realtimeChannel } = get();
+      if (connectionStatus === 'connected' && realtimeChannel) {
+        log('Already connected to realtime, skipping setup');
+        return;
+      }
+
       isConnecting = true;
       log(`Setting up simplified realtime subscription for group: ${groupId}`);
+      mobileLogger.startTiming('realtime-setup', 'connection', { groupId });
 
       try {
         log('Skipping blocking auth check; proceeding with local auth state');
@@ -358,29 +579,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const userId: string = authState?.user?.id || 'anonymous';
         const user = { id: userId } as { id: string };
 
-        // Non-blocking: try to refresh realtime auth token in the background
-        // This does NOT gate the subscription setup to avoid timeouts on resume.
-        supabase.auth.getSession()
-          .then(({ data: { session } }) => {
-            try {
-              (supabase as any).realtime?.setAuth?.(session?.access_token);
-            } catch (_) {}
-          })
-          .catch(() => {});
+        // Ensure realtime has a valid token before subscribing (bounded wait)
+        const accessToken = await getAccessTokenBounded(FEATURES_PUSH.auth.refreshTimeoutMs);
+        try {
+          const client = await supabasePipeline.getDirectClient();
+          (client as any).realtime?.setAuth?.(accessToken || undefined);
+        } catch (_) {}
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         connectionToken = localToken;
 
-        // Clean up previous subscription
-        get().cleanupRealtimeSubscription();
+        // Only clean up if we're not already connecting to avoid excessive teardown
+        if (connectionStatus !== 'connecting') {
+          get().cleanupRealtimeSubscription();
+        }
         set({ connectionStatus: 'connecting' });
 
         // Create channel with simple config and unique name
         const channelName = `group-${groupId}-${localToken}`;
         log(`Creating channel: ${channelName}`);
         
-        const channel = supabase.channel(channelName, {
+        const client = await supabasePipeline.getDirectClient();
+        const channel = client.channel(channelName, {
           config: { 
             presence: { key: user.id },
             broadcast: { self: true }
@@ -393,10 +614,36 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload) => {
           if (localToken !== connectionToken) return; // Ignore stale callbacks
           bumpActivity();
+          recordMessageReceived(); // Record message for health monitoring
           const row = payload.new as DbMessageRow;
           try {
             const message = await buildMessageFromRow(row);
             attachMessageToState(message);
+            // Persist to local storage immediately to avoid disappearing on navigation
+            try {
+              const { Capacitor } = await import('@capacitor/core');
+              const isNative = Capacitor.isNativePlatform();
+              if (isNative) {
+                const ready = await sqliteService.isReady();
+                if (ready) {
+                  await sqliteService.saveMessage({
+                    id: row.id,
+                    group_id: row.group_id,
+                    user_id: row.user_id,
+                    content: row.content,
+                    is_ghost: row.is_ghost ? 1 : 0,
+                    message_type: row.message_type,
+                    category: row.category || null,
+                    parent_id: row.parent_id || null,
+                    image_url: row.image_url || null,
+                    created_at: new Date(row.created_at).getTime(),
+                  });
+                  try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}
+                }
+              }
+            } catch (persistErr) {
+              console.warn('⚠️ Failed to persist realtime message locally:', persistErr);
+            }
           } catch (e) {
             log('Failed to process message insert: ' + e);
           }
@@ -466,11 +713,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
+              // Clear subscribe watchdog if set
+              const { reconnectWatchdogTimer } = get();
+              if (reconnectWatchdogTimer) {
+                clearTimeout(reconnectWatchdogTimer as any);
+                set({ reconnectWatchdogTimer: null });
+              }
               resetRetryCount(); // Reset on successful connection
+              resetOutboxProcessingState(); // Reset outbox state on successful connection
+              recordMessageReceived(); // Initialize health monitoring timestamp
+              startHealthMonitoring(groupId); // Start health monitoring
               isConnecting = false; // Clear the guard
-              set({ 
-                connectionStatus: 'connected', 
-                realtimeChannel: channel, 
+              set({
+                connectionStatus: 'connected',
+                realtimeChannel: channel,
                 subscribedAt: Date.now(),
                 isReconnecting: false
               });
@@ -481,27 +737,74 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
               startSimpleHeartbeat(groupId);
 
+              // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
+              try {
+                const { triggerOutboxProcessing } = get();
+                if (typeof triggerOutboxProcessing === 'function') {
+                  setTimeout(() => triggerOutboxProcessing('realtime-connected', 'normal'), 1000);
+                }
+              } catch {}
+
               // Fetch messages if list is empty
               try {
                 const state = get();
                 if (state.messages?.length === 0 && typeof state.fetchMessages === 'function') {
-                  state.fetchMessages(groupId);
+                  setTimeout(() => state.fetchMessages(groupId), 150);
                 }
               } catch (e) {
                 log('Background message fetch failed: ' + e);
               }
             } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
+              // Clear subscribe watchdog if set
+              const { reconnectWatchdogTimer } = get();
+              if (reconnectWatchdogTimer) {
+                clearTimeout(reconnectWatchdogTimer as any);
+                set({ reconnectWatchdogTimer: null });
+              }
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
-              
-              // Check if we have a valid session before retrying
-              const { data: { session: currentSession } } = await supabase.auth.getSession();
-              if (!currentSession?.access_token) {
-                log('No valid session found, stopping retries');
-                set({ connectionStatus: 'disconnected', isReconnecting: false });
-                return;
+
+              // Enhanced handling for CHANNEL_ERROR - try session refresh first, avoid excessive rebuilds
+              if (status === 'CHANNEL_ERROR') {
+                log('🔧 CHANNEL_ERROR detected - attempting session refresh');
+
+                // Only try session refresh, avoid full client rebuild unless absolutely necessary
+                try {
+                  const session = await supabasePipeline.getWorkingSession();
+                  if (session?.access_token) {
+                    log('🔧 CHANNEL_ERROR: Applying working session to realtime');
+                    try {
+                      const client = await supabasePipeline.getDirectClient();
+                      (client as any).realtime?.setAuth?.(session.access_token);
+                    } catch {}
+                  } else {
+                    log('🔧 CHANNEL_ERROR: No working session available');
+                  }
+                } catch (e) {
+                  log(`🔧 CHANNEL_ERROR: Session refresh error: ${e}`);
+                }
+              } else {
+                // Standard session refresh for CLOSED/TIMED_OUT using pipeline
+                let currentSession: any = null;
+                try {
+                  currentSession = await supabasePipeline.getWorkingSession();
+                } catch (_) {}
+                if (!currentSession?.access_token) {
+                  try {
+                    const refreshed = await supabasePipeline.refreshSession();
+                    if (refreshed) {
+                      currentSession = await supabasePipeline.getWorkingSession();
+                    }
+                  } catch (_) {}
+                }
+
+                // Update realtime auth with whatever token we have (may be undefined)
+                try { 
+                  const client = await supabasePipeline.getDirectClient();
+                  (client as any).realtime?.setAuth?.(currentSession?.access_token); 
+                } catch (_) {}
               }
-              
+
               set({ connectionStatus: 'disconnected' });
               scheduleReconnect(groupId);
               if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
@@ -515,6 +818,25 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             }
           }, 10000); // 10 second timeout
 
+        // Subscribe watchdog: if we don't reach SUBSCRIBED within a bound, rebuild
+        try {
+          const watchdog = setTimeout(async () => {
+            if (localToken !== connectionToken) return;
+            const state = get();
+            if (state.connectionStatus !== 'connected') {
+              log('Subscribe watchdog timeout, rebuilding connection');
+              isConnecting = false;
+              try { 
+                const client = await supabasePipeline.getDirectClient();
+                client.removeChannel(channel); 
+              } catch {}
+              set({ connectionStatus: 'disconnected' });
+              scheduleReconnect(groupId, 300);
+            }
+          }, Math.max(8000, FEATURES_PUSH.auth.refreshTimeoutMs + 500));
+          set({ reconnectWatchdogTimer: watchdog as any });
+        } catch {}
+
       } catch (error) {
         log('Setup error: ' + (error as Error).message);
         isConnecting = false; // Clear the guard
@@ -523,17 +845,20 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
     },
 
-    cleanupRealtimeSubscription: () => {
-      const { realtimeChannel, typingTimeout, heartbeatTimer } = get();
+    cleanupRealtimeSubscription: async () => {
+      const { realtimeChannel, typingTimeout, heartbeatTimer, reconnectWatchdogTimer } = get();
 
       log('Cleaning up realtime subscription');
       isConnecting = false; // Clear connection guard
+      resetOutboxProcessingState(); // Reset outbox state on cleanup
+      stopHealthMonitoring(); // Stop health monitoring
 
       if (typingTimeout) clearTimeout(typingTimeout);
       
       if (realtimeChannel) {
         try {
-          supabase.removeChannel(realtimeChannel);
+          const client = await supabasePipeline.getDirectClient();
+          client.removeChannel(realtimeChannel);
         } catch (e) {
           log('Error removing channel: ' + e);
         }
@@ -543,6 +868,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer as any);
         set({ heartbeatTimer: null });
+      }
+
+      if (reconnectWatchdogTimer) {
+        clearTimeout(reconnectWatchdogTimer as any);
+        set({ reconnectWatchdogTimer: null });
       }
 
       if (reconnectTimeout) {
@@ -633,12 +963,39 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     // New simplified methods
-    forceReconnect: (groupId: string) => {
-      log('Force reconnect requested');
-      resetRetryCount();
-      get().cleanupRealtimeSubscription();
-      set({ connectionStatus: 'connecting' });
-      setTimeout(() => get().setupRealtimeSubscription(groupId), 100);
+    forceReconnect: async (groupId: string) => {
+      const { connectionStatus } = get();
+      if (connectionStatus === 'connecting') {
+        log('Force reconnect requested but already connecting; skipping duplicate');
+        return;
+      }
+
+      // Debounce force reconnects to prevent excessive calls
+      const now = Date.now();
+      if (now - lastForceReconnectAt < 1500) {
+        log('Force reconnect debounced (too soon after last attempt)');
+        return;
+      }
+      lastForceReconnectAt = now;
+
+      log('Force reconnect requested - delegating to reconnection manager');
+
+      // Validate network connectivity using cached status
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Force reconnect: Device is offline, setting disconnected status');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Use the reconnection manager to prevent race conditions
+      try {
+        const { reconnectionManager } = await import('@/lib/reconnectionManager');
+        await reconnectionManager.reconnect('force-reconnect');
+      } catch (error) {
+        log(`Force reconnect failed: ${error}`);
+        scheduleReconnect(groupId, 2000);
+      }
     },
 
     setupAuthListener: () => {
@@ -654,21 +1011,39 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       log('Setting up auth state listener for realtime');
       
-      authStateListener = supabase.auth.onAuthStateChange((event, _session) => {
-        const state = get();
-        const activeGroupId = state.activeGroup?.id;
-        
-        log(`Auth event: ${event}`);
-        
-        if (event === 'TOKEN_REFRESHED' && activeGroupId) {
-          log('Token refreshed, reconnecting realtime');
-          // Force fresh connection with new token
-          get().forceReconnect(activeGroupId);
-        } else if (event === 'SIGNED_OUT') {
-          log('User signed out, cleaning up realtime');
-          get().cleanupRealtimeSubscription();
+      (async () => {
+        try {
+          const res = await supabasePipeline.onAuthStateChange((event, session) => {
+            const state = get();
+            const activeGroupId = state.activeGroup?.id;
+            
+            log(`Auth event: ${event}`);
+            
+            if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+              // Always apply the latest token to realtime
+              try { (supabasePipeline as any).getDirectClient?.().then((c: any) => c?.realtime?.setAuth?.(session?.access_token)).catch(() => {}); } catch {}
+              if (activeGroupId) {
+                log('Token applied, reconnecting realtime');
+                get().forceReconnect(activeGroupId);
+              }
+              // Reset outbox state and kick processing after token events using unified system (delayed to avoid redundant triggers)
+              resetOutboxProcessingState();
+              try {
+                const { triggerOutboxProcessing } = get();
+                if (typeof triggerOutboxProcessing === 'function') {
+                  setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+                }
+              } catch {}
+            } else if (event === 'SIGNED_OUT') {
+              log('User signed out, cleaning up realtime');
+              get().cleanupRealtimeSubscription();
+            }
+          });
+          authStateListener = res.data.subscription;
+        } catch (error) {
+          log('Error setting up auth listener: ' + error);
         }
-      }).data.subscription;
+      })();
 
       return () => {
         if (authStateListener) {

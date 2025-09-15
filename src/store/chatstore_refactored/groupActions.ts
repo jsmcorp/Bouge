@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Group, GroupMember, GroupMedia } from './types';
@@ -14,25 +14,23 @@ export interface GroupActions {
 export const createGroupActions = (set: any, get: any): GroupActions => ({
   createGroup: async (name: string, description?: string) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
       const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
-      const { data, error } = await supabase
-        .from('groups')
-        .insert({
-          name,
-          description,
-          invite_code: inviteCode,
-          created_by: user.id,
-        })
-        .select()
-        .single();
+      const { data, error } = await supabasePipeline.createGroup({
+        name,
+        description,
+        invite_code: inviteCode,
+        created_by: user.id,
+      });
 
       if (error) throw error;
 
-      const { error: memberError } = await supabase
+      // Add user as group member via direct client
+      const client = await supabasePipeline.getDirectClient();
+      const { error: memberError } = await client
         .from('group_members')
         .insert({
           group_id: data.id,
@@ -61,10 +59,11 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
         });
 
         // Also save the current user to local storage
-        const { data: { user } } = await supabase.auth.getUser();
+        const { data: { user } } = await supabasePipeline.getUser();
         if (user) {
           // Get user profile data
-          const { data: userProfile } = await supabase
+          const client = await supabasePipeline.getDirectClient();
+          const { data: userProfile } = await client
             .from('users')
             .select('*')
             .eq('id', user.id)
@@ -77,7 +76,7 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
               phone_number: userProfile.phone_number || null,
               avatar_url: userProfile.avatar_url || null,
               is_onboarded: userProfile.is_onboarded ? 1 : 0,
-              created_at: new Date(userProfile.created_at).getTime()
+              created_at: SupabasePipeline.safeTimestamp(userProfile.created_at)
             });
           }
 
@@ -102,34 +101,18 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
 
   joinGroup: async (inviteCode: string) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      const { data: group, error: groupError } = await supabase
-        .from('groups')
-        .select('*')
-        .eq('invite_code', inviteCode.toUpperCase())
-        .single();
+      // Use pipeline to join group (handles finding group and adding member)
+      const { data: group, error } = await supabasePipeline.joinGroup(inviteCode.toUpperCase(), user.id);
 
-      if (groupError) throw new Error('Invalid invite code');
-
-      const { data: existingMember } = await supabase
-        .from('group_members')
-        .select('*')
-        .eq('group_id', group.id)
-        .eq('user_id', user.id)
-        .maybeSingle();
-
-      if (existingMember) throw new Error('Already a member of this group');
-
-      const { error: memberError } = await supabase
-        .from('group_members')
-        .insert({
-          group_id: group.id,
-          user_id: user.id,
-        });
-
-      if (memberError) throw memberError;
+      if (error) {
+        if (error.message?.includes('duplicate key value')) {
+          throw new Error('Already a member of this group');
+        }
+        throw new Error('Invalid invite code');
+      }
 
       const newGroups = [...get().groups, group];
       set({ groups: newGroups });
@@ -170,14 +153,7 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
     try {
       set({ isLoadingGroupDetails: true });
 
-      const { data, error } = await supabase
-        .from('group_members')
-        .select(`
-          *,
-          users!group_members_user_id_fkey(display_name, phone_number, avatar_url)
-        `)
-        .eq('group_id', groupId)
-        .order('joined_at', { ascending: true });
+      const { data, error } = await supabasePipeline.fetchGroupMembers(groupId);
 
       if (error) throw error;
 

@@ -1,8 +1,8 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
+import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES } from '@/lib/supabase';
-import { FEATURES_PUSH } from '@/lib/featureFlags';
-import { ensureAuthForWrites } from './utils';
-import { Network } from '@capacitor/network';
+
+// Resume/unlock flow is owned exclusively by supabasePipeline.onAppResume()
 
 export interface StateActions {
   setGroups: (groups: Group[]) => void;
@@ -35,6 +35,8 @@ export interface StateActions {
   // Connection manager facade
   onAppResume: () => void;
   onAppResumeSimplified: () => void;
+  onAppPause: () => void;
+  onAppBackground: () => void;
   onNetworkOnline: () => void;
   onNetworkOnlineSimplified: () => void;
   onWake: (reason?: string, groupId?: string) => Promise<void>;
@@ -169,75 +171,51 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
   onAppResumeSimplified: () => {
     const { activeGroup } = get() as any;
-    
     if (!activeGroup?.id) {
       console.log('[realtime-v2] No active group, skipping resume');
       return;
     }
-
-    console.log('[realtime-v2] App resumed, forcing fresh connection');
-    
-    // Force a fresh connection on app resume (requirement #2)
-    const { forceReconnect } = get();
-    if (typeof forceReconnect === 'function') {
-      forceReconnect(activeGroup.id);
-    } else {
-      // Fallback if forceReconnect not available yet
-      get().cleanupRealtimeSubscription();
-      setTimeout(() => get().setupRealtimeSubscription(activeGroup.id), 100);
-    }
+    // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
+    supabasePipeline.onAppResume().catch(error => {
+      console.error('[realtime-v2] Pipeline app resume failed:', error);
+    });
   },
 
   // Central onWake(reason, groupId?) orchestrates: ensureAuthForWrites (writes only) → realtime rebuild → syncMissed → outbox
-  onWake: async (reason?: string, groupIdOverride?: string) => {
+  onWake: async (_reason?: string, _groupIdOverride?: string) => {
     try {
-      if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
-        return get().onAppResumeSimplified();
-      }
-
-      const state = get();
-      const activeGroupId = groupIdOverride || state.activeGroup?.id;
-      console.log(`[push] wake reason=${reason || 'unknown'}`);
-
-      // 1) Ensure auth for writes (non-blocking for realtime)
-      const authRes = await ensureAuthForWrites();
-      set({ writesBlocked: !authRes.canWrite });
-
-      // 2) Realtime reset (non-blocking)
-      if (activeGroupId) {
-        console.log(`[rt] rebuild channel=group-${activeGroupId} status=REQUESTED`);
-        const { forceReconnect } = get();
-        if (typeof forceReconnect === 'function') {
-          forceReconnect(activeGroupId);
-        } else {
-          get().cleanupRealtimeSubscription();
-          setTimeout(() => get().setupRealtimeSubscription(activeGroupId), 50);
-        }
-      }
-
-      // 3) Missed messages resync (bounded)
-      if (activeGroupId && typeof (get() as any).syncMissed === 'function') {
-        await (get() as any).syncMissed(activeGroupId);
-      }
-
-      // 4) Outbox drain gating on writes and network
-      const net = await Network.getStatus();
-      if (net.connected) {
-        if (!get().writesBlocked && typeof (get() as any).processOutbox === 'function') {
-          await (get() as any).processOutbox();
-        } else if (get().writesBlocked) {
-          console.log('[outbox] deferred reason=auth_refresh');
-          setTimeout(async () => {
-            const retry = await ensureAuthForWrites();
-            set({ writesBlocked: !retry.canWrite });
-            if (retry.canWrite && typeof (get() as any).processOutbox === 'function') {
-              await (get() as any).processOutbox();
-            }
-          }, FEATURES_PUSH.outbox.retryShortDelayMs);
-        }
-      }
+      // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
+      await get().onAppResumeSimplified();
     } catch (e) {
       console.warn('onWake error:', e);
+    }
+  },
+
+  // App pause handler - reset outbox flags to prevent stuck state after resume
+  // To wire up: In your main app component or lifecycle handler, call this when the app pauses
+  // Example: App.addListener('appStateChange', (state) => { if (state.isActive === false) chatStore.onAppPause(); });
+  onAppPause: () => {
+    console.log('[lifecycle] App paused - resetting outbox processing state');
+    try {
+      import('./offlineActions').then(({ resetOutboxProcessingState }) => {
+        resetOutboxProcessingState();
+      });
+    } catch (e) {
+      console.warn('Failed to reset outbox state on app pause:', e);
+    }
+  },
+
+  // App background handler - similar to pause but may have different lifecycle timing
+  // To wire up: Call this when app moves to background (Android onPause, iOS applicationDidEnterBackground)
+  // Example: Capacitor.addListener('appStateChange', (state) => { if (!state.isActive) chatStore.onAppBackground(); });
+  onAppBackground: () => {
+    console.log('[lifecycle] App moved to background - resetting outbox processing state');
+    try {
+      import('./offlineActions').then(({ resetOutboxProcessingState }) => {
+        resetOutboxProcessingState();
+      });
+    } catch (e) {
+      console.warn('Failed to reset outbox state on app background:', e);
     }
   },
 
@@ -252,11 +230,19 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
   onNetworkOnlineSimplified: () => {
     console.log('[realtime-v2] Network came online');
-    const { processOutbox, activeGroup, connectionStatus } = get();
+    const { triggerOutboxProcessing, activeGroup, connectionStatus } = get();
     
-    // Process any pending messages first
-    if (typeof processOutbox === 'function') {
-      processOutbox().catch((e: any) => console.error('Outbox process error:', e));
+    // Notify pipeline about network reconnection
+    import('@/lib/supabasePipeline').then(({ supabasePipeline }) => {
+      supabasePipeline.onNetworkReconnect();
+    }).catch(error => {
+      console.warn('[realtime-v2] Failed to notify pipeline of network reconnect:', error);
+    });
+    
+    // Only trigger outbox processing, don't reset state as that causes redundant triggers
+    console.log('[realtime-v2] Network online - triggering outbox processing only');
+    if (typeof triggerOutboxProcessing === 'function') {
+      triggerOutboxProcessing('network-online', 'high');
     }
     
     // If we have an active group and aren't connected, reconnect
