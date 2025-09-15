@@ -553,8 +553,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
 
       // Check network connectivity using cached status from store
-      const { isOnline } = get();
-      if (!isOnline) {
+      const { online } = get();
+      if (!online) {
         log('Device is offline (cached status), skipping realtime setup');
         set({ connectionStatus: 'disconnected' });
         return;
@@ -595,6 +595,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           get().cleanupRealtimeSubscription();
         }
         set({ connectionStatus: 'connecting' });
+
+        // Update WhatsApp-style connection status
+        try {
+          const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
+          whatsappConnection.setConnectionState('connecting', 'Connecting...');
+        } catch {}
 
         // Create channel with simple config and unique name
         const channelName = `group-${groupId}-${localToken}`;
@@ -732,6 +738,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               });
               log('✅ Realtime connected successfully');
 
+              // Update WhatsApp-style connection status
+              try {
+                const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
+                whatsappConnection.setConnectionState('connected', 'Connected');
+              } catch {}
+
               // Stop degraded poll fallback when connected
               try { (get() as any).stopPollFallback?.(); } catch {}
 
@@ -841,6 +853,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         log('Setup error: ' + (error as Error).message);
         isConnecting = false; // Clear the guard
         set({ connectionStatus: 'disconnected' });
+
+        // Update WhatsApp-style connection status
+        try {
+          const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
+          whatsappConnection.setConnectionState('disconnected', 'Connection failed');
+        } catch {}
+
         scheduleReconnect(groupId);
       }
     },
@@ -881,13 +900,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
 
       // Clear typing users and reset status
-      set({ 
-        connectionStatus: 'disconnected', 
-        typingUsers: [], 
+      set({
+        connectionStatus: 'disconnected',
+        typingUsers: [],
         typingTimeout: null,
         subscribedAt: null,
         isReconnecting: false
       });
+
+      // Update WhatsApp-style connection status
+      try {
+        const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
+        whatsappConnection.setConnectionState('disconnected', 'Disconnected');
+      } catch {}
     },
 
     sendTypingStatus: (isTyping: boolean, isGhost = false) => {

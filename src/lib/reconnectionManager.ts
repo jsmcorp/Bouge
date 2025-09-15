@@ -177,8 +177,8 @@ class ReconnectionManager {
       // Check cached network status from store
       const mod = await import('@/store/chatstore_refactored');
       const state = (mod as any).useChatStore?.getState?.();
-      
-      if (state?.isOnline === false) {
+
+      if (state?.online === false) {
         throw new Error('Network is offline');
       }
       
