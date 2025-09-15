@@ -6,6 +6,8 @@ import { sqliteService } from '@/lib/sqliteService';
 import { useAuthStore } from '@/store/authStore';
 import { resetOutboxProcessingState } from './offlineActions';
 import { Message, Poll, TypingUser } from './types';
+import { webViewLifecycle } from '@/lib/webViewLifecycle';
+import { mobileLogger } from '@/lib/mobileLogger';
 
 type Author = { display_name: string; avatar_url: string | null };
 
@@ -55,18 +57,76 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let retryCount = 0;
   const maxRetries = 5;
   let isConnecting = false; // Guard against overlapping connection attempts
+  let lastForceReconnectAt = 0; // Debounce force reconnects
+  let healthCheckInterval: NodeJS.Timeout | null = null;
+  let lastHealthCheck = 0;
+  let lastMessageReceived = 0;
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
+
+  // Health monitoring functions
+  const startHealthMonitoring = (groupId: string) => {
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+    }
+
+    log('Starting connection health monitoring');
+    healthCheckInterval = setInterval(() => {
+      const now = Date.now();
+      const { connectionStatus } = get();
+
+      // Only monitor if we think we're connected
+      if (connectionStatus !== 'connected') {
+        return;
+      }
+
+      // Check if we haven't received any messages in a while (5 minutes)
+      const timeSinceLastMessage = now - lastMessageReceived;
+      const timeSinceLastHealthCheck = now - lastHealthCheck;
+
+      // If it's been more than 5 minutes since last message and 2 minutes since last health check
+      if (timeSinceLastMessage > 300000 && timeSinceLastHealthCheck > 120000) {
+        log(`Health check: No messages received for ${Math.round(timeSinceLastMessage / 1000)}s, checking connection`);
+        lastHealthCheck = now;
+
+        // Perform a lightweight health check by trying to get session
+        supabasePipeline.getWorkingSession()
+          .then(session => {
+            if (!session) {
+              log('Health check: No valid session, triggering reconnect');
+              get().forceReconnect(groupId);
+            } else {
+              log('Health check: Session valid, connection appears healthy');
+            }
+          })
+          .catch(error => {
+            log(`Health check: Session check failed, triggering reconnect: ${error}`);
+            get().forceReconnect(groupId);
+          });
+      }
+    }, 60000); // Check every minute
+  };
+
+  const stopHealthMonitoring = () => {
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+      healthCheckInterval = null;
+      log('Stopped connection health monitoring');
+    }
+  };
+
+  const recordMessageReceived = () => {
+    lastMessageReceived = Date.now();
+  };
 
   // Get a usable access token with a bounded wait. Returns null if unavailable in time.
   async function getAccessTokenBounded(limitMs: number): Promise<string | null> {
     try {
       const sessionRace = Promise.race([
         (async () => {
-          const client = await supabasePipeline.getDirectClient();
-          const res = await client.auth.getSession();
-          return res?.data?.session?.access_token || null;
+          const session = await supabasePipeline.getWorkingSession();
+          return session?.access_token || null;
         })(),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(800, limitMs))),
       ]);
@@ -81,9 +141,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           (async () => {
             const success = await supabasePipeline.refreshSession();
             if (success) {
-              const client = await supabasePipeline.getDirectClient();
-              const res = await client.auth.getSession();
-              return res?.data?.session?.access_token || null;
+              const session = await supabasePipeline.getWorkingSession();
+              return session?.access_token || null;
             }
             return null;
           })(),
@@ -105,28 +164,52 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
     }
-    
-    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 3000, 3000];
+
+    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 6000, 12000, 24000];
     const maxRetries = backoffList.length;
     const nextDelay = typeof delayMs === 'number' ? delayMs : backoffList[Math.min(retryCount, backoffList.length - 1)];
 
     if (retryCount >= maxRetries) {
-      log(`Max retries (${maxRetries}) reached, stopping reconnection attempts`);
+      log(`Max retries (${maxRetries}) reached, attempting hard recovery`);
       set({ connectionStatus: 'disconnected', isReconnecting: false });
-      if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
-        console.log(`[rt] degraded backoff=${nextDelay}`);
-        // Start poll fallback
-        try { (get() as any).startPollFallback?.(); } catch {}
-      }
+
+      // Try hard recovery before giving up
+      setTimeout(async () => {
+        try {
+          log('Attempting hard client recreation for recovery');
+          await supabasePipeline.hardRecreateClient('max-retries-recovery');
+
+          // Wait a bit then try one more time
+          setTimeout(() => {
+            log('Retrying connection after hard recreation');
+            retryCount = 0; // Reset retry count
+            get().setupRealtimeSubscription(groupId);
+          }, 2000);
+        } catch (error) {
+          log(`Hard recovery failed, starting poll fallback: ${error}`);
+          if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
+            try { (get() as any).startPollFallback?.(); } catch {}
+          }
+        }
+      }, 5000);
       return;
     }
 
     retryCount++;
     log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${nextDelay}ms`);
-    
+
     set({ connectionStatus: 'reconnecting', isReconnecting: true });
-    reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = setTimeout(async () => {
       log(`Reconnect attempt ${retryCount} starting...`);
+
+      // Validate network using cached status
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Device offline during reconnect attempt, rescheduling');
+        scheduleReconnect(groupId, 5000);
+        return;
+      }
+
       get().setupRealtimeSubscription(groupId);
     }, nextDelay);
   };
@@ -458,9 +541,35 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         log('Connection already in progress, skipping');
         return;
       }
-      
+
+      // Check WebView readiness first
+      mobileLogger.log('info', 'webview', 'Checking WebView readiness for realtime setup');
+      const webViewReady = await webViewLifecycle.waitForReady(5000);
+      if (!webViewReady) {
+        log('WebView not ready, skipping realtime setup');
+        mobileLogger.log('warn', 'webview', 'WebView not ready for realtime setup');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Check network connectivity using cached status from store
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Device is offline (cached status), skipping realtime setup');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Check if we already have a healthy connection for this group
+      const { connectionStatus, realtimeChannel } = get();
+      if (connectionStatus === 'connected' && realtimeChannel) {
+        log('Already connected to realtime, skipping setup');
+        return;
+      }
+
       isConnecting = true;
       log(`Setting up simplified realtime subscription for group: ${groupId}`);
+      mobileLogger.startTiming('realtime-setup', 'connection', { groupId });
 
       try {
         log('Skipping blocking auth check; proceeding with local auth state');
@@ -472,17 +581,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
         // Ensure realtime has a valid token before subscribing (bounded wait)
         const accessToken = await getAccessTokenBounded(FEATURES_PUSH.auth.refreshTimeoutMs);
-        try { 
+        try {
           const client = await supabasePipeline.getDirectClient();
-          (client as any).realtime?.setAuth?.(accessToken || undefined); 
+          (client as any).realtime?.setAuth?.(accessToken || undefined);
         } catch (_) {}
 
         // Generate connection token for this attempt
         const localToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         connectionToken = localToken;
 
-        // Clean up previous subscription
-        get().cleanupRealtimeSubscription();
+        // Only clean up if we're not already connecting to avoid excessive teardown
+        if (connectionStatus !== 'connecting') {
+          get().cleanupRealtimeSubscription();
+        }
         set({ connectionStatus: 'connecting' });
 
         // Create channel with simple config and unique name
@@ -503,6 +614,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload) => {
           if (localToken !== connectionToken) return; // Ignore stale callbacks
           bumpActivity();
+          recordMessageReceived(); // Record message for health monitoring
           const row = payload.new as DbMessageRow;
           try {
             const message = await buildMessageFromRow(row);
@@ -609,10 +721,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               }
               resetRetryCount(); // Reset on successful connection
               resetOutboxProcessingState(); // Reset outbox state on successful connection
+              recordMessageReceived(); // Initialize health monitoring timestamp
+              startHealthMonitoring(groupId); // Start health monitoring
               isConnecting = false; // Clear the guard
-              set({ 
-                connectionStatus: 'connected', 
-                realtimeChannel: channel, 
+              set({
+                connectionStatus: 'connected',
+                realtimeChannel: channel,
                 subscribedAt: Date.now(),
                 isReconnecting: false
               });
@@ -650,74 +764,36 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
               isConnecting = false; // Clear the guard
 
-              // Enhanced handling for CHANNEL_ERROR - force complete client rebuild
+              // Enhanced handling for CHANNEL_ERROR - try session refresh first, avoid excessive rebuilds
               if (status === 'CHANNEL_ERROR') {
-                log('🔧 CHANNEL_ERROR detected - forcing complete client rebuild');
-                
-                // Force session refresh with duration logging for CHANNEL_ERROR
-                const refreshStartTime = Date.now();
-                let refreshSuccess = false;
-                
+                log('🔧 CHANNEL_ERROR detected - attempting session refresh');
+
+                // Only try session refresh, avoid full client rebuild unless absolutely necessary
                 try {
-                  log('🔧 CHANNEL_ERROR: Starting pipeline session refresh');
-                  refreshSuccess = await supabasePipeline.refreshSession();
-                  const duration = Date.now() - refreshStartTime;
-                  log(`🔧 CHANNEL_ERROR: Pipeline session refresh completed in ${duration}ms: ${refreshSuccess}`);
-                  
-                  if (refreshSuccess) {
-                    log('🔧 CHANNEL_ERROR: Session refresh successful, applying to realtime');
-                    try { 
+                  const session = await supabasePipeline.getWorkingSession();
+                  if (session?.access_token) {
+                    log('🔧 CHANNEL_ERROR: Applying working session to realtime');
+                    try {
                       const client = await supabasePipeline.getDirectClient();
-                      const session = await client.auth.getSession();
-                      (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
+                      (client as any).realtime?.setAuth?.(session.access_token);
                     } catch {}
                   } else {
-                    log('🔧 CHANNEL_ERROR: Session refresh failed');
+                    log('🔧 CHANNEL_ERROR: No working session available');
                   }
                 } catch (e) {
-                  const duration = Date.now() - refreshStartTime;
-                  log(`🔧 CHANNEL_ERROR: Session refresh error after ${duration}ms: ${e}`);
+                  log(`🔧 CHANNEL_ERROR: Session refresh error: ${e}`);
                 }
-                
-                // If refresh failed, try one more time with longer timeout
-                if (!refreshSuccess) {
-                  log('🔧 CHANNEL_ERROR: Retrying session refresh with 10-second timeout');
-                  const retryStartTime = Date.now();
-                  
-                  try {
-                    refreshSuccess = await supabasePipeline.refreshSession();
-                    const duration = Date.now() - retryStartTime;
-                    log(`🔧 CHANNEL_ERROR: Retry session refresh completed in ${duration}ms: ${refreshSuccess}`);
-                    
-                    if (refreshSuccess) {
-                      log('🔧 CHANNEL_ERROR: Retry session refresh successful');
-                      try { 
-                        const client = await supabasePipeline.getDirectClient();
-                        const session = await client.auth.getSession();
-                        (client as any).realtime?.setAuth?.(session?.data?.session?.access_token); 
-                      } catch {}
-                    }
-                  } catch (retryError) {
-                    log(`🔧 CHANNEL_ERROR: Retry session refresh also failed: ${retryError}`);
-                  }
-                }
-                
-                log(`🔧 CHANNEL_ERROR: Client rebuild result: ${refreshSuccess ? 'SUCCESS' : 'FAILED'}`);
               } else {
                 // Standard session refresh for CLOSED/TIMED_OUT using pipeline
                 let currentSession: any = null;
                 try {
-                  const client = await supabasePipeline.getDirectClient();
-                  const res = await client.auth.getSession();
-                  currentSession = res?.data?.session || null;
+                  currentSession = await supabasePipeline.getWorkingSession();
                 } catch (_) {}
                 if (!currentSession?.access_token) {
                   try {
                     const refreshed = await supabasePipeline.refreshSession();
                     if (refreshed) {
-                      const client = await supabasePipeline.getDirectClient();
-                      const res = await client.auth.getSession();
-                      currentSession = res?.data?.session || null;
+                      currentSession = await supabasePipeline.getWorkingSession();
                     }
                   } catch (_) {}
                 }
@@ -775,6 +851,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       log('Cleaning up realtime subscription');
       isConnecting = false; // Clear connection guard
       resetOutboxProcessingState(); // Reset outbox state on cleanup
+      stopHealthMonitoring(); // Stop health monitoring
 
       if (typingTimeout) clearTimeout(typingTimeout);
       
@@ -886,17 +963,39 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     // New simplified methods
-    forceReconnect: (groupId: string) => {
+    forceReconnect: async (groupId: string) => {
       const { connectionStatus } = get();
       if (connectionStatus === 'connecting') {
         log('Force reconnect requested but already connecting; skipping duplicate');
         return;
       }
-      log('Force reconnect requested');
-      resetRetryCount();
-      get().cleanupRealtimeSubscription();
-      set({ connectionStatus: 'connecting' });
-      setTimeout(() => get().setupRealtimeSubscription(groupId), 150);
+
+      // Debounce force reconnects to prevent excessive calls
+      const now = Date.now();
+      if (now - lastForceReconnectAt < 1500) {
+        log('Force reconnect debounced (too soon after last attempt)');
+        return;
+      }
+      lastForceReconnectAt = now;
+
+      log('Force reconnect requested - delegating to reconnection manager');
+
+      // Validate network connectivity using cached status
+      const { isOnline } = get();
+      if (!isOnline) {
+        log('Force reconnect: Device is offline, setting disconnected status');
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      // Use the reconnection manager to prevent race conditions
+      try {
+        const { reconnectionManager } = await import('@/lib/reconnectionManager');
+        await reconnectionManager.reconnect('force-reconnect');
+      } catch (error) {
+        log(`Force reconnect failed: ${error}`);
+        scheduleReconnect(groupId, 2000);
+      }
     },
 
     setupAuthListener: () => {

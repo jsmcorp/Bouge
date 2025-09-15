@@ -1,4 +1,4 @@
-import { supabasePipeline } from '@/lib/supabasePipeline';
+import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
@@ -115,13 +115,14 @@ async function checkOnline(): Promise<boolean> {
 
 async function saveUserFromSupabase(user: any) {
   if (!user) return;
+
   await sqliteService.saveUser({
     id: user.id,
     display_name: user.display_name,
     phone_number: user.phone_number || null,
     avatar_url: user.avatar_url || null,
     is_onboarded: user.is_onboarded ? 1 : 0,
-    created_at: new Date(user.created_at).getTime()
+    created_at: SupabasePipeline.safeTimestamp(user.created_at)
   });
 }
 

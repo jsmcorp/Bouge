@@ -1,4 +1,4 @@
-import { supabasePipeline } from '@/lib/supabasePipeline';
+import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Group, GroupMember, GroupMedia } from './types';
@@ -76,7 +76,7 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
               phone_number: userProfile.phone_number || null,
               avatar_url: userProfile.avatar_url || null,
               is_onboarded: userProfile.is_onboarded ? 1 : 0,
-              created_at: new Date(userProfile.created_at).getTime()
+              created_at: SupabasePipeline.safeTimestamp(userProfile.created_at)
             });
           }
 

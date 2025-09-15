@@ -1,4 +1,4 @@
-import { supabasePipeline } from '@/lib/supabasePipeline';
+import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
@@ -410,7 +410,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
             .select(`
               *,
               reactions(*),
-              users!messages_user_id_fkey(display_name, avatar_url)
+              users!messages_user_id_fkey(display_name, avatar_url, created_at)
             `)
             .single();
           
@@ -555,7 +555,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
                 phone_number: successData.users.phone_number || null,
                 avatar_url: successData.users.avatar_url || null,
                 is_onboarded: 1,
-                created_at: new Date(successData.users.created_at).getTime()
+                created_at: SupabasePipeline.safeTimestamp(successData.users.created_at)
               });
             }
 

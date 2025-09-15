@@ -126,8 +126,7 @@ export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrit
 	// Initial session check with detailed logging using pipeline
 	try {
 		console.log(`[auth-debug] ${sessionId} - Getting current session via pipeline...`);
-		const client = await supabasePipeline.getDirectClient();
-		const sessionResult = await client.auth.getSession();
+		const sessionResult = await supabasePipeline.getSession();
 		console.log(`[auth-debug] ${sessionId} - Session result received, checking token...`);
 		const token = sessionResult?.data?.session?.access_token;
 		if (token) {

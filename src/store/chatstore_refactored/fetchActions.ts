@@ -1,4 +1,4 @@
-import { supabasePipeline } from '@/lib/supabasePipeline';
+import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { preloadingService } from '@/lib/preloadingService';
@@ -65,9 +65,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Continue with background sync if online
             console.log('� B ackground syncing groups with Supabase...');
           } else {
-            // No local groups found, but still set loading to false if offline
-            const networkStatus = await Network.getStatus();
-            if (!networkStatus.connected) {
+            // No local groups found, check cached network status
+            const { isOnline } = get();
+            if (!isOnline) {
               set({ groups: [], isLoading: false });
               console.log('📵 No local groups found and offline');
               return;
@@ -76,8 +76,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         } catch (error) {
           console.error('❌ Error loading groups from local storage:', error);
           // If there's an error loading from local storage and we're offline, show empty state
-          const networkStatus = await Network.getStatus();
-          if (!networkStatus.connected) {
+          const { isOnline } = get();
+          if (!isOnline) {
             set({ groups: [], isLoading: false });
             return;
           }
@@ -89,9 +89,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         set({ isLoading: true });
       }
 
-      // Check network status
-      const networkStatus = await Network.getStatus();
-      const isOnline = networkStatus.connected;
+      // Check cached network status
+      const { isOnline } = get();
 
       // If offline and we couldn't load from local storage, show empty state
       if (!isOnline) {
@@ -600,7 +599,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         .select(`
           *,
           reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url)
+          users!messages_user_id_fkey(display_name, avatar_url, created_at)
         `)
         .eq('group_id', groupId)
         .order('created_at', { ascending: false })
@@ -620,7 +619,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           .select(`
             *,
             reactions(*),
-            users!messages_user_id_fkey(display_name, avatar_url)
+            users!messages_user_id_fkey(display_name, avatar_url, created_at)
           `)
           .eq('parent_id', msg.id)
           .order('created_at', { ascending: true })
@@ -704,7 +703,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 phone_number: msg.users.phone_number || null,
                 avatar_url: msg.users.avatar_url || null,
                 is_onboarded: 1,
-                created_at: new Date(msg.users.created_at).getTime()
+                created_at: SupabasePipeline.safeTimestamp(msg.users.created_at)
               });
             }
           }
@@ -720,7 +719,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     phone_number: (reply as any).users.phone_number || null,
                     avatar_url: (reply as any).users.avatar_url || null,
                     is_onboarded: 1,
-                    created_at: new Date((reply as any).users.created_at).getTime()
+                    created_at: (reply as any).users.created_at ? new Date((reply as any).users.created_at).getTime() : Date.now()
                   });
                 }
               }
@@ -767,7 +766,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         .select(`
           *,
           reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url)
+          users!messages_user_id_fkey(display_name, avatar_url, created_at)
         `)
         .eq('id', messageId)
         .single();
@@ -838,7 +837,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         .select(`
           *,
           reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url)
+          users!messages_user_id_fkey(display_name, avatar_url, created_at)
         `)
         .eq('group_id', groupId)
         .gt('created_at', sinceIso)
