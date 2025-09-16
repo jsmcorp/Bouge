@@ -172,7 +172,7 @@ export class ConnectivityTester {
       (supabasePipeline as any).invalidateSessionCache();
       
       // Test session refresh
-      const refreshed = await supabasePipeline.refreshSession();
+      const refreshed = await supabasePipeline.recoverSession();
       
       if (!refreshed) {
         throw new Error('Session refresh returned false');

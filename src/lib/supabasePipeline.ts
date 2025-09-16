@@ -160,12 +160,22 @@ class SupabasePipeline {
   }
 
   /**
-   * Initialize Supabase client (idempotent). Pass force=true to recreate.
+   * Initialize Supabase client ONCE - never recreate, only initialize if missing
    */
   public async initialize(force: boolean = false): Promise<void> {
     this.log(`🔄 initialize() called - force=${force} isInitialized=${this.isInitialized} hasClient=${!!this.client} initPromiseActive=${!!this.initializePromise}`);
-    if (!force && this.isInitialized && this.client) { this.log('🔄 initialize() early return (already initialized)'); return; }
-    if (this.initializePromise) { this.log('🔄 initialize() waiting for existing initializePromise'); await this.initializePromise; return; }
+
+    // NEVER recreate an existing client - this is the root cause of corruption
+    if (this.client && this.isInitialized && !force) {
+      this.log('🔄 initialize() early return (client exists and initialized)');
+      return;
+    }
+
+    if (this.initializePromise) {
+      this.log('🔄 initialize() waiting for existing initializePromise');
+      await this.initializePromise;
+      return;
+    }
 
     this.log('🔄 Initializing Supabase client...');
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
@@ -176,18 +186,9 @@ class SupabasePipeline {
     this.log(`🔄 Supabase env present? url=${!!supabaseUrl} anonKey=${!!supabaseAnonKey}`);
 
     this.initializePromise = (async () => {
-      // Only tear down existing channels if we truly force a reinit
-      if (force && this.client) {
-        this.log('🗑️ Destroying old client instance (forced)');
-        try { this.internalAuthUnsub?.(); this.internalAuthUnsub = null; } catch (_) {}
-        try { await this.client.removeAllChannels(); } catch (e) {
-          this.log('⚠️ Error removing channels during client destruction:', e);
-        }
-        try { (this.client as any)?.realtime?.removeAllChannels?.(); } catch (_) {}
-        try { (this.client as any)?.realtime?.disconnect?.(); } catch (_) {}
-      }
-
-      if (!this.client || force) {
+      // NEVER destroy existing client - this causes corruption
+      // Only create client if it doesn't exist
+      if (!this.client) {
         this.client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
           auth: {
             persistSession: true,
@@ -195,9 +196,15 @@ class SupabasePipeline {
             detectSessionInUrl: false,
           },
         });
-        this.log('🔄 Supabase client created (persistSession=true, autoRefreshToken=true)');
-        // Re-bind any pipeline-managed auth listeners onto the new client
-        try { await this.bindAuthListenersToClient(); } catch (e) { this.log('⚠️ Failed to bind auth listeners on init:', e as any); }
+        this.log('🔄 Supabase client created ONCE (persistSession=true, autoRefreshToken=true)');
+
+        // Bind auth listeners to the permanent client
+        try {
+          await this.bindAuthListenersToClient();
+        } catch (e) {
+          this.log('⚠️ Failed to bind auth listeners on init:', e as any);
+        }
+
         // Attach internal auth listener to cache tokens
         try {
           const sub = this.client.auth.onAuthStateChange((_event, session: any) => {
@@ -206,19 +213,46 @@ class SupabasePipeline {
               this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
               this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
               this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+              this.log(`🔑 Token cached: user=${this.lastKnownUserId?.slice(0, 8)} hasAccess=${!!this.lastKnownAccessToken} hasRefresh=${!!this.lastKnownRefreshToken}`);
             } catch {}
           });
           this.internalAuthUnsub = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
-        } catch (e) { this.log('⚠️ Failed to attach internal auth listener:', e as any); }
-        // Best-effort apply last-known token to realtime
-        try { (this.client as any)?.realtime?.setAuth?.(this.lastKnownAccessToken || undefined); } catch (_) {}
+        } catch (e) {
+          this.log('⚠️ Failed to attach internal auth listener:', e as any);
+        }
+      } else {
+        this.log('🔄 Client already exists, skipping creation');
       }
 
       this.isInitialized = true;
-      this.log('✅ Supabase client initialized successfully');
+      this.log('✅ Supabase client initialized successfully (PERMANENT INSTANCE)');
     })().finally(() => { this.initializePromise = null; });
 
     await this.initializePromise;
+  }
+
+  /**
+   * Cleanup method for proper resource disposal
+   */
+  public cleanup(): void {
+    this.log('🧹 Cleaning up Supabase pipeline resources');
+
+    // Cleanup internal auth listener
+    if (this.internalAuthUnsub) {
+      this.internalAuthUnsub();
+      this.internalAuthUnsub = null;
+      this.log('🧹 Internal auth listener unsubscribed');
+    }
+
+    // Clear cached data
+    this.cachedSession = null;
+    this.inFlightSessionPromise = null;
+
+    // Reset circuit breaker
+    this.circuitBreakerOpen = false;
+    this.failureCount = 0;
+
+    this.log('✅ Pipeline cleanup completed');
   }
 
   /**
@@ -263,7 +297,6 @@ class SupabasePipeline {
         return false;
       }
 
-      const client = await this.getClient();
       const online = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : 'unknown';
       this.log(`🏥 Health check: starting (navigator.onLine=${online})`);
 
@@ -273,125 +306,123 @@ class SupabasePipeline {
         return false;
       }
 
-      // Session check with increased timeout and retry logic
-      const timeoutMs = 5000; // Increased from 3s to 5s
-      const maxRetries = 2;
-
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('getSession timeout')), timeoutMs);
-          });
-
-          const sessionPromise = client.auth.getSession();
-          const result: any = await Promise.race([sessionPromise, timeoutPromise]);
-          const data = result?.data;
-          const session = data?.session;
-
-          if (!session?.access_token) {
-            this.log('🏥 Health check: no active session');
-            return false;
-          }
-
-          // Check session expiration
+      // Use cached tokens for health check to avoid hanging getSession() calls
+      if (this.lastKnownAccessToken) {
+        // Check if we have a cached session with expiration info
+        if (this.cachedSession?.session?.expires_at) {
           const nowSec = Math.floor(Date.now() / 1000);
-          const expiresAt = session.expires_at || 0;
-          if (expiresAt > 0 && expiresAt - nowSec <= 0) {
-            this.refreshSession().catch(() => {});
-            this.log('🏥 Health check: session expired');
-            return false;
+          const expiresAt = this.cachedSession.session.expires_at;
+          if (expiresAt > 0 && expiresAt - nowSec <= 60) {
+            this.log('🏥 Health check: cached session expires soon, needs refresh');
+            this.recordFailure();
+            return false; // Trigger refresh
           }
-
-          const secsLeft = expiresAt > 0 ? (expiresAt - nowSec) : 'unknown';
-          const userId = (session as any)?.user?.id ? String((session as any).user.id).slice(0, 8) : 'unknown';
-          this.log(`🏥 Health check: healthy (user=${userId}, expiresIn=${secsLeft}s)`);
-          this.recordSuccess(); // Record successful health check
-          return true;
-        } catch (err: any) {
-          if (err && err.message === 'getSession timeout') {
-            this.log(`🏥 Health check: getSession timeout (attempt ${attempt}/${maxRetries})`);
-
-            if (attempt === maxRetries) {
-              // Only trigger hard recreate after all retries failed
-              this.log('🏥 Health check: all retries failed → scheduling hard recreate and marking unhealthy');
-              this.recordFailure(); // Record failure for circuit breaker
-              // Trigger a hard recreate in the background to heal corruption
-              this.ensureRecreated('health-check-getsession-timeout').catch(() => {});
-              return false; // mark unhealthy to avoid direct sends during rebuild
-            }
-
-            // Wait briefly before retry
-            await new Promise(resolve => setTimeout(resolve, 500));
-            continue;
-          }
-          throw err;
         }
+
+        this.log('🏥 Health check: using cached access token (healthy)');
+        this.recordSuccess();
+        return true;
       }
 
+      // If no cached tokens, check if client exists
+      if (this.client && this.isInitialized) {
+        this.log('🏥 Health check: client exists but no cached tokens');
+        this.recordFailure();
+        return false; // Needs authentication
+      }
+
+      this.log('🏥 Health check: no client or tokens available');
+      this.recordFailure();
       return false;
     } catch (error) {
       // Fail open to reduce unnecessary outbox fallbacks during transient issues
       this.log('🏥 Health check encountered error; assuming healthy:', stringifyError(error));
+      this.recordFailure();
       return true;
     }
   }
 
   /**
-   * Refresh session with timeout
+   * Use cached tokens to recover session instead of calling getSession()
    */
-  public async refreshSession(): Promise<boolean> {
-    this.log('🔄 Refreshing session...');
+  public async recoverSession(): Promise<boolean> {
+    this.log('🔄 Recovering session using cached tokens...');
     try {
       const client = await this.getClient();
-      // Wrap pre-check getSession() with 5s timeout
-      const preSessionPromise = client.auth.getSession();
-      const preTimeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('getSession timeout')), 5000);
-      });
-      let current: any = null;
-      try {
-        const preResult: any = await Promise.race([preSessionPromise, preTimeoutPromise]);
-        current = preResult?.data?.session;
-      } catch (err: any) {
-        if (err && err.message === 'getSession timeout') {
-          this.log('🔄 getSession timeout before refresh → scheduling hard recreate');
-          this.ensureRecreated('refresh-precheck-timeout').catch(() => {});
-          return false;
+
+      // Use cached tokens if available
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔄 Using cached tokens to recover session');
+
+        try {
+          // Use setSession with cached tokens instead of getSession()
+          const { data, error } = await client.auth.setSession({
+            access_token: this.lastKnownAccessToken,
+            refresh_token: this.lastKnownRefreshToken
+          });
+
+          if (error) {
+            this.log('🔄 Cached token recovery failed:', error.message);
+            return false;
+          }
+
+          if (data?.session) {
+            this.log('✅ Session recovered using cached tokens');
+            this.updateSessionCache(data.session);
+            return true;
+          }
+        } catch (error) {
+          this.log('🔄 Token recovery error:', stringifyError(error));
         }
-        throw err;
       }
-      if (!current?.access_token) {
-        this.log('🔄 No active session to refresh');
-        return false;
+
+      // Fallback: try refresh if we have refresh token
+      if (this.lastKnownRefreshToken) {
+        this.log('🔄 Attempting token refresh as fallback');
+        return await this.refreshSessionDirect();
       }
-      const nowSec = Math.floor(Date.now() / 1000);
-      const expiresAt = current.expires_at || 0;
-      if (expiresAt > 0 && expiresAt - nowSec > 60) {
-        this.log('🔄 Session is fresh; skipping refresh');
-        return true;
-      }
-      // Wrap refreshSession() with 5s timeout
+
+      this.log('🔄 No cached tokens available for recovery');
+      return false;
+    } catch (error) {
+      this.log('🔄 Session recovery failed:', stringifyError(error));
+      return false;
+    }
+  }
+
+  /**
+   * Direct session refresh without pre-checks
+   */
+  public async refreshSessionDirect(): Promise<boolean> {
+    this.log('🔄 Direct session refresh...');
+    try {
+      const client = await this.getClient();
+      // Direct refresh without pre-checks
       const refreshPromise = client.auth.refreshSession();
       const refreshTimeout = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
       });
+
       let result: any;
       try {
         result = await Promise.race([refreshPromise, refreshTimeout]);
       } catch (err: any) {
         if (err && err.message === 'refreshSession timeout') {
-          this.log('🔄 Session refresh: timeout');
+          this.log('🔄 Direct session refresh: timeout');
           return false;
         }
         throw err;
       }
-      const success = !!result?.data?.session?.access_token && !result?.error;
-      this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
 
-      // Invalidate session cache since we just refreshed
-      if (success) {
-        this.invalidateSessionCache();
+      const success = !!result?.data?.session?.access_token && !result?.error;
+      this.log(`🔄 Direct session refresh: ${success ? 'success' : 'failed'}`);
+
+      // Update session cache if successful
+      if (success && result?.data?.session) {
+        this.updateSessionCache(result.data.session);
       }
+
+      return success;
 
       return success;
     } catch (error) {
@@ -401,7 +432,15 @@ class SupabasePipeline {
   }
 
   /**
-   * Simplified corruption check - just verify client exists and is responsive
+   * Compatibility method - use recoverSession() for new code
+   */
+  public async refreshSession(): Promise<boolean> {
+    this.log('🔄 refreshSession() called - delegating to recoverSession()');
+    return await this.recoverSession();
+  }
+
+  /**
+   * Proper corruption check - test if getSession() actually works
    */
   public async isClientCorrupted(): Promise<boolean> {
     try {
@@ -410,14 +449,29 @@ class SupabasePipeline {
         return true;
       }
 
-      // Simple ping test - just check if client is responsive
-      const client = await this.getClient();
-      if (!client || !client.auth) {
-        this.log('🧪 Corruption check: client or auth is null');
+      if (!this.client.auth) {
+        this.log('🧪 Corruption check: client.auth is null');
         return true;
       }
 
-      return false;
+      // Test if getSession() actually works with a short timeout
+      const sessionPromise = this.client.auth.getSession();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('getSession timeout')), 1500);
+      });
+
+      try {
+        await Promise.race([sessionPromise, timeoutPromise]);
+        this.log('🧪 Corruption check: client is healthy');
+        return false;
+      } catch (err: any) {
+        if (err.message === 'getSession timeout') {
+          this.log('🧪 Corruption check: getSession() is hanging - client is corrupted');
+          return true;
+        }
+        this.log('🧪 Corruption check: getSession() failed:', err.message);
+        return true;
+      }
     } catch (err: any) {
       this.log('🧪 Corruption check failed:', err.message);
       return true;
@@ -582,6 +636,17 @@ class SupabasePipeline {
 
       return { error };
     }
+  }
+
+  /**
+   * Update session cache with new session
+   */
+  private updateSessionCache(session: any): void {
+    this.cachedSession = {
+      session,
+      timestamp: Date.now()
+    };
+    this.log('🔐 Session cache updated');
   }
 
   /**
@@ -1489,7 +1554,7 @@ class SupabasePipeline {
     this.log('🔄 Resetting connection (non-destructive)...');
     try {
       await this.initialize(false);
-      await this.refreshSession();
+      await this.recoverSession();
       this.log('✅ Connection reset complete');
     } catch (error) {
       this.log('❌ Connection reset failed:', stringifyError(error));
@@ -1542,7 +1607,7 @@ class SupabasePipeline {
           session = await this.getWorkingSession();
           if (!session?.access_token) {
             this.log('⚠️ Hard recreate: no valid session after recreation, attempting refresh');
-            const refreshed = await this.refreshSession();
+            const refreshed = await this.recoverSession();
             if (refreshed) {
               session = await this.getWorkingSession();
             }
@@ -1618,33 +1683,45 @@ class SupabasePipeline {
   }
 
   /**
-   * Simplified app resume handler - refresh session and ensure Realtime has a valid token
+   * Proper app resume handler - use token recovery instead of getSession()
    */
   public async onAppResume(): Promise<void> {
-    this.log('📱 App resume detected - refreshing session');
+    this.log('📱 App resume detected - using token recovery strategy');
+
+    // Add stabilization delay to avoid stale WebView state
+    await new Promise(resolve => setTimeout(resolve, 300));
 
     try {
-      // Simple session refresh
-      await this.refreshSession();
+      // Use token recovery instead of refresh to avoid hanging getSession() calls
+      const recovered = await this.recoverSession();
 
-      // Ensure Realtime has the latest access token (important on Android WebView)
+      if (recovered) {
+        this.log('✅ App resume: session recovered using cached tokens');
+      } else {
+        this.log('⚠️ App resume: token recovery failed, trying direct refresh');
+        const refreshed = await this.refreshSessionDirect();
+        if (!refreshed) {
+          this.log('⚠️ App resume: direct refresh also failed, using last known tokens');
+        }
+      }
+
+      // Apply token to realtime (use cached token to avoid getSession() call)
       try {
         const client = await this.getClient();
-        const session = await this.getWorkingSession();
-        const token = session?.access_token;
+        const token = this.lastKnownAccessToken;
         if (token && (client as any)?.realtime?.setAuth) {
           (client as any).realtime.setAuth(token);
-          this.log('✅ App resume: token applied to realtime');
+          this.log('✅ App resume: cached token applied to realtime');
         } else {
-          this.log('⚠️ App resume: no token or realtime client to apply');
+          this.log('⚠️ App resume: no cached token available for realtime');
         }
       } catch (e) {
         this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
       }
 
-      this.log('✅ App resume session refresh completed');
+      this.log('✅ App resume completed using token recovery strategy');
     } catch (error) {
-      this.log('❌ App resume session refresh failed:', stringifyError(error));
+      this.log('❌ App resume failed:', stringifyError(error));
     }
   }
 
@@ -1662,7 +1739,7 @@ class SupabasePipeline {
 
     try {
       // Simple session refresh
-      await this.refreshSession();
+      await this.recoverSession();
       this.log('✅ Network reconnect session refresh completed');
     } catch (error) {
       this.log('❌ Network reconnect session refresh failed:', stringifyError(error));

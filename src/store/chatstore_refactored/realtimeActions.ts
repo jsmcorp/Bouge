@@ -139,7 +139,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         const timeout = setTimeout(() => controller.abort(), Math.max(800, limitMs));
         const refreshRace = Promise.race([
           (async () => {
-            const success = await supabasePipeline.refreshSession();
+            const success = await supabasePipeline.recoverSession();
             if (success) {
               const session = await supabasePipeline.getWorkingSession();
               return session?.access_token || null;
@@ -803,7 +803,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 } catch (_) {}
                 if (!currentSession?.access_token) {
                   try {
-                    const refreshed = await supabasePipeline.refreshSession();
+                    const refreshed = await supabasePipeline.recoverSession();
                     if (refreshed) {
                       currentSession = await supabasePipeline.getWorkingSession();
                     }

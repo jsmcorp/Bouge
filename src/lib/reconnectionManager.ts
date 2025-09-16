@@ -199,19 +199,31 @@ class ReconnectionManager {
   }
 
   /**
-   * Refresh Supabase session with retry
+   * Use token recovery strategy instead of hard recreation
    */
   private async refreshSession(): Promise<void> {
-    this.log('🔑 Refreshing session with retry');
+    this.log('🔑 Using token recovery strategy for session refresh');
 
+    // Try token recovery first (avoids hanging getSession() calls)
+    try {
+      const recovered = await supabasePipeline.recoverSession();
+      if (recovered) {
+        this.log('✅ Session recovered using cached tokens');
+        return;
+      }
+    } catch (error) {
+      this.log(`⚠️ Token recovery failed: ${error}`);
+    }
+
+    // Fallback to direct refresh with retries
     const maxRetries = 3;
     const timeoutMs = 8000;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        this.log(`🔑 Session refresh attempt ${attempt}/${maxRetries}`);
+        this.log(`🔑 Direct refresh attempt ${attempt}/${maxRetries}`);
 
-        const refreshPromise = supabasePipeline.refreshSession();
+        const refreshPromise = supabasePipeline.refreshSessionDirect();
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Session refresh timeout')), timeoutMs)
         );
@@ -225,10 +237,13 @@ class ReconnectionManager {
         this.log('✅ Session refreshed successfully');
         return;
       } catch (error) {
-        this.log(`❌ Session refresh attempt ${attempt} failed: ${error}`);
+        this.log(`❌ Direct refresh attempt ${attempt} failed: ${error}`);
 
         if (attempt === maxRetries) {
-          throw error;
+          this.log('⚠️ All refresh attempts failed, but keeping client alive');
+          // Don't recreate client - just log the failure and continue
+          // The app can still function with cached tokens
+          return;
         }
 
         // Exponential backoff
