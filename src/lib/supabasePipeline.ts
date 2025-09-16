@@ -261,15 +261,20 @@ class SupabasePipeline {
   private async getClient(): Promise<SupabaseClient<Database>> {
     this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise}`);
     if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
-    // Reduced corruption check frequency - only check every 10 seconds and use simple check
+    // Less aggressive corruption check - only check every 30 seconds and require multiple failures
     try {
       const now = Date.now();
-      if (now - this.lastCorruptionCheckAt > 10000) {
+      if (now - this.lastCorruptionCheckAt > 30000) { // Increased from 10s to 30s
         this.lastCorruptionCheckAt = now;
-        const corrupted = await this.isClientCorrupted(); // Use simple timeout-based check
+        const corrupted = await this.isClientCorrupted();
         if (corrupted) {
-          this.log('🧪 getClient(): corruption detected → hard recreate');
-          await this.ensureRecreated('getClient-autoheal');
+          // Only recreate if we've had multiple consecutive failures
+          if (this.failureCount >= 3) {
+            this.log('🧪 getClient(): corruption detected with multiple failures → hard recreate');
+            await this.ensureRecreated('getClient-autoheal');
+          } else {
+            this.log('🧪 getClient(): corruption detected but failure count low, continuing');
+          }
         }
       }
     } catch {}
@@ -286,7 +291,52 @@ class SupabasePipeline {
   }
 
   /**
-   * Simple health check with timeout
+   * Enhanced network state detection with WebView readiness check
+   */
+  private async checkNetworkAndWebViewState(): Promise<{ isOnline: boolean; isWebViewReady: boolean; networkType?: string }> {
+    try {
+      // Check navigator.onLine first
+      const navigatorOnline = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : true;
+
+      // For Capacitor apps, also check Network plugin
+      let capacitorNetworkStatus = null;
+      if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
+        try {
+          const { Network } = await import('@capacitor/network');
+          capacitorNetworkStatus = await Network.getStatus();
+        } catch (error) {
+          this.log('🌐 Failed to get Capacitor network status:', error);
+        }
+      }
+
+      const isOnline = navigatorOnline && (capacitorNetworkStatus?.connected !== false);
+      const networkType = capacitorNetworkStatus?.connectionType || 'unknown';
+
+      // Check WebView readiness by testing if we can access basic DOM/window features
+      let isWebViewReady = true;
+      try {
+        if (typeof window !== 'undefined') {
+          // Test basic WebView functionality
+          const testDiv = document.createElement('div');
+          testDiv.style.display = 'none';
+          document.body.appendChild(testDiv);
+          document.body.removeChild(testDiv);
+        }
+      } catch (error) {
+        this.log('🌐 WebView readiness check failed:', error);
+        isWebViewReady = false;
+      }
+
+      this.log(`🌐 Network state: online=${isOnline} webViewReady=${isWebViewReady} type=${networkType}`);
+      return { isOnline, isWebViewReady, networkType };
+    } catch (error) {
+      this.log('🌐 Network state check failed:', error);
+      return { isOnline: false, isWebViewReady: false };
+    }
+  }
+
+  /**
+   * Enhanced health check with network state detection
    */
   public async checkHealth(): Promise<boolean> {
     // Enhanced health check with retry logic and better timeout handling
@@ -297,12 +347,19 @@ class SupabasePipeline {
         return false;
       }
 
-      const online = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : 'unknown';
-      this.log(`🏥 Health check: starting (navigator.onLine=${online})`);
+      // Enhanced network and WebView state check
+      const networkState = await this.checkNetworkAndWebViewState();
+      this.log(`🏥 Health check: starting (online=${networkState.isOnline} webViewReady=${networkState.isWebViewReady})`);
 
       // Quick network check
-      if (online === false) {
+      if (!networkState.isOnline) {
         this.log('🏥 Health check: offline');
+        return false;
+      }
+
+      // WebView readiness check
+      if (!networkState.isWebViewReady) {
+        this.log('🏥 Health check: WebView not ready');
         return false;
       }
 
@@ -440,7 +497,7 @@ class SupabasePipeline {
   }
 
   /**
-   * Proper corruption check - test if getSession() actually works
+   * Enhanced corruption check - avoid hanging getSession() and use cached tokens
    */
   public async isClientCorrupted(): Promise<boolean> {
     try {
@@ -454,27 +511,47 @@ class SupabasePipeline {
         return true;
       }
 
-      // Test if getSession() actually works with a short timeout
+      // If we have cached tokens, try to use them instead of getSession()
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        try {
+          // Test if we can use setSession with cached tokens
+          const { data, error } = await this.client.auth.setSession({
+            access_token: this.lastKnownAccessToken,
+            refresh_token: this.lastKnownRefreshToken
+          });
+
+          if (!error && data?.session) {
+            this.log('🧪 Corruption check: client is healthy (token recovery successful)');
+            return false;
+          }
+        } catch (tokenError) {
+          this.log('🧪 Corruption check: token recovery failed, trying getSession');
+        }
+      }
+
+      // Fallback to getSession() with timeout, but with longer timeout
       const sessionPromise = this.client.auth.getSession();
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('getSession timeout')), 1500);
+        setTimeout(() => reject(new Error('getSession timeout')), 5000); // Increased from 1.5s to 5s
       });
 
       try {
         await Promise.race([sessionPromise, timeoutPromise]);
-        this.log('🧪 Corruption check: client is healthy');
+        this.log('🧪 Corruption check: client is healthy (getSession successful)');
         return false;
       } catch (err: any) {
         if (err.message === 'getSession timeout') {
-          this.log('🧪 Corruption check: getSession() is hanging - client is corrupted');
+          this.log('🧪 Corruption check: getSession() is hanging - potential corruption');
+          // Don't immediately mark as corrupted, let failure count build up
           return true;
         }
         this.log('🧪 Corruption check: getSession() failed:', err.message);
-        return true;
+        // Network errors or auth errors don't necessarily mean corruption
+        return false;
       }
     } catch (err: any) {
       this.log('🧪 Corruption check failed:', err.message);
-      return true;
+      return false; // Fail safe - don't assume corruption on check failure
     }
   }
 
@@ -592,10 +669,20 @@ class SupabasePipeline {
   }
 
   /**
-   * Internal method to actually fetch session from Supabase with timeout protection
+   * Enhanced session fetching with recovery fallback to avoid hanging getSession()
    */
   private async fetchSessionInternal(): Promise<AuthOperationResult> {
     try {
+      // First, try to recover using cached tokens if available
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔐 Attempting session recovery using cached tokens');
+        const recoveryResult = await this.attemptTokenRecovery();
+        if (recoveryResult.success) {
+          return { data: { session: recoveryResult.session } };
+        }
+      }
+
+      // If token recovery failed or no cached tokens, try getSession with timeout
       this.log('🔐 Fetching fresh session from Supabase');
       const client = await this.getClient();
 
@@ -630,11 +717,63 @@ class SupabasePipeline {
 
       // If we have a cached session and this is just a timeout, return cached
       if (error?.message === 'Session fetch timeout' && this.cachedSession) {
-        this.log('🔐 Session fetch timed out, returning cached session');
+        this.log('🔐 Session fetch timed out, using cached session as fallback');
         return { data: { session: this.cachedSession.session } };
       }
 
+      // Last resort: try to construct session from cached tokens
+      if (this.lastKnownAccessToken && this.lastKnownUserId) {
+        this.log('🔐 Using last known tokens as final fallback');
+        const fallbackSession = {
+          access_token: this.lastKnownAccessToken,
+          refresh_token: this.lastKnownRefreshToken,
+          user: { id: this.lastKnownUserId },
+          expires_at: Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
+        };
+        return { data: { session: fallbackSession } };
+      }
+
       return { error };
+    }
+  }
+
+  /**
+   * Attempt to recover session using cached tokens with setSession
+   */
+  private async attemptTokenRecovery(): Promise<{ success: boolean; session?: any }> {
+    try {
+      const client = await this.getClient();
+
+      const { data, error } = await client.auth.setSession({
+        access_token: this.lastKnownAccessToken!,
+        refresh_token: this.lastKnownRefreshToken!
+      });
+
+      if (error) {
+        this.log('🔐 Token recovery failed:', error.message);
+        return { success: false };
+      }
+
+      if (data?.session) {
+        this.log('🔐 Session recovered successfully using cached tokens');
+        // Update cache and tokens
+        const s = data.session;
+        this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
+        this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
+        this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+
+        this.cachedSession = {
+          session: s,
+          timestamp: Date.now()
+        };
+
+        return { success: true, session: s };
+      }
+
+      return { success: false };
+    } catch (error) {
+      this.log('🔐 Token recovery error:', stringifyError(error));
+      return { success: false };
     }
   }
 
@@ -1683,15 +1822,77 @@ class SupabasePipeline {
   }
 
   /**
-   * Proper app resume handler - use token recovery instead of getSession()
+   * Enhanced WebView state validation for Capacitor apps
+   */
+  private async validateWebViewState(): Promise<{ isReady: boolean; bridgeWorking: boolean }> {
+    try {
+      // Check if we're in a Capacitor environment
+      const isCapacitor = typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.();
+
+      if (!isCapacitor) {
+        return { isReady: true, bridgeWorking: true };
+      }
+
+      // Test basic WebView functionality
+      let isReady = true;
+      try {
+        const testDiv = document.createElement('div');
+        testDiv.style.display = 'none';
+        document.body.appendChild(testDiv);
+        document.body.removeChild(testDiv);
+      } catch (error) {
+        this.log('🌐 WebView DOM test failed:', error);
+        isReady = false;
+      }
+
+      // Test Capacitor bridge communication
+      let bridgeWorking = true;
+      try {
+        const { Capacitor } = await import('@capacitor/core');
+        if (Capacitor.isNativePlatform()) {
+          // Test a simple bridge call
+          const { Device } = await import('@capacitor/device');
+          await Device.getId();
+        }
+      } catch (error) {
+        this.log('🌐 Capacitor bridge test failed:', error);
+        bridgeWorking = false;
+      }
+
+      this.log(`🌐 WebView state: ready=${isReady} bridgeWorking=${bridgeWorking}`);
+      return { isReady, bridgeWorking };
+    } catch (error) {
+      this.log('🌐 WebView state validation failed:', error);
+      return { isReady: false, bridgeWorking: false };
+    }
+  }
+
+  /**
+   * Enhanced app resume handler with WebView state validation
    */
   public async onAppResume(): Promise<void> {
-    this.log('📱 App resume detected - using token recovery strategy');
+    this.log('📱 App resume detected - validating WebView state');
 
-    // Add stabilization delay to avoid stale WebView state
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Validate WebView state first
+    const webViewState = await this.validateWebViewState();
+
+    // Add stabilization delay based on WebView state
+    const stabilizationDelay = webViewState.isReady && webViewState.bridgeWorking ? 300 : 1000;
+    this.log(`📱 App resume: using ${stabilizationDelay}ms stabilization delay`);
+    await new Promise(resolve => setTimeout(resolve, stabilizationDelay));
 
     try {
+      // If WebView state is problematic, be more conservative
+      if (!webViewState.isReady || !webViewState.bridgeWorking) {
+        this.log('⚠️ App resume: WebView state issues detected, using conservative recovery');
+
+        // Just use cached tokens without network calls
+        if (this.lastKnownAccessToken) {
+          this.log('✅ App resume: using cached tokens due to WebView issues');
+          return;
+        }
+      }
+
       // Use token recovery instead of refresh to avoid hanging getSession() calls
       const recovered = await this.recoverSession();
 
