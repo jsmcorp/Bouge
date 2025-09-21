@@ -102,6 +102,11 @@ class SupabasePipeline {
   private inFlightSessionPromise: Promise<AuthOperationResult> | null = null;
   // Global operation lock to prevent concurrent operations
 
+  // Single-flight outbox processing guards
+  private isOutboxProcessing = false;
+  private lastOutboxStartAt = 0;
+  private lastOutboxTriggerAt = 0;
+
   // Circuit breaker for repeated failures
   private failureCount = 0;
   private lastFailureAt = 0;
@@ -399,15 +404,28 @@ class SupabasePipeline {
         this.log('🔄 Using cached tokens to recover session');
 
         try {
-          // Use setSession with cached tokens instead of getSession()
-          const { data, error } = await client.auth.setSession({
+          // Use setSession with cached tokens instead of getSession(), but bound it with a timeout
+          const setSessionPromise = client.auth.setSession({
             access_token: this.lastKnownAccessToken,
-            refresh_token: this.lastKnownRefreshToken
+            refresh_token: this.lastKnownRefreshToken,
           });
-
-          if (error) {
-            this.log('🔄 Cached token recovery failed:', error.message);
-            return false;
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('setSession timeout')), 5000)
+          );
+          let data: any;
+          try {
+            const result: any = await Promise.race([setSessionPromise, timeoutPromise]);
+            data = result?.data;
+            if (result?.error) {
+              this.log('🔄 Cached token recovery failed:', result.error.message || String(result.error));
+              return false;
+            }
+          } catch (e: any) {
+            if (e && e.message === 'setSession timeout') {
+              this.log('🔄 Token recovery timed out');
+              return false;
+            }
+            throw e;
           }
 
           if (data?.session) {
@@ -1447,6 +1465,18 @@ class SupabasePipeline {
    * Process outbox messages with retries - simplified and more reliable
    */
   public async processOutbox(): Promise<void> {
+    // Single-flight guard and debounce
+    if (this.isOutboxProcessing) {
+      this.log('📦 Outbox processing already in progress; skipping');
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastOutboxStartAt < 1500) {
+      this.log('📦 Outbox processing debounced; too soon since last start');
+      return;
+    }
+    this.isOutboxProcessing = true;
+    this.lastOutboxStartAt = now;
     const sessionId = `outbox-${Date.now()}`;
     this.log(`📦 Starting outbox processing - session ${sessionId}`);
 
@@ -1620,6 +1650,8 @@ class SupabasePipeline {
     } catch (error) {
       this.log(`❌ Outbox processing failed - session ${sessionId}:`, stringifyError(error));
       throw error;
+    } finally {
+      this.isOutboxProcessing = false;
     }
   }
 
@@ -1627,8 +1659,14 @@ class SupabasePipeline {
    * Trigger outbox processing externally
    */
   private triggerOutboxProcessing(context: string): void {
+    const now = Date.now();
+    if (now - this.lastOutboxTriggerAt < 1000) {
+      this.log(`📦 Trigger suppressed (debounced) from: ${context}`);
+      return;
+    }
+    this.lastOutboxTriggerAt = now;
     this.log(`📦 Triggering outbox processing from: ${context}`);
-    
+
     // Use dynamic import to avoid circular dependencies
     import('../store/chatstore_refactored/offlineActions').then(({ triggerOutboxProcessing }) => {
       this.log('📦 triggerOutboxProcessing(): dynamic import succeeded');

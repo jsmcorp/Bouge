@@ -28,7 +28,7 @@ class ReconnectionManager {
    */
   public async reconnect(reason: string): Promise<void> {
     const now = Date.now();
-    
+
     // Debounce rapid reconnection attempts
     if (now - this.state.lastReconnectAt < 2000) {
       this.log(`Reconnect debounced (${now - this.state.lastReconnectAt}ms since last) - reason: ${reason}`);
@@ -80,6 +80,18 @@ class ReconnectionManager {
 
     // Step 4: Check network readiness (cached)
     await this.waitForNetworkStability();
+
+    // NEW: Step 4.5 Assess current connection health before any cleanup
+    const isHealthy = await this.assessConnectionHealth();
+    if (isHealthy) {
+      this.log('🟢 Connection healthy - preserving existing channel (no cleanup)');
+      // Ensure token is applied but avoid re-entry loops
+      try { await this.applyTokenToRealtime(); } catch {}
+      // Start outbox processing and finish early
+      await this.startOutboxProcessing();
+      this.log(`✅ Reconnection sequence completed (connection preserved) - reason: ${reason}`);
+      return;
+    }
 
     // Step 5: Clean up existing connections completely
     await this.cleanupConnections();
@@ -140,6 +152,7 @@ class ReconnectionManager {
 
     try {
       const { validateEncryptionAfterUnlock } = await import('./sqliteSecret');
+
       const isValid = await validateEncryptionAfterUnlock();
 
       if (!isValid) {
@@ -181,7 +194,8 @@ class ReconnectionManager {
    */
   private async waitForNetworkStability(): Promise<void> {
     this.log('🌐 Checking network stability');
-    
+
+
     try {
       // Check cached network status from store
       const mod = await import('@/store/chatstore_refactored');
@@ -190,7 +204,7 @@ class ReconnectionManager {
       if (state?.online === false) {
         throw new Error('Network is offline');
       }
-      
+
       this.log('✅ Network is stable');
     } catch (error) {
       this.log(`❌ Network check failed: ${error}`);
@@ -260,15 +274,14 @@ class ReconnectionManager {
     this.log('🔗 Applying token to realtime client');
 
     try {
-      // Use public methods only
       const session = await supabasePipeline.getWorkingSession();
+      const token = session?.access_token;
+      if (!token) throw new Error('No access token available');
 
-      if (!session?.access_token) {
-        throw new Error('No access token available');
+      const client = await supabasePipeline.getDirectClient();
+      if ((client as any)?.realtime?.setAuth) {
+        (client as any).realtime.setAuth(token);
       }
-
-      // Apply token through pipeline's public method
-      await supabasePipeline.onAppResume(); // This handles token application
 
       // Give realtime time to process the token
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -402,6 +415,37 @@ class ReconnectionManager {
     // Get final state for error message
     const finalState = useChatStore?.getState?.();
     throw new Error(`Subscription SUBSCRIBED state timeout after ${maxWait}ms. Final state: ${finalState?.connectionStatus}, channel: ${!!finalState?.realtimeChannel}`);
+  }
+
+  /**
+   * Assess connection health - avoid unnecessary cleanup if connection is healthy
+   */
+  private async assessConnectionHealth(): Promise<boolean> {
+    try {
+      const mod = await import('@/store/chatstore_refactored');
+      const state = (mod as any).useChatStore?.getState?.();
+      const channel: any = state?.realtimeChannel;
+      const status = state?.connectionStatus;
+      const subscribedAt: number | undefined = state?.subscribedAt;
+
+      const recentlySubscribed = typeof subscribedAt === 'number' && (Date.now() - subscribedAt) < 60_000;
+      if (status === 'connected' && channel && recentlySubscribed) {
+        try {
+          if (typeof channel?.send === 'function') {
+            channel.send({ type: 'broadcast', event: 'heartbeat', payload: { t: Date.now() } });
+          }
+        } catch {}
+        return true;
+      }
+
+      if (channel?.state === 'joined') return true;
+      if (channel?.state === 'closed') return false;
+
+      return false;
+    } catch (e) {
+      this.log(`\u26a0\ufe0f assessConnectionHealth error: ${e}`);
+      return false;
+    }
   }
 
   /**
