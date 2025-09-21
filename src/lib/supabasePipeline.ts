@@ -107,6 +107,9 @@ class SupabasePipeline {
   private lastOutboxStartAt = 0;
   private lastOutboxTriggerAt = 0;
 
+  // Track last realtime auth token applied to websocket
+  private lastRealtimeAuthToken: string | null = null;
+
   // Circuit breaker for repeated failures
   private failureCount = 0;
   private lastFailureAt = 0;
@@ -483,8 +486,6 @@ class SupabasePipeline {
       if (success && result?.data?.session) {
         this.updateSessionCache(result.data.session);
       }
-
-      return success;
 
       return success;
     } catch (error) {
@@ -1652,6 +1653,26 @@ class SupabasePipeline {
       throw error;
     } finally {
       this.isOutboxProcessing = false;
+    }
+  }
+
+  /**
+   * Apply JWT to realtime websocket. Returns whether token changed since last application.
+   */
+  public async setRealtimeAuth(token: string | null | undefined): Promise<{ changed: boolean }> {
+    try {
+      const client = await this.getDirectClient();
+      const incoming = token || null;
+      const changed = incoming !== this.lastRealtimeAuthToken;
+      if ((client as any)?.realtime?.setAuth) {
+        (client as any).realtime.setAuth(incoming || undefined);
+      }
+      this.lastRealtimeAuthToken = incoming;
+      this.log(`📨 setRealtimeAuth: token ${changed ? 'changed' : 'unchanged'}${incoming ? ' (set)' : ' (cleared)'}`);
+      return { changed };
+    } catch (e) {
+      this.log(`❌ setRealtimeAuth failed: ${stringifyError(e)}`);
+      return { changed: false };
     }
   }
 

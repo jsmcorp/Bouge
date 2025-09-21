@@ -29,8 +29,8 @@ class ReconnectionManager {
   public async reconnect(reason: string): Promise<void> {
     const now = Date.now();
 
-    // Debounce rapid reconnection attempts
-    if (now - this.state.lastReconnectAt < 2000) {
+    // Debounce rapid reconnection attempts (short TTL lock ~500ms)
+    if (now - this.state.lastReconnectAt < 500) {
       this.log(`Reconnect debounced (${now - this.state.lastReconnectAt}ms since last) - reason: ${reason}`);
       return;
     }
@@ -67,7 +67,8 @@ class ReconnectionManager {
    * Perform the actual reconnection logic following WhatsApp-like sequence
    */
   private async performReconnection(reason: string): Promise<void> {
-    this.log(`🔄 Starting WhatsApp-like reconnection sequence - reason: ${reason}`);
+    const correlationId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    this.log(`🔄 Starting WhatsApp-like reconnection sequence - reason: ${reason} [cid=${correlationId}]`);
 
     // Step 1: Stabilization delay (avoid spurious events)
     await new Promise(resolve => setTimeout(resolve, 200));
@@ -82,45 +83,59 @@ class ReconnectionManager {
     await this.waitForNetworkStability();
 
     // NEW: Step 4.5 Assess current connection health before any cleanup
+    this.log('⚡ Fast path resume: assessing current channel');
     const isHealthy = await this.assessConnectionHealth();
     if (isHealthy) {
-      this.log('🟢 Connection healthy - preserving existing channel (no cleanup)');
+      this.log('🟢 Channel already subscribed (fast path) — skipping cleanup');
       // Ensure token is applied but avoid re-entry loops
       try { await this.applyTokenToRealtime(); } catch {}
-      // Start outbox processing and finish early
-      await this.startOutboxProcessing();
-      this.log(`✅ Reconnection sequence completed (connection preserved) - reason: ${reason}`);
+      this.log('Fast path: leaving existing subscription intact');
       return;
     }
 
-    // Step 5: Clean up existing connections completely
-    await this.cleanupConnections();
+    // Fetch current store state
+    const mod = await import('@/store/chatstore_refactored');
+    const useChatStore = (mod as any).useChatStore;
+    const state = useChatStore?.getState?.();
+    const channel: any = state?.realtimeChannel;
+    const activeGroupId: string | undefined = state?.activeGroup?.id;
 
-    // Step 6: Refresh session with timeout and retry
-    await this.refreshSession();
-
-    // Step 7: Apply token to realtime client
+    // Ensure realtime has the latest token applied
     await this.applyTokenToRealtime();
 
-    // Step 8: Begin reconnect only after cleanup is complete
-    await this.reconnectRealtime();
+    // If channel exists and isn't terminal, attempt subscribe without cleanup
+    if (channel && channel.state !== 'closed') {
+      this.log(`🟡 Fast path: channel present (state=${channel.state || 'unknown'}); attempting subscribe without cleanup`);
+      if (typeof state?.ensureSubscribedFastPath === 'function' && activeGroupId) {
+        await state.ensureSubscribedFastPath(activeGroupId);
+      } else if (typeof state?.setupRealtimeSubscription === 'function' && activeGroupId) {
+        await state.setupRealtimeSubscription(activeGroupId);
+      }
+    } else if (activeGroupId) {
+      // No channel — create and subscribe
+      this.log('🟡 Fast path: no channel; creating channel and subscribing');
+      if (typeof state?.setupRealtimeSubscription === 'function') {
+        await state.setupRealtimeSubscription(activeGroupId);
+      }
+    } else {
+      this.log('🟡 Fast path: no active group; skipping subscribe');
+    }
 
     // Guard: if no active group, skip waiting for SUBSCRIBED entirely
     if (!(await this.shouldWaitForSubscription())) {
       this.log('🟡 No active group/channel – skipping SUBSCRIBED wait');
-      // Start outbox processing even if no channel (it uses HTTP path)
-      await this.startOutboxProcessing();
+      // Do not reset outbox here; pipeline will decide when to process via HTTP fallback if needed
       this.log(`✅ Reconnection sequence completed (no active group) - reason: ${reason}`);
       return;
     }
 
-    // Step 9: Wait for subscription confirmation (SUBSCRIBED state)
+    // Wait for subscription confirmation (SUBSCRIBED state)
     await this.waitForSubscriptionConfirmation();
 
-    // Step 10: Start outbox processing only after subscription confirmed
+    // Start outbox processing only after subscription confirmed
     await this.startOutboxProcessing();
 
-    this.log(`✅ WhatsApp-like reconnection sequence completed - reason: ${reason}`);
+    this.log(`✅ WhatsApp-like reconnection sequence completed - reason: ${reason} [cid=${correlationId}]`);
   }
 
   /**
@@ -166,28 +181,6 @@ class ReconnectionManager {
     }
   }
 
-  /**
-   * Clean up existing connections completely
-   */
-  private async cleanupConnections(): Promise<void> {
-    this.log('🧹 Cleaning up existing connections completely');
-
-    try {
-      // Get chat store and cleanup realtime
-      const mod = await import('@/store/chatstore_refactored');
-      const state = (mod as any).useChatStore?.getState?.();
-
-      if (typeof state?.cleanupRealtimeSubscription === 'function') {
-        state.cleanupRealtimeSubscription();
-      }
-
-      // Longer delay to ensure complete cleanup
-      await new Promise(resolve => setTimeout(resolve, 500));
-      this.log('✅ Cleanup completed');
-    } catch (error) {
-      this.log(`⚠️ Cleanup error (non-fatal): ${error}`);
-    }
-  }
 
   /**
    * Wait for network stability
@@ -212,60 +205,6 @@ class ReconnectionManager {
     }
   }
 
-  /**
-   * Use token recovery strategy instead of hard recreation
-   */
-  private async refreshSession(): Promise<void> {
-    this.log('🔑 Using token recovery strategy for session refresh');
-
-    // Try token recovery first (avoids hanging getSession() calls)
-    try {
-      const recovered = await supabasePipeline.recoverSession();
-      if (recovered) {
-        this.log('✅ Session recovered using cached tokens');
-        return;
-      }
-    } catch (error) {
-      this.log(`⚠️ Token recovery failed: ${error}`);
-    }
-
-    // Fallback to direct refresh with retries
-    const maxRetries = 3;
-    const timeoutMs = 8000;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        this.log(`🔑 Direct refresh attempt ${attempt}/${maxRetries}`);
-
-        const refreshPromise = supabasePipeline.refreshSessionDirect();
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Session refresh timeout')), timeoutMs)
-        );
-
-        const success = await Promise.race([refreshPromise, timeoutPromise]);
-
-        if (!success) {
-          throw new Error('Session refresh returned false');
-        }
-
-        this.log('✅ Session refreshed successfully');
-        return;
-      } catch (error) {
-        this.log(`❌ Direct refresh attempt ${attempt} failed: ${error}`);
-
-        if (attempt === maxRetries) {
-          this.log('⚠️ All refresh attempts failed, but keeping client alive');
-          // Don't recreate client - just log the failure and continue
-          // The app can still function with cached tokens
-          return;
-        }
-
-        // Exponential backoff
-        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-  }
 
   /**
    * Apply token to realtime client
@@ -275,54 +214,15 @@ class ReconnectionManager {
 
     try {
       const session = await supabasePipeline.getWorkingSession();
-      const token = session?.access_token;
-      if (!token) throw new Error('No access token available');
-
-      const client = await supabasePipeline.getDirectClient();
-      if ((client as any)?.realtime?.setAuth) {
-        (client as any).realtime.setAuth(token);
-      }
-
-      // Give realtime time to process the token
-      await new Promise(resolve => setTimeout(resolve, 200));
-      this.log('✅ Token applied to realtime client');
+      const token = session?.access_token || null;
+      const { changed } = await supabasePipeline.setRealtimeAuth(token);
+      this.log(`✅ Token ${changed ? 'changed' : 'unchanged'}; ${changed ? 'will ensure (re)subscribe if needed' : 'no resubscribe required if channel healthy'}`);
     } catch (error) {
       this.log(`❌ Failed to apply token to realtime: ${error}`);
       throw error;
     }
   }
 
-  /**
-   * Begin reconnect only after cleanup is complete
-   */
-  private async reconnectRealtime(): Promise<void> {
-    this.log('📡 Beginning realtime reconnection');
-
-    try {
-      const mod = await import('@/store/chatstore_refactored');
-      const useChatStore = (mod as any).useChatStore;
-      const state = useChatStore?.getState?.();
-      const activeGroup = state?.activeGroup;
-
-      if (!activeGroup?.id) {
-        this.log('No active group, skipping realtime reconnection');
-        return;
-      }
-
-      // Setup realtime subscription
-      if (typeof state?.setupRealtimeSubscription === 'function') {
-        this.log(`📡 Setting up realtime subscription for group ${activeGroup.id}`);
-        await state.setupRealtimeSubscription(activeGroup.id);
-      } else {
-        throw new Error('setupRealtimeSubscription method not available');
-      }
-
-      this.log('✅ Realtime reconnection initiated');
-    } catch (error) {
-      this.log(`❌ Realtime reconnection failed: ${error}`);
-      throw error;
-    }
-  }
 
   /**
    * Wait for subscription confirmation (SUBSCRIBED state)

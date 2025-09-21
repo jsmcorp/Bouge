@@ -38,6 +38,7 @@ interface DbPollRow {
 export interface RealtimeActions {
   setupRealtimeSubscription: (groupId: string) => Promise<void>;
   setupSimplifiedRealtimeSubscription: (groupId: string) => Promise<void>;
+  ensureSubscribedFastPath: (groupId: string) => Promise<void>;
   cleanupRealtimeSubscription: () => void;
   sendTypingStatus: (isTyping: boolean, isGhost?: boolean) => void;
   handlePresenceSync: () => void;
@@ -346,7 +347,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
       const options = pollRow.options as unknown as string[];
       voteCounts = new Array(options.length).fill(0);
-      (votes || []).forEach((v: any) => {
+      (votes || []).forEach((v: { option_index: number }) => {
         if (typeof v.option_index === 'number' && v.option_index < voteCounts.length) {
           voteCounts[v.option_index]++;
         }
@@ -409,7 +410,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Legacy implementation would go here
         return { ok: true };
       }
-      
+
       // For simplified version, just check if we have a session
       try {
         const client = await supabasePipeline.getDirectClient();
@@ -424,7 +425,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       if (FEATURES.SIMPLIFIED_REALTIME) {
         return await (get() as any).setupSimplifiedRealtimeSubscription(groupId);
       }
-      
+
       // Legacy implementation would be here
       log('Using legacy realtime subscription');
     },
@@ -498,10 +499,10 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Create channel with simple config and unique name
         const channelName = `group-${groupId}-${localToken}`;
         log(`Creating channel: ${channelName}`);
-        
+
         const client = await supabasePipeline.getDirectClient();
         const channel = client.channel(channelName, {
-          config: { 
+          config: {
             presence: { key: user.id },
             broadcast: { self: true }
           },
@@ -565,7 +566,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           bumpActivity();
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
           if (vote.user_id === user.id) return; // Skip own votes
-          
+
           const state = get();
           const updatedPolls = state.polls.map((p: Poll) => {
             if (p.id !== vote.poll_id) return p;
@@ -606,7 +607,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               log(`Ignoring stale subscription callback: ${status}`);
               return;
             }
-            
+
             log(`Subscription status: ${status}`);
             bumpActivity();
 
@@ -690,9 +691,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 }
 
                 // Update realtime auth with whatever token we have (may be undefined)
-                try { 
+                try {
                   const client = await supabasePipeline.getDirectClient();
-                  (client as any).realtime?.setAuth?.(currentSession?.access_token); 
+                  (client as any).realtime?.setAuth?.(currentSession?.access_token);
                 } catch (_) {}
               }
 
@@ -725,6 +726,52 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         handleChannelError(groupId);
       }
     },
+
+    // Idempotent fast path: resubscribe existing channel without teardown when possible
+    ensureSubscribedFastPath: async (groupId: string) => {
+      const { realtimeChannel, connectionStatus } = get();
+      if (!groupId) { log('Fast path: missing group id; skipping'); return; }
+      if (!realtimeChannel) {
+        log('Fast path: no existing channel; creating new');
+        return await (get() as any).setupSimplifiedRealtimeSubscription(groupId);
+      }
+      if (connectionStatus === 'connected') { log('Fast path resume: Channel already subscribed'); return; }
+
+      log('Fast path: re-subscribing existing channel');
+      set({ connectionStatus: 'connecting' });
+      try {
+        await new Promise<void>((resolve) => {
+          (realtimeChannel as any).subscribe((status: any) => {
+            log(`Subscription status (fast): ${status}`);
+            if (status === 'SUBSCRIBED') {
+              set({ connectionStatus: 'connected', subscribedAt: Date.now(), isReconnecting: false, realtimeChannel });
+              try {
+                const { triggerOutboxProcessing } = get();
+                if (typeof triggerOutboxProcessing === 'function') {
+                  setTimeout(() => triggerOutboxProcessing('realtime-connected', 'normal'), 1000);
+                }
+              } catch {}
+              resolve();
+            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
+              set({ connectionStatus: 'disconnected' });
+              (async () => {
+                try {
+                  const { reconnectionManager } = await import('@/lib/reconnectionManager');
+                  await reconnectionManager.reconnect(`fast-status-${String(status).toLowerCase()}`);
+                } catch {}
+              })();
+              resolve();
+            } else if (status === 'CONNECTING') {
+              set({ connectionStatus: 'connecting' });
+            }
+          });
+        });
+      } catch (e) {
+        set({ connectionStatus: 'disconnected' });
+        log('Fast path subscribe error: ' + (e as Error).message);
+      }
+    },
+
 
     cleanupRealtimeSubscription: async () => {
       const { realtimeChannel, typingTimeout } = get();
@@ -883,28 +930,44 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
 
       log('Setting up auth state listener for realtime');
-      
+
       (async () => {
         try {
           const res = await supabasePipeline.onAuthStateChange((event, session) => {
             const state = get();
             const activeGroupId = state.activeGroup?.id;
-            
+
             log(`Auth event: ${event}`);
-            
+
             if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-              // Always apply the latest token to realtime
+              // Apply the latest token to realtime directly; avoid recursive flows
               try { (supabasePipeline as any).getDirectClient?.().then((c: any) => c?.realtime?.setAuth?.(session?.access_token)).catch(() => {}); } catch {}
-              if (activeGroupId) {
-                log('Token applied, reconnecting realtime');
-                get().forceReconnect(activeGroupId);
-              }
-              // Reset outbox state and kick processing after token events using unified system (delayed to avoid redundant triggers)
-              resetOutboxProcessingState();
+
+              // If not healthy, request a single-flight reconnect via reconnectionManager
               try {
-                const { triggerOutboxProcessing } = get();
-                if (typeof triggerOutboxProcessing === 'function') {
-                  setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+                const { connectionStatus, realtimeChannel } = get();
+                const healthy = connectionStatus === 'connected' && !!realtimeChannel;
+                if (activeGroupId && !healthy) {
+                  log('Token applied; channel not healthy, requesting reconnection');
+                  (async () => {
+                    try { const { reconnectionManager } = await import('@/lib/reconnectionManager'); await reconnectionManager.reconnect('auth-token-applied'); } catch {}
+                  })();
+                } else {
+                  log('Token applied; channel healthy, no reconnect');
+                }
+              } catch {}
+
+              // Do not reset outbox on every auth event if channel healthy
+              try {
+                const { connectionStatus, realtimeChannel, triggerOutboxProcessing } = get();
+                const healthy = connectionStatus === 'connected' && !!realtimeChannel;
+                if (!healthy) {
+                  resetOutboxProcessingState();
+                  if (typeof triggerOutboxProcessing === 'function') {
+                    setTimeout(() => triggerOutboxProcessing('auth-token-refreshed', 'high'), 500);
+                  }
+                } else {
+                  log('Auth token event: channel healthy; skipping outbox reset');
                 }
               } catch {}
             } else if (event === 'SIGNED_OUT') {
