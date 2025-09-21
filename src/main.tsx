@@ -132,9 +132,6 @@ createRoot(document.getElementById('root')!).render(
 				const { reconnectionManager } = await import('@/lib/reconnectionManager');
 				mobileLogger.log('info', 'network', 'Network reconnected');
 
-				// Update connection status to show we're trying to reconnect
-				whatsappConnection.setConnectionState('reconnecting', 'Reconnecting...');
-
 				reconnectionManager.reconnect('network-online').catch(error => {
 					mobileLogger.log('error', 'network', 'Network reconnection failed', { error });
 					whatsappConnection.setConnectionState('disconnected', 'Connection failed');

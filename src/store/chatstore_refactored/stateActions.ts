@@ -169,28 +169,20 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   },
 
   onAppResumeSimplified: () => {
-    const { activeGroup, realtimeChannel } = get() as any;
+    const { activeGroup } = get() as any;
     if (!activeGroup?.id) {
       console.log('[realtime-v2] No active group, skipping resume');
       return;
     }
 
-    console.log('[realtime-v2] App resumed - checking channel state');
+    console.log('[realtime-v2] App resumed - delegating to reconnection manager');
 
-    // Check if channel is still connected
-    if (!realtimeChannel || realtimeChannel.state !== 'joined') {
-      console.log('[realtime-v2] Channel not connected, re-subscribing');
-      // Simply re-subscribe to the channel - don't recreate the client
-      try {
-        (get() as any).setupRealtimeSubscription?.(activeGroup.id);
-      } catch (error) {
-        console.error('[realtime-v2] Failed to re-subscribe on resume:', error);
-      }
-    } else {
-      console.log('[realtime-v2] Channel still connected, no action needed');
-    }
+    // Route through health-first reconnection manager; it will fast-path when healthy
+    import('@/lib/reconnectionManager')
+      .then(({ reconnectionManager }) => reconnectionManager.reconnect('app-resume'))
+      .catch((error) => console.error('[realtime-v2] Reconnect on resume failed:', error));
 
-    // Process any pending outbox messages
+    // Process any pending outbox messages (no reset)
     try {
       const { triggerOutboxProcessing } = get() as any;
       if (typeof triggerOutboxProcessing === 'function') {
@@ -262,30 +254,27 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
   onNetworkOnlineSimplified: () => {
     console.log('[realtime-v2] Network came online');
-    const { triggerOutboxProcessing, activeGroup, connectionStatus } = get();
-    
+    const { triggerOutboxProcessing } = get();
+
     // Notify pipeline about network reconnection
     import('@/lib/supabasePipeline').then(({ supabasePipeline }) => {
       supabasePipeline.onNetworkReconnect();
     }).catch(error => {
       console.warn('[realtime-v2] Failed to notify pipeline of network reconnect:', error);
     });
-    
+
     // Only trigger outbox processing, don't reset state as that causes redundant triggers
     console.log('[realtime-v2] Network online - triggering outbox processing only');
     if (typeof triggerOutboxProcessing === 'function') {
       triggerOutboxProcessing('network-online', 'high');
     }
-    
-    // If we have an active group and aren't connected, reconnect
-    if (activeGroup?.id && connectionStatus !== 'connected') {
-      console.log('[realtime-v2] Network online - reconnecting');
-      
-      // Small delay to let network stabilize
-      setTimeout(() => {
-        get().onAppResumeSimplified();
-      }, 500); // Faster than legacy 1000ms
-    }
+
+    // Route reconnect through the single-flight reconnection manager (health-first)
+    setTimeout(() => {
+      import('@/lib/reconnectionManager')
+        .then(({ reconnectionManager }) => reconnectionManager.reconnect('network-online'))
+        .catch((error) => console.warn('[realtime-v2] Network reconnect failed:', error));
+    }, 500);
   },
   
   closeGroupDetailsPanel: () => {
