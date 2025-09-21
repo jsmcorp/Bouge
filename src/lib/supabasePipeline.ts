@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import type { AuthChangeEvent } from '@supabase/supabase-js';
 import type { Database } from './database.types';
 import { sqliteService } from './sqliteService';
 import { Capacitor } from '@capacitor/core';
@@ -6,7 +7,7 @@ import { Capacitor } from '@capacitor/core';
 // Database types for proper typing
 type GroupInsert = Database['public']['Tables']['groups']['Insert'];
 type MessageInsert = Database['public']['Tables']['messages']['Insert'];
-type UserInsert = Database['public']['Tables']['users']['Insert'];
+
 
 
 // Types for the pipeline
@@ -200,7 +201,7 @@ class SupabasePipeline {
 
         // Attach internal auth listener to cache tokens
         try {
-          const sub = this.client.auth.onAuthStateChange((_event, session: any) => {
+          const sub = this.client.auth.onAuthStateChange((_event: AuthChangeEvent, session: any) => {
             try {
               const s = session || {};
               this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
@@ -1133,7 +1134,7 @@ class SupabasePipeline {
   /**
    * Update user profile
    */
-  public async updateUser(userId: string, updates: any): Promise<{ data: any | null; error: any }> {
+  public async updateUser(userId: string, updates: Database['public']['Tables']['users']['Update']): Promise<{ data: any | null; error: any }> {
     return this.executeQuery(async () => {
       const client = await this.getClient();
       return client

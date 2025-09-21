@@ -346,7 +346,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       }
       const options = pollRow.options as unknown as string[];
       voteCounts = new Array(options.length).fill(0);
-      (votes || []).forEach(v => {
+      (votes || []).forEach((v: any) => {
         if (typeof v.option_index === 'number' && v.option_index < voteCounts.length) {
           voteCounts[v.option_index]++;
         }
@@ -510,7 +510,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Message inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}`,
-        }, async (payload) => {
+        }, async (payload: any) => {
           if (localToken !== connectionToken) return; // Ignore stale callbacks
           bumpActivity();
           const row = payload.new as DbMessageRow;
@@ -550,7 +550,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Poll inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'polls',
-        }, async (payload) => {
+        }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
           const pollRow = payload.new as DbPollRow;
@@ -560,7 +560,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Poll vote inserts
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'poll_votes',
-        }, async (payload) => {
+        }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
@@ -601,7 +601,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
             get().handlePresenceSync();
           })
-          .subscribe(async (status) => {
+          .subscribe(async (status: any) => {
             if (localToken !== connectionToken) {
               log(`Ignoring stale subscription callback: ${status}`);
               return;

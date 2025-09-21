@@ -416,7 +416,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           
           console.log(`📤 Starting ${timeoutMs}ms timeout race for Supabase insert of message ${messageId} (attempt ${attemptNum})...`);
           const { data, error } = await Promise.race([
-            insertPromise.then(result => {
+            insertPromise.then((result: any) => {
               console.log(`📤 Supabase insert completed for message ${messageId} (attempt ${attemptNum})`);
               return result;
             }),

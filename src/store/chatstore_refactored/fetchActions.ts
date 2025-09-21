@@ -122,7 +122,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         return;
       }
 
-      const groupIds = memberGroups.map(mg => mg.group_id);
+      const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
 
       const { data: groups, error: groupsError } = await client
         .from('groups')
@@ -608,7 +608,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (error) throw error;
 
       const rows = (data || []).slice().reverse();
-      const messages = await Promise.all(rows.map(async (msg) => {
+      const messages = await Promise.all(rows.map(async (msg: any) => {
         const { count: replyCount } = await client
           .from('messages')
           .select('*', { count: 'exact', head: true })
@@ -625,7 +625,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           .order('created_at', { ascending: true })
           .limit(3);
 
-        const formattedReplies = (replies || []).map((reply) => ({
+        const formattedReplies = (replies || []).map((reply: any) => ({
           ...reply,
           author: reply.is_ghost ? undefined : reply.users,
           reply_count: 0,
@@ -650,7 +650,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             const pollOptions = poll.options as string[];
             const voteCounts = new Array(pollOptions.length).fill(0);
-            votes?.forEach(vote => {
+            votes?.forEach((vote: any) => {
               if (vote.option_index < voteCounts.length) {
                 voteCounts[vote.option_index]++;
               }
@@ -800,7 +800,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       if (error) throw error;
 
-      return (data || []).map((reply) => ({
+      return (data || []).map((reply: any) => ({
         ...reply,
         author: reply.is_ghost ? undefined : reply.users,
         reply_count: 0,
@@ -846,7 +846,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       if (!data || data.length === 0) return;
 
-      const formatted = data.map((msg) => ({
+      const formatted = data.map((msg: any) => ({
         ...msg,
         author: msg.is_ghost ? undefined : msg.users,
         reply_count: 0,

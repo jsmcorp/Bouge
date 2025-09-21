@@ -1,5 +1,5 @@
 import { supabasePipeline } from '@/lib/supabasePipeline';
-import { Json } from '@/lib/supabase';
+import type { Json } from '@/lib/database.types';
 import { Poll } from './types';
 
 export interface PollActions {
@@ -37,7 +37,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
         const pollOptions = poll.options as string[];
         const voteCounts = new Array(pollOptions.length).fill(0);
-        votes?.forEach(vote => {
+        votes?.forEach((vote: any) => {
           if (vote.option_index < voteCounts.length) {
             voteCounts[vote.option_index]++;
           }
