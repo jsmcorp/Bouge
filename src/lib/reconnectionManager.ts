@@ -68,7 +68,7 @@ class ReconnectionManager {
    */
   private async performReconnection(reason: string): Promise<void> {
     const correlationId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    this.log(`🔄 Starting WhatsApp-like reconnection sequence - reason: ${reason} [cid=${correlationId}]`);
+    this.log(`🧭 Triggers coalesced; assessing health - reason: ${reason} [cid=${correlationId}]`);
 
     // Step 1: Stabilization delay (avoid spurious events)
     await new Promise(resolve => setTimeout(resolve, 200));
@@ -86,12 +86,25 @@ class ReconnectionManager {
     this.log('⚡ Fast path resume: assessing current channel');
     const isHealthy = await this.assessConnectionHealth();
     if (isHealthy) {
-      this.log('🟢 Channel already subscribed (fast path) — skipping cleanup');
-      // Ensure token is applied but avoid re-entry loops
-      try { await this.applyTokenToRealtime(); } catch {}
-      this.log('Fast path: leaving existing subscription intact');
+      // Gate session recovery on fast-path using cached tokens only
+      try {
+        const currentToken = supabasePipeline.getCachedAccessToken();
+        const lastApplied = supabasePipeline.getLastRealtimeAuthToken();
+        if (currentToken && currentToken === lastApplied) {
+          this.log('Fast path: token unchanged, skipping session recovery.');
+        } else {
+          // Apply token directly without triggering session recovery flows
+          try { await supabasePipeline.setRealtimeAuth(currentToken || null); } catch {}
+        }
+      } catch {}
+      this.log('Reconnection decision: fast-path (no reconnect).');
+      this.log('Channel already subscribed');
       return;
     }
+
+    // From here, we decided to reconnect
+    this.log('Reconnection decision: reconnecting');
+    this.log(`🔄 Starting WhatsApp-like reconnection sequence - reason: ${reason} [cid=${correlationId}]`);
 
     // Fetch current store state
     const mod = await import('@/store/chatstore_refactored');
@@ -100,12 +113,12 @@ class ReconnectionManager {
     const channel: any = state?.realtimeChannel;
     const activeGroupId: string | undefined = state?.activeGroup?.id;
 
-    // Ensure realtime has the latest token applied
+    // Ensure realtime has the latest token applied (may perform session recovery if needed)
     await this.applyTokenToRealtime();
 
     // If channel exists and isn't terminal, attempt subscribe without cleanup
     if (channel && channel.state !== 'closed') {
-      this.log(`🟡 Fast path: channel present (state=${channel.state || 'unknown'}); attempting subscribe without cleanup`);
+      this.log('Creating channel … (re-subscribing existing channel)');
       if (typeof state?.ensureSubscribedFastPath === 'function' && activeGroupId) {
         await state.ensureSubscribedFastPath(activeGroupId);
       } else if (typeof state?.setupRealtimeSubscription === 'function' && activeGroupId) {
@@ -113,7 +126,7 @@ class ReconnectionManager {
       }
     } else if (activeGroupId) {
       // No channel — create and subscribe
-      this.log('🟡 Fast path: no channel; creating channel and subscribing');
+      this.log('Creating channel …');
       if (typeof state?.setupRealtimeSubscription === 'function') {
         await state.setupRealtimeSubscription(activeGroupId);
       }

@@ -122,6 +122,14 @@ class SupabasePipeline {
     this.log('🧪 Debug tag: v2025-08-22.1');
   }
 
+  /** Lightweight accessors for cached/auth tokens used by reconnectionManager fast-path */
+  public getCachedAccessToken(): string | null {
+    return this.lastKnownAccessToken;
+  }
+  public getLastRealtimeAuthToken(): string | null {
+    return this.lastRealtimeAuthToken;
+  }
+
   /**
    * Circuit breaker methods for handling repeated failures
    */
