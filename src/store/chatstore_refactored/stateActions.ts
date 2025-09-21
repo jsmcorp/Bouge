@@ -1,5 +1,4 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
-import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES } from '@/lib/supabase';
 
 // Resume/unlock flow is owned exclusively by supabasePipeline.onAppResume()
@@ -170,24 +169,57 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   },
 
   onAppResumeSimplified: () => {
-    const { activeGroup } = get() as any;
+    const { activeGroup, realtimeChannel } = get() as any;
     if (!activeGroup?.id) {
       console.log('[realtime-v2] No active group, skipping resume');
       return;
     }
-    // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
-    supabasePipeline.onAppResume().catch(error => {
-      console.error('[realtime-v2] Pipeline app resume failed:', error);
-    });
+
+    console.log('[realtime-v2] App resumed - checking channel state');
+
+    // Check if channel is still connected
+    if (!realtimeChannel || realtimeChannel.state !== 'joined') {
+      console.log('[realtime-v2] Channel not connected, re-subscribing');
+      // Simply re-subscribe to the channel - don't recreate the client
+      try {
+        (get() as any).setupRealtimeSubscription?.(activeGroup.id);
+      } catch (error) {
+        console.error('[realtime-v2] Failed to re-subscribe on resume:', error);
+      }
+    } else {
+      console.log('[realtime-v2] Channel still connected, no action needed');
+    }
+
+    // Process any pending outbox messages
+    try {
+      const { triggerOutboxProcessing } = get() as any;
+      if (typeof triggerOutboxProcessing === 'function') {
+        triggerOutboxProcessing('app-resume', 'high');
+      }
+    } catch (error) {
+      console.error('[realtime-v2] Failed to trigger outbox processing on resume:', error);
+    }
   },
 
-  // Central onWake(reason, groupId?) orchestrates: ensureAuthForWrites (writes only) → realtime rebuild → syncMissed → outbox
-  onWake: async (_reason?: string, _groupIdOverride?: string) => {
+  // Simplified wake handler - just ensure connection and process outbox
+  onWake: async (reason?: string, groupIdOverride?: string) => {
     try {
-      // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
-      await get().onAppResumeSimplified();
+      console.log(`[realtime-v2] Wake event: ${reason || 'unknown'}`);
+
+      // If a specific group is mentioned, switch to it
+      if (groupIdOverride) {
+        const groups = (get() as any).groups || [];
+        const targetGroup = groups.find((g: any) => g.id === groupIdOverride);
+        if (targetGroup) {
+          console.log(`[realtime-v2] Switching to group from wake: ${targetGroup.name}`);
+          (get() as any).setActiveGroup?.(targetGroup);
+        }
+      }
+
+      // Resume connection
+      get().onAppResumeSimplified();
     } catch (e) {
-      console.warn('onWake error:', e);
+      console.warn('[realtime-v2] onWake error:', e);
     }
   },
 

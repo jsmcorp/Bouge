@@ -185,6 +185,32 @@ await new Promise(resolve => setTimeout(resolve, delay));
 - **Medium**: >10 session timeouts per hour
 - **Low**: WebView state validation failures
 
+## Code Refactoring & Dead Code Removal
+
+### Removed Dead Code
+1. **Duplicate Methods**:
+   - `detectCorruption()` - Duplicate of `isClientCorrupted()`
+   - `deltaSyncMessages()` - Unused method for delta sync
+   - `removeAllChannels()` - Unused realtime channel cleanup
+   - `markDeviceUnlocked()` - Unused device unlock tracking
+
+2. **Unused Properties**:
+   - `unlockGracePeriodMs` - Disabled unlock gating constant
+   - `logWarning()` - Redundant logging method (replaced with standard log)
+
+3. **Import Fix**:
+   - Fixed `@capacitor/device` import error by using `@capacitor/network` instead
+
+4. **Function Export Cleanup**:
+   - Removed `markDeviceUnlock()` export from `messageActions.ts` that called deleted method
+   - Device unlock tracking now handled by `deviceLockDetection` and `reconnectionManager`
+
+### Refactoring Benefits
+- **Reduced file size**: ~50 lines of dead code removed
+- **Simplified maintenance**: Fewer methods to maintain
+- **Cleaner API**: Removed duplicate functionality
+- **Fixed build errors**: Resolved missing import issues
+
 ## Future Improvements
 
 ### Potential Enhancements

@@ -382,12 +382,12 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       
       let lastError: any = null;
       let retryCount = 0;
-      const maxRetries = 2; // Initial attempt + 1 retry
+      const maxRetries = 3; // Initial attempt + 2 retries (increased for better reliability)
       let successData: any = undefined;
-      
+
       while (retryCount <= maxRetries) {
         const attemptNum = retryCount + 1;
-        const timeoutMs = retryCount === 0 ? 5000 : 8000; // 5s first attempt, 8s retry
+        const timeoutMs = retryCount === 0 ? 12000 : 18000; // 12s first attempt, 18s retry (increased for mobile networks)
         
         try {
           console.log(`📤 Attempt ${attemptNum}/${maxRetries + 1}: Sending message ${messageId} to Supabase...`);

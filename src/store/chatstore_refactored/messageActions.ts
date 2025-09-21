@@ -5,10 +5,7 @@ import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
 import { Message } from './types';
 
-// Use pipeline's device unlock tracking
-export const markDeviceUnlock = () => {
-  supabasePipeline.markDeviceUnlocked();
-};
+// Device unlock tracking is now handled by deviceLockDetection and reconnectionManager
 
 export interface MessageActions {
   sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null) => Promise<void>;

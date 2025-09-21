@@ -52,73 +52,14 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   // Simplified state management
   const authorCache = new Map<string, Author>();
   let connectionToken: string | null = null;
-  let reconnectTimeout: NodeJS.Timeout | null = null;
   let authStateListener: any = null;
-  let retryCount = 0;
-  const maxRetries = 5;
   let isConnecting = false; // Guard against overlapping connection attempts
   let lastForceReconnectAt = 0; // Debounce force reconnects
-  let healthCheckInterval: NodeJS.Timeout | null = null;
-  let lastHealthCheck = 0;
-  let lastMessageReceived = 0;
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
-  // Health monitoring functions
-  const startHealthMonitoring = (groupId: string) => {
-    if (healthCheckInterval) {
-      clearInterval(healthCheckInterval);
-    }
-
-    log('Starting connection health monitoring');
-    healthCheckInterval = setInterval(() => {
-      const now = Date.now();
-      const { connectionStatus } = get();
-
-      // Only monitor if we think we're connected
-      if (connectionStatus !== 'connected') {
-        return;
-      }
-
-      // Check if we haven't received any messages in a while (5 minutes)
-      const timeSinceLastMessage = now - lastMessageReceived;
-      const timeSinceLastHealthCheck = now - lastHealthCheck;
-
-      // If it's been more than 5 minutes since last message and 2 minutes since last health check
-      if (timeSinceLastMessage > 300000 && timeSinceLastHealthCheck > 120000) {
-        log(`Health check: No messages received for ${Math.round(timeSinceLastMessage / 1000)}s, checking connection`);
-        lastHealthCheck = now;
-
-        // Perform a lightweight health check by trying to get session
-        supabasePipeline.getWorkingSession()
-          .then(session => {
-            if (!session) {
-              log('Health check: No valid session, triggering reconnect');
-              get().forceReconnect(groupId);
-            } else {
-              log('Health check: Session valid, connection appears healthy');
-            }
-          })
-          .catch(error => {
-            log(`Health check: Session check failed, triggering reconnect: ${error}`);
-            get().forceReconnect(groupId);
-          });
-      }
-    }, 60000); // Check every minute
-  };
-
-  const stopHealthMonitoring = () => {
-    if (healthCheckInterval) {
-      clearInterval(healthCheckInterval);
-      healthCheckInterval = null;
-      log('Stopped connection health monitoring');
-    }
-  };
-
-  const recordMessageReceived = () => {
-    lastMessageReceived = Date.now();
-  };
+  // Simplified connection monitoring - rely on Supabase's built-in reconnection with Web Worker heartbeats
 
   // Get a usable access token with a bounded wait. Returns null if unavailable in time.
   async function getAccessTokenBounded(limitMs: number): Promise<string | null> {
@@ -159,68 +100,40 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     }
   }
 
-  // Simple retry mechanism - 3 second timeout
-  const scheduleReconnect = (groupId: string, delayMs?: number) => {
-    if (reconnectTimeout) {
-      clearTimeout(reconnectTimeout);
+  // Simplified reconnection - let Supabase handle the timing
+  const handleChannelError = (groupId: string) => {
+    log('Channel error detected, cleaning up and attempting reconnection');
+
+    // Clean up current channel
+    const { realtimeChannel } = get();
+    if (realtimeChannel) {
+      try {
+        supabasePipeline.getDirectClient().then(client => {
+          client.removeChannel(realtimeChannel);
+        });
+      } catch (e) {
+        log('Error removing failed channel: ' + e);
+      }
+      set({ realtimeChannel: null });
     }
 
-    const backoffList = FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch ? FEATURES_PUSH.realtime.retryBackoff : [3000, 6000, 12000, 24000];
-    const maxRetries = backoffList.length;
-    const nextDelay = typeof delayMs === 'number' ? delayMs : backoffList[Math.min(retryCount, backoffList.length - 1)];
-
-    if (retryCount >= maxRetries) {
-      log(`Max retries (${maxRetries}) reached, attempting hard recovery`);
-      set({ connectionStatus: 'disconnected', isReconnecting: false });
-
-      // Try hard recovery before giving up
-      setTimeout(async () => {
-        try {
-          log('Attempting hard client recreation for recovery');
-          await supabasePipeline.hardRecreateClient('max-retries-recovery');
-
-          // Wait a bit then try one more time
-          setTimeout(() => {
-            log('Retrying connection after hard recreation');
-            retryCount = 0; // Reset retry count
-            get().setupRealtimeSubscription(groupId);
-          }, 2000);
-        } catch (error) {
-          log(`Hard recovery failed, starting poll fallback: ${error}`);
-          if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
-            try { (get() as any).startPollFallback?.(); } catch {}
-          }
-        }
-      }, 5000);
+    // Check if we should attempt reconnection
+    const { online } = get();
+    if (!online) {
+      log('Device offline, will reconnect when network returns');
+      set({ connectionStatus: 'disconnected' });
       return;
     }
 
-    retryCount++;
-    log(`Scheduling reconnect attempt ${retryCount}/${maxRetries} in ${nextDelay}ms`);
-
-    set({ connectionStatus: 'reconnecting', isReconnecting: true });
-    reconnectTimeout = setTimeout(async () => {
-      log(`Reconnect attempt ${retryCount} starting...`);
-
-      // Validate network using cached status
-      const { online } = get();
-      if (!online) {
-        log('Device offline during reconnect attempt, rescheduling');
-        scheduleReconnect(groupId, 5000);
-        return;
-      }
-
+    // Simple reconnection attempt after a brief delay
+    set({ connectionStatus: 'reconnecting' });
+    setTimeout(() => {
+      log('Attempting to reestablish connection');
       get().setupRealtimeSubscription(groupId);
-    }, nextDelay);
+    }, 2000);
   };
 
-  const resetRetryCount = () => {
-    retryCount = 0;
-    if (reconnectTimeout) {
-      clearTimeout(reconnectTimeout);
-      reconnectTimeout = null;
-    }
-  };
+  // Simplified connection management - no complex retry counting needed
 
   async function getAuthorProfile(userId: string, isGhost: boolean): Promise<Author | undefined> {
     if (isGhost) return undefined;
@@ -269,27 +182,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     }
   }
 
-  // Simplified heartbeat - just tracks connection health, no complex logic
-  function startSimpleHeartbeat(groupId: string) {
-    const existingHeartbeat = get().heartbeatTimer;
-    if (existingHeartbeat) clearInterval(existingHeartbeat as any);
-
-    const hb = setInterval(() => {
-      const { realtimeChannel, connectionStatus } = get();
-      
-      // Simple ping via presence if connected
-      if (realtimeChannel && connectionStatus === 'connected') {
-        try {
-          realtimeChannel.track({ heartbeat: Date.now() });
-        } catch (e) {
-          log('Heartbeat failed, scheduling reconnect');
-          scheduleReconnect(groupId);
-        }
-      }
-    }, 30000); // 30s heartbeat
-    
-    set({ heartbeatTimer: hb });
-  }
+  // No custom heartbeat needed - Supabase Web Worker handles this automatically
 
   async function buildMessageFromRow(row: DbMessageRow): Promise<Message> {
     const author = await getAuthorProfile(row.user_id, row.is_ghost);
@@ -620,7 +513,6 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload) => {
           if (localToken !== connectionToken) return; // Ignore stale callbacks
           bumpActivity();
-          recordMessageReceived(); // Record message for health monitoring
           const row = payload.new as DbMessageRow;
           try {
             const message = await buildMessageFromRow(row);
@@ -719,16 +611,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
-              // Clear subscribe watchdog if set
-              const { reconnectWatchdogTimer } = get();
-              if (reconnectWatchdogTimer) {
-                clearTimeout(reconnectWatchdogTimer as any);
-                set({ reconnectWatchdogTimer: null });
-              }
-              resetRetryCount(); // Reset on successful connection
+              // Connection established successfully
               resetOutboxProcessingState(); // Reset outbox state on successful connection
-              recordMessageReceived(); // Initialize health monitoring timestamp
-              startHealthMonitoring(groupId); // Start health monitoring
               isConnecting = false; // Clear the guard
               set({
                 connectionStatus: 'connected',
@@ -747,7 +631,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Stop degraded poll fallback when connected
               try { (get() as any).stopPollFallback?.(); } catch {}
 
-              startSimpleHeartbeat(groupId);
+              // No custom heartbeat needed - Supabase Web Worker handles this
 
               // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
               try {
@@ -767,13 +651,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 log('Background message fetch failed: ' + e);
               }
             } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
-              // Clear subscribe watchdog if set
-              const { reconnectWatchdogTimer } = get();
-              if (reconnectWatchdogTimer) {
-                clearTimeout(reconnectWatchdogTimer as any);
-                set({ reconnectWatchdogTimer: null });
-              }
-              log(`❌ Connection failed with status: ${status} - Retry count: ${retryCount}/${maxRetries}`);
+              // Connection failed - let Supabase handle reconnection
+              log(`❌ Connection failed with status: ${status}`);
               isConnecting = false; // Clear the guard
 
               // Enhanced handling for CHANNEL_ERROR - try session refresh first, avoid excessive rebuilds
@@ -818,7 +697,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               }
 
               set({ connectionStatus: 'disconnected' });
-              scheduleReconnect(groupId);
+              handleChannelError(groupId);
               if (FEATURES_PUSH.enabled && !FEATURES_PUSH.killSwitch) {
                 console.log(`[rt] rebuild channel=group-${groupId} status=${status}`);
               }
@@ -830,24 +709,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             }
           }, 10000); // 10 second timeout
 
-        // Subscribe watchdog: if we don't reach SUBSCRIBED within a bound, rebuild
-        try {
-          const watchdog = setTimeout(async () => {
-            if (localToken !== connectionToken) return;
-            const state = get();
-            if (state.connectionStatus !== 'connected') {
-              log('Subscribe watchdog timeout, rebuilding connection');
-              isConnecting = false;
-              try { 
-                const client = await supabasePipeline.getDirectClient();
-                client.removeChannel(channel); 
-              } catch {}
-              set({ connectionStatus: 'disconnected' });
-              scheduleReconnect(groupId, 300);
-            }
-          }, Math.max(8000, FEATURES_PUSH.auth.refreshTimeoutMs + 500));
-          set({ reconnectWatchdogTimer: watchdog as any });
-        } catch {}
+        // No watchdog timeout needed - rely on Supabase's built-in connection handling
 
       } catch (error) {
         log('Setup error: ' + (error as Error).message);
@@ -860,20 +722,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           whatsappConnection.setConnectionState('disconnected', 'Connection failed');
         } catch {}
 
-        scheduleReconnect(groupId);
+        handleChannelError(groupId);
       }
     },
 
     cleanupRealtimeSubscription: async () => {
-      const { realtimeChannel, typingTimeout, heartbeatTimer, reconnectWatchdogTimer } = get();
+      const { realtimeChannel, typingTimeout } = get();
 
       log('Cleaning up realtime subscription');
       isConnecting = false; // Clear connection guard
       resetOutboxProcessingState(); // Reset outbox state on cleanup
-      stopHealthMonitoring(); // Stop health monitoring
 
       if (typingTimeout) clearTimeout(typingTimeout);
-      
+
       if (realtimeChannel) {
         try {
           const client = await supabasePipeline.getDirectClient();
@@ -884,20 +745,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         set({ realtimeChannel: null });
       }
 
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer as any);
-        set({ heartbeatTimer: null });
-      }
-
-      if (reconnectWatchdogTimer) {
-        clearTimeout(reconnectWatchdogTimer as any);
-        set({ reconnectWatchdogTimer: null });
-      }
-
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-      }
+      // No reconnect timeout to clear with simplified logic
 
       // Clear typing users and reset status
       set({
@@ -1019,7 +867,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         await reconnectionManager.reconnect('force-reconnect');
       } catch (error) {
         log(`Force reconnect failed: ${error}`);
-        scheduleReconnect(groupId, 2000);
+        handleChannelError(groupId);
       }
     },
 

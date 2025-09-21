@@ -82,14 +82,13 @@ class SupabasePipeline {
   private isInitialized = false;
   private initializePromise: Promise<void> | null = null;
   private config: PipelineConfig = {
-    sendTimeoutMs: 6000,
-    healthCheckTimeoutMs: 3000,
-    maxRetries: 2,
-    retryBackoffMs: 1500,
+    sendTimeoutMs: 15000, // Increased from 6s to 15s for mobile networks
+    healthCheckTimeoutMs: 5000, // Increased from 3s to 5s
+    maxRetries: 3, // Increased from 2 to 3 retries
+    retryBackoffMs: 2000, // Increased from 1.5s to 2s
   };
 
-  // Unlock gating disabled; keep constant for logging only
-  private readonly unlockGracePeriodMs = 0; // disabled: do not gate sends after unlock
+
 
   // Last outbox processing statistics for callers to inspect without changing method signatures
   private lastOutboxStats: { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null = null;
@@ -195,6 +194,9 @@ class SupabasePipeline {
             autoRefreshToken: true,
             detectSessionInUrl: false,
           },
+          realtime: {
+            worker: true, // Enable Web Worker heartbeats to prevent background timer throttling
+          },
         });
         this.log('🔄 Supabase client created ONCE (persistSession=true, autoRefreshToken=true)');
 
@@ -281,14 +283,7 @@ class SupabasePipeline {
     return this.client!;
   }
 
-  // Unlock gating disabled; keep method for future toggling but unused currently
 
-  /**
-   * Mark that device was recently unlocked
-   */
-  public markDeviceUnlocked(): void {
-    this.log(`📱 Device unlock marked, will prefer outbox for next ${this.unlockGracePeriodMs}ms`);
-  }
 
   /**
    * Enhanced network state detection with WebView readiness check
@@ -555,19 +550,7 @@ class SupabasePipeline {
     }
   }
 
-  /**
-   * Simplified corruption detector - just check if getSession hangs
-   * This replaces the complex multi-check detector that was causing more problems than it solved
-   */
-  public async detectCorruption(): Promise<boolean> {
-    try {
-      // Use the same simple timeout-based check as isClientCorrupted
-      return await this.isClientCorrupted();
-    } catch (e) {
-      this.log('🧪 Corruption detection error:', stringifyError(e));
-      return false;
-    }
-  }
+
 
 
 
@@ -1246,24 +1229,7 @@ class SupabasePipeline {
     }
   }
 
-  /**
-   * Delta sync - fetch messages since a timestamp
-   */
-  public async deltaSyncMessages(groupId: string, sinceIso: string): Promise<{ data: any[] | null; error: any }> {
-    return this.executeQuery(async () => {
-      const client = await this.getClient();
-      return client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url)
-        `)
-        .eq('group_id', groupId)
-        .gt('created_at', sinceIso)
-        .order('created_at', { ascending: true });
-    }, 'delta sync messages');
-  }
+
 
   /**
    * Call RPC function
@@ -1301,18 +1267,7 @@ class SupabasePipeline {
     }
   }
 
-  /**
-   * Remove all realtime channels
-   */
-  public async removeAllChannels(): Promise<void> {
-    try {
-      const client = await this.getClient();
-      client.removeAllChannels();
-    } catch (error) {
-      this.log('📡 Remove all channels failed:', error);
-      throw error;
-    }
-  }
+
 
   /**
    * Send message with simplified direct send → fallback to outbox pipeline
@@ -1424,11 +1379,17 @@ class SupabasePipeline {
         lastError = error;
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-        // If direct send timed out, schedule a background hard recreate to heal potential corruption
+        // If direct send timed out, only recreate after multiple consecutive timeouts
         try {
           const msg = (error as any)?.message || '';
           if (typeof msg === 'string' && msg.includes('Direct send timeout')) {
-            this.ensureRecreated('direct-send-timeout').catch(() => {});
+            // Only recreate client after 3 consecutive timeout failures to avoid excessive recreation
+            if (this.failureCount >= 3) {
+              this.log('🧹 Multiple timeout failures detected, scheduling client recreation');
+              this.ensureRecreated('multiple-direct-send-timeouts').catch(() => {});
+            } else {
+              this.log('🕐 Timeout occurred but not recreating client yet (failure count: ' + this.failureCount + ')');
+            }
           }
         } catch {}
         
@@ -1525,7 +1486,7 @@ class SupabasePipeline {
         }
 
         // If client is unhealthy but circuit breaker is not open, try limited processing
-        this.logWarning('📦 Client unhealthy, attempting limited outbox processing');
+        this.log('⚠️ 📦 Client unhealthy, attempting limited outbox processing');
 
         // Try to process only a few messages to avoid overwhelming the system
         const limitedMessages = outboxMessages.slice(0, 3);
@@ -1534,9 +1495,9 @@ class SupabasePipeline {
         for (const outboxItem of limitedMessages) {
           try {
             const messageData = JSON.parse(outboxItem.content);
-            // Try a simple send with shorter timeout
+            // Try a simple send with reasonable timeout for mobile networks
             const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Degraded mode timeout')), 3000);
+              setTimeout(() => reject(new Error('Degraded mode timeout')), 8000);
             });
 
             const client = await this.getClient();
@@ -1821,100 +1782,32 @@ class SupabasePipeline {
     return await this.recreatePromise;
   }
 
-  /**
-   * Enhanced WebView state validation for Capacitor apps
-   */
-  private async validateWebViewState(): Promise<{ isReady: boolean; bridgeWorking: boolean }> {
-    try {
-      // Check if we're in a Capacitor environment
-      const isCapacitor = typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.();
-
-      if (!isCapacitor) {
-        return { isReady: true, bridgeWorking: true };
-      }
-
-      // Test basic WebView functionality
-      let isReady = true;
-      try {
-        const testDiv = document.createElement('div');
-        testDiv.style.display = 'none';
-        document.body.appendChild(testDiv);
-        document.body.removeChild(testDiv);
-      } catch (error) {
-        this.log('🌐 WebView DOM test failed:', error);
-        isReady = false;
-      }
-
-      // Test Capacitor bridge communication
-      let bridgeWorking = true;
-      try {
-        const { Capacitor } = await import('@capacitor/core');
-        if (Capacitor.isNativePlatform()) {
-          // Test a simple bridge call
-          const { Device } = await import('@capacitor/device');
-          await Device.getId();
-        }
-      } catch (error) {
-        this.log('🌐 Capacitor bridge test failed:', error);
-        bridgeWorking = false;
-      }
-
-      this.log(`🌐 WebView state: ready=${isReady} bridgeWorking=${bridgeWorking}`);
-      return { isReady, bridgeWorking };
-    } catch (error) {
-      this.log('🌐 WebView state validation failed:', error);
-      return { isReady: false, bridgeWorking: false };
-    }
-  }
+  // Removed validateWebViewState - not needed with simplified resume flow
 
   /**
-   * Enhanced app resume handler with WebView state validation
+   * Simplified app resume handler - focus on session recovery without client recreation
    */
   public async onAppResume(): Promise<void> {
-    this.log('📱 App resume detected - validating WebView state');
-
-    // Validate WebView state first
-    const webViewState = await this.validateWebViewState();
-
-    // Add stabilization delay based on WebView state
-    const stabilizationDelay = webViewState.isReady && webViewState.bridgeWorking ? 300 : 1000;
-    this.log(`📱 App resume: using ${stabilizationDelay}ms stabilization delay`);
-    await new Promise(resolve => setTimeout(resolve, stabilizationDelay));
+    this.log('📱 App resume detected - checking session state');
 
     try {
-      // If WebView state is problematic, be more conservative
-      if (!webViewState.isReady || !webViewState.bridgeWorking) {
-        this.log('⚠️ App resume: WebView state issues detected, using conservative recovery');
-
-        // Just use cached tokens without network calls
-        if (this.lastKnownAccessToken) {
-          this.log('✅ App resume: using cached tokens due to WebView issues');
-          return;
-        }
-      }
-
-      // Use token recovery instead of refresh to avoid hanging getSession() calls
+      // Quick session recovery using cached tokens
       const recovered = await this.recoverSession();
 
       if (recovered) {
         this.log('✅ App resume: session recovered using cached tokens');
       } else {
-        this.log('⚠️ App resume: token recovery failed, trying direct refresh');
-        const refreshed = await this.refreshSessionDirect();
-        if (!refreshed) {
-          this.log('⚠️ App resume: direct refresh also failed, using last known tokens');
-        }
+        this.log('⚠️ App resume: token recovery failed, session may need refresh');
+        // Don't force refresh here - let the realtime connection handle it
       }
 
-      // Apply token to realtime (use cached token to avoid getSession() call)
+      // Apply current token to realtime if available
       try {
         const client = await this.getClient();
         const token = this.lastKnownAccessToken;
         if (token && (client as any)?.realtime?.setAuth) {
           (client as any).realtime.setAuth(token);
-          this.log('✅ App resume: cached token applied to realtime');
-        } else {
-          this.log('⚠️ App resume: no cached token available for realtime');
+          this.log('✅ App resume: token applied to realtime');
         }
       } catch (e) {
         this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
@@ -1978,10 +1871,7 @@ class SupabasePipeline {
 
 
 
-  private logWarning(message: string, ...args: any[]): void {
-    const timestamp = new Date().toISOString().slice(11, 23);
-    console.warn(`[supabase-pipeline] ${timestamp} ⚠️ ${message}`, ...args);
-  }
+
 
   /**
    * (Re)bind all registered auth listeners to current client. Idempotent across recreations.
