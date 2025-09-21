@@ -6,10 +6,6 @@ import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
 import { structureMessagesWithReplies } from './utils';
-import {
-  asGroupRows, asGroupMemberRows, asMessageRows, asPollRows, asPollVoteRows,
-  asGroupRow, asMessageRow, asPollRow, asPollVoteRow
-} from '@/lib/typeHelpers';
 
 export interface FetchActions {
   fetchGroups: () => Promise<void>;
