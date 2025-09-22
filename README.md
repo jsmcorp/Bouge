@@ -215,3 +215,14 @@ npx cap open ios
 - App Name: `Confessr`
 - Web Directory: `dist`
 - Android Scheme: `https`
+
+## 🛠️ Dev Troubleshooting (Android + Supabase)
+
+- Required env vars: set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local. On Android, Vite injects these at build time.
+- Realtime verbose logs: use Logcat; app logs are prefixed with [supabase-pipeline], [realtime-v2], [reconnection-mgr].
+- Realtime on Android: on resume we refresh the session and apply the token to Realtime; expect logs: "App resume: token applied to realtime".
+- No active group path: when there’s no active group, reconnection skips waiting for SUBSCRIBED and does not mark disconnected.
+- SQLite migrations: migrations are idempotent. If you previously saw duplicate column errors, they should be gone.
+- Edge Function CORS (dev): push-fanout now handles OPTIONS and sets Access-Control-Allow-Origin for https://localhost, capacitor://localhost, http://localhost by default. Override with DEV_CORS_ORIGINS env.
+- Android dev origins: if testing via WebView (Capacitor), the origin is capacitor://localhost.
+- Enable push testing: ensure device tokens are present in public.user_devices; function endpoint: <SUPABASE_URL>/functions/v1/push-fanout.

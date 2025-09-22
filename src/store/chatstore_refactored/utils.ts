@@ -142,7 +142,7 @@ export async function ensureAuthForWrites(timeoutMs?: number): Promise<{ canWrit
 	// Try refresh with pipeline (already has timeout handling)
 	try {
 		console.log(`[auth-debug] ${sessionId} - Starting pipeline refresh...`);
-		const refreshSuccess = await supabasePipeline.refreshSession();
+		const refreshSuccess = await supabasePipeline.recoverSession();
 		console.log(`[auth-debug] ${sessionId} - Pipeline refresh result: ${refreshSuccess}`);
 		
 		if (refreshSuccess) {

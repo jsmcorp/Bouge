@@ -1,6 +1,8 @@
 import { DatabaseManager } from './database';
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES_PUSH } from '@/lib/featureFlags';
+import type { Database } from '@/lib/database.types';
+
 
 export class SyncOperations {
   constructor(private dbManager: DatabaseManager) {}
@@ -56,7 +58,7 @@ export class SyncOperations {
     const { data, error } = await (sinceIso ? query.gt('created_at', sinceIso) : query);
     if (error) throw error;
 
-    const rows = data || [];
+    const rows = (data ?? []) as Database['public']['Tables']['messages']['Row'][];
     if (rows.length === 0) return { merged: 0, since: sinceIso };
 
     // Idempotent merge into local db
@@ -77,7 +79,7 @@ export class SyncOperations {
             row.category,
             row.parent_id,
             row.image_url,
-            new Date(row.created_at).getTime(),
+            new Date(row.created_at ?? new Date().toISOString()).getTime(),
           ]
         );
         merged++;

@@ -1,5 +1,4 @@
 import { Group, Message, Poll, TypingUser, GroupMember, GroupMedia } from './types';
-import { supabasePipeline } from '@/lib/supabasePipeline';
 import { FEATURES } from '@/lib/supabase';
 
 // Resume/unlock flow is owned exclusively by supabasePipeline.onAppResume()
@@ -175,19 +174,44 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       console.log('[realtime-v2] No active group, skipping resume');
       return;
     }
-    // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
-    supabasePipeline.onAppResume().catch(error => {
-      console.error('[realtime-v2] Pipeline app resume failed:', error);
-    });
+
+    console.log('[realtime-v2] App resumed - delegating to reconnection manager');
+
+    // Route through health-first reconnection manager; it will fast-path when healthy
+    import('@/lib/reconnectionManager')
+      .then(({ reconnectionManager }) => reconnectionManager.reconnect('app-resume'))
+      .catch((error) => console.error('[realtime-v2] Reconnect on resume failed:', error));
+
+    // Process any pending outbox messages (no reset)
+    try {
+      const { triggerOutboxProcessing } = get() as any;
+      if (typeof triggerOutboxProcessing === 'function') {
+        triggerOutboxProcessing('app-resume', 'high');
+      }
+    } catch (error) {
+      console.error('[realtime-v2] Failed to trigger outbox processing on resume:', error);
+    }
   },
 
-  // Central onWake(reason, groupId?) orchestrates: ensureAuthForWrites (writes only) → realtime rebuild → syncMissed → outbox
-  onWake: async (_reason?: string, _groupIdOverride?: string) => {
+  // Simplified wake handler - just ensure connection and process outbox
+  onWake: async (reason?: string, groupIdOverride?: string) => {
     try {
-      // Single owner: delegate to pipeline resume (client reset, session refresh, outbox)
-      await get().onAppResumeSimplified();
+      console.log(`[realtime-v2] Wake event: ${reason || 'unknown'}`);
+
+      // If a specific group is mentioned, switch to it
+      if (groupIdOverride) {
+        const groups = (get() as any).groups || [];
+        const targetGroup = groups.find((g: any) => g.id === groupIdOverride);
+        if (targetGroup) {
+          console.log(`[realtime-v2] Switching to group from wake: ${targetGroup.name}`);
+          (get() as any).setActiveGroup?.(targetGroup);
+        }
+      }
+
+      // Resume connection
+      get().onAppResumeSimplified();
     } catch (e) {
-      console.warn('onWake error:', e);
+      console.warn('[realtime-v2] onWake error:', e);
     }
   },
 
@@ -230,30 +254,27 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
   onNetworkOnlineSimplified: () => {
     console.log('[realtime-v2] Network came online');
-    const { triggerOutboxProcessing, activeGroup, connectionStatus } = get();
-    
+    const { triggerOutboxProcessing } = get();
+
     // Notify pipeline about network reconnection
     import('@/lib/supabasePipeline').then(({ supabasePipeline }) => {
       supabasePipeline.onNetworkReconnect();
     }).catch(error => {
       console.warn('[realtime-v2] Failed to notify pipeline of network reconnect:', error);
     });
-    
+
     // Only trigger outbox processing, don't reset state as that causes redundant triggers
     console.log('[realtime-v2] Network online - triggering outbox processing only');
     if (typeof triggerOutboxProcessing === 'function') {
       triggerOutboxProcessing('network-online', 'high');
     }
-    
-    // If we have an active group and aren't connected, reconnect
-    if (activeGroup?.id && connectionStatus !== 'connected') {
-      console.log('[realtime-v2] Network online - reconnecting');
-      
-      // Small delay to let network stabilize
-      setTimeout(() => {
-        get().onAppResumeSimplified();
-      }, 500); // Faster than legacy 1000ms
-    }
+
+    // Route reconnect through the single-flight reconnection manager (health-first)
+    setTimeout(() => {
+      import('@/lib/reconnectionManager')
+        .then(({ reconnectionManager }) => reconnectionManager.reconnect('network-online'))
+        .catch((error) => console.warn('[realtime-v2] Network reconnect failed:', error));
+    }, 500);
   },
   
   closeGroupDetailsPanel: () => {

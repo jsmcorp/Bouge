@@ -3,6 +3,19 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
+// CORS helpers
+const DEV_ORIGINS = (Deno.env.get('DEV_CORS_ORIGINS') || 'https://localhost,capacitor://localhost,http://localhost').split(',');
+function buildCorsHeaders(origin: string | null): HeadersInit {
+  const allowed = origin && DEV_ORIGINS.includes(origin) ? origin : origin || '*';
+  return {
+    'Access-Control-Allow-Origin': allowed,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'authorization, content-type, x-client-info',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin'
+  };
+}
+
 type Payload = {
 	message_id: string;
 	group_id: string;
@@ -168,18 +181,25 @@ async function sendFcm(tokens: string[], data: Record<string, string>): Promise<
 }
 
 serve(async (req) => {
+	const origin = req.headers.get('origin');
+	const cors = buildCorsHeaders(origin);
+
+	if (req.method === 'OPTIONS') {
+		return new Response(null, { status: 204, headers: cors });
+	}
+
 	if (req.method !== 'POST') {
-		return new Response('Method not allowed', { status: 405 });
+		return new Response('Method not allowed', { status: 405, headers: cors });
 	}
 	try {
 		// If POST body provided, single message; otherwise drain queue (cron)
 		if (req.method === 'POST' && req.headers.get('content-type')?.includes('application/json')) {
 			const payload: Payload = await req.json();
 			const recipients = await getRecipients(payload.group_id, payload.sender_id);
-			if (recipients.length === 0) return new Response('ok');
+			if (recipients.length === 0) return new Response('ok', { headers: cors });
 			const tokens = await getActiveTokens(recipients);
 			const tokenList = tokens.map((t) => t.token);
-			if (tokenList.length === 0) return new Response('ok');
+			if (tokenList.length === 0) return new Response('ok', { headers: cors });
 			await sendFcm(tokenList, {
 				type: 'new_message',
 				group_id: payload.group_id,
@@ -187,7 +207,7 @@ serve(async (req) => {
 				created_at: payload.created_at,
 			});
 			console.log(`[push] notify:fanout group=${payload.group_id} recipients=${tokenList.length}`);
-			return new Response('ok');
+			return new Response('ok', { headers: cors });
 		}
 
 		// Drain unprocessed queue rows
@@ -214,7 +234,7 @@ serve(async (req) => {
 				await db.from('notification_queue').update({ processed_at: new Date().toISOString(), attempt_count: (it.attempt_count || 0) + 1 }).eq('id', it.id);
 			}
 		}
-		return new Response('ok');
+		return new Response('ok', { headers: cors });
 	} catch (e) {
 		console.error('push-fanout error', e);
 		return new Response('error', { status: 500 });

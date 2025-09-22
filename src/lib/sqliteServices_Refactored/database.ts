@@ -284,24 +284,42 @@ export class DatabaseManager {
 
   private async migrateDatabase(): Promise<void> {
     try {
-      // Add missing columns to messages table
-      await this.db!.execute('ALTER TABLE messages ADD COLUMN updated_at INTEGER;').catch(() => {});
-      await this.db!.execute('ALTER TABLE messages ADD COLUMN deleted_at INTEGER;').catch(() => {});
-      
-      // Add missing columns to groups table
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN description TEXT;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN invite_code TEXT;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN created_by TEXT;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN created_at INTEGER;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN last_sync_timestamp INTEGER DEFAULT 0;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN avatar_url TEXT;').catch(() => {});
-      await this.db!.execute('ALTER TABLE groups ADD COLUMN is_archived INTEGER DEFAULT 0;').catch(() => {});
-      
-      // Add missing columns to users table
-      await this.db!.execute('ALTER TABLE users ADD COLUMN phone_number TEXT;').catch(() => {});
-      await this.db!.execute('ALTER TABLE users ADD COLUMN is_onboarded INTEGER DEFAULT 0;').catch(() => {});
-      await this.db!.execute('ALTER TABLE users ADD COLUMN created_at INTEGER;').catch(() => {});
-      
+      // Helper: check if a column exists
+      const columnExists = async (table: string, column: string): Promise<boolean> => {
+        const res = await this.db!.query(`PRAGMA table_info(${table});`);
+        const rows = res.values || [];
+        return rows.some((r: any) => r.name === column);
+      };
+
+      // Helper: ensure column exists, otherwise add it
+      const ensureColumn = async (table: string, column: string, sqlType: string, defaultClause?: string) => {
+        const exists = await columnExists(table, column);
+        if (!exists) {
+          const defaultSql = defaultClause ? ` ${defaultClause}` : '';
+          const alter = `ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}${defaultSql};`;
+          await this.db!.execute(alter);
+          console.log(`✅ Added column ${table}.${column}`);
+        }
+      };
+
+      // Messages
+      await ensureColumn('messages', 'updated_at', 'INTEGER');
+      await ensureColumn('messages', 'deleted_at', 'INTEGER');
+
+      // Groups
+      await ensureColumn('groups', 'description', 'TEXT');
+      await ensureColumn('groups', 'invite_code', 'TEXT');
+      await ensureColumn('groups', 'created_by', 'TEXT');
+      await ensureColumn('groups', 'created_at', 'INTEGER');
+      await ensureColumn('groups', 'last_sync_timestamp', 'INTEGER', 'DEFAULT 0');
+      await ensureColumn('groups', 'avatar_url', 'TEXT');
+      await ensureColumn('groups', 'is_archived', 'INTEGER', 'DEFAULT 0');
+
+      // Users
+      await ensureColumn('users', 'phone_number', 'TEXT');
+      await ensureColumn('users', 'is_onboarded', 'INTEGER', 'DEFAULT 0');
+      await ensureColumn('users', 'created_at', 'INTEGER');
+
       console.log('✅ Database migration completed');
     } catch (error) {
       console.error('❌ Database migration failed:', error);

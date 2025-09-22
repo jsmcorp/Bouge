@@ -1,7 +1,13 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { Database } from './supabase';
+import type { AuthChangeEvent } from '@supabase/supabase-js';
+import type { Database } from './database.types';
 import { sqliteService } from './sqliteService';
 import { Capacitor } from '@capacitor/core';
+
+// Database types for proper typing
+type GroupInsert = Database['public']['Tables']['groups']['Insert'];
+type MessageInsert = Database['public']['Tables']['messages']['Insert'];
+
 
 
 // Types for the pipeline
@@ -35,25 +41,10 @@ export interface AuthOperationResult {
   session?: any;
 }
 
-export interface GroupInsertData {
-  name: string;
-  description?: string;
-  invite_code: string;
-  created_by: string;
-  avatar_url?: string | null;
-}
+// Use database types instead of custom interfaces
+export type GroupInsertData = GroupInsert;
 
-export interface MessageInsertData {
-  group_id: string;
-  user_id: string;
-  content: string;
-  is_ghost?: boolean;
-  message_type?: string;
-  category?: string | null;
-  parent_id?: string | null;
-  image_url?: string | null;
-  dedupe_key?: string | null;
-}
+export type MessageInsertData = MessageInsert;
 
 interface PipelineConfig {
   sendTimeoutMs: number;
@@ -78,18 +69,17 @@ function stringifyError(error: any): string {
 
 // Singleton pipeline orchestrator
 class SupabasePipeline {
-  private client: SupabaseClient<Database> | null = null;
+  private client: any = null;
   private isInitialized = false;
   private initializePromise: Promise<void> | null = null;
   private config: PipelineConfig = {
-    sendTimeoutMs: 6000,
-    healthCheckTimeoutMs: 3000,
-    maxRetries: 2,
-    retryBackoffMs: 1500,
+    sendTimeoutMs: 15000, // Increased from 6s to 15s for mobile networks
+    healthCheckTimeoutMs: 5000, // Increased from 3s to 5s
+    maxRetries: 3, // Increased from 2 to 3 retries
+    retryBackoffMs: 2000, // Increased from 1.5s to 2s
   };
 
-  // Unlock gating disabled; keep constant for logging only
-  private readonly unlockGracePeriodMs = 0; // disabled: do not gate sends after unlock
+
 
   // Last outbox processing statistics for callers to inspect without changing method signatures
   private lastOutboxStats: { sent: number; failed: number; retried: number; groupsWithSent: string[] } | null = null;
@@ -112,6 +102,18 @@ class SupabasePipeline {
   private inFlightSessionPromise: Promise<AuthOperationResult> | null = null;
   // Global operation lock to prevent concurrent operations
 
+  // Single-flight outbox processing guards
+  private isOutboxProcessing = false;
+  private lastOutboxStartAt = 0;
+  private lastOutboxTriggerAt = 0;
+
+  // Track last realtime auth token applied to websocket
+  private lastRealtimeAuthToken: string | null = null;
+
+  // Cached Supabase env for direct REST calls on fast-path
+  private supabaseUrl: string = '';
+  private supabaseAnonKey: string = '';
+
   // Circuit breaker for repeated failures
   private failureCount = 0;
   private lastFailureAt = 0;
@@ -122,6 +124,14 @@ class SupabasePipeline {
   constructor() {
     this.log('🚀 Pipeline initialized');
     this.log('🧪 Debug tag: v2025-08-22.1');
+  }
+
+  /** Lightweight accessors for cached/auth tokens used by reconnectionManager fast-path */
+  public getCachedAccessToken(): string | null {
+    return this.lastKnownAccessToken;
+  }
+  public getLastRealtimeAuthToken(): string | null {
+    return this.lastRealtimeAuthToken;
   }
 
   /**
@@ -160,99 +170,197 @@ class SupabasePipeline {
   }
 
   /**
-   * Initialize Supabase client (idempotent). Pass force=true to recreate.
+   * Initialize Supabase client ONCE - never recreate, only initialize if missing
    */
   public async initialize(force: boolean = false): Promise<void> {
     this.log(`🔄 initialize() called - force=${force} isInitialized=${this.isInitialized} hasClient=${!!this.client} initPromiseActive=${!!this.initializePromise}`);
-    if (!force && this.isInitialized && this.client) { this.log('🔄 initialize() early return (already initialized)'); return; }
-    if (this.initializePromise) { this.log('🔄 initialize() waiting for existing initializePromise'); await this.initializePromise; return; }
+
+    // NEVER recreate an existing client - this is the root cause of corruption
+    if (this.client && this.isInitialized && !force) {
+      this.log('🔄 initialize() early return (client exists and initialized)');
+      return;
+    }
+
+    if (this.initializePromise) {
+      this.log('🔄 initialize() waiting for existing initializePromise');
+      await this.initializePromise;
+      return;
+    }
 
     this.log('🔄 Initializing Supabase client...');
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
     const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+    // Cache env for direct REST fast-path
+    this.supabaseUrl = supabaseUrl;
+    this.supabaseAnonKey = supabaseAnonKey;
+
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error('Missing Supabase configuration');
     }
     this.log(`🔄 Supabase env present? url=${!!supabaseUrl} anonKey=${!!supabaseAnonKey}`);
 
     this.initializePromise = (async () => {
-      // Only tear down existing channels if we truly force a reinit
-      if (force && this.client) {
-        this.log('🗑️ Destroying old client instance (forced)');
-        try { this.internalAuthUnsub?.(); this.internalAuthUnsub = null; } catch (_) {}
-        try { await this.client.removeAllChannels(); } catch (e) {
-          this.log('⚠️ Error removing channels during client destruction:', e);
-        }
-        try { (this.client as any)?.realtime?.removeAllChannels?.(); } catch (_) {}
-        try { (this.client as any)?.realtime?.disconnect?.(); } catch (_) {}
-      }
-
-      if (!this.client || force) {
-        this.client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+      // NEVER destroy existing client - this causes corruption
+      // Only create client if it doesn't exist
+      if (!this.client) {
+        // Use any type to bypass strict typing issues in newer Supabase versions
+        const pipelineLog = (msg: string, ...args: any[]) => {
+          try { this.log(msg, ...args); } catch (_) {}
+        };
+        this.client = createClient(supabaseUrl, supabaseAnonKey, {
           auth: {
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: false,
           },
-        });
-        this.log('🔄 Supabase client created (persistSession=true, autoRefreshToken=true)');
-        // Re-bind any pipeline-managed auth listeners onto the new client
-        try { await this.bindAuthListenersToClient(); } catch (e) { this.log('⚠️ Failed to bind auth listeners on init:', e as any); }
+          realtime: {
+            worker: true, // Enable Web Worker heartbeats to prevent background timer throttling
+          },
+          global: {
+            fetch: async (input: any, init?: any) => {
+              try {
+                const url = typeof input === 'string' ? input : (input?.url || '');
+                const method = init?.method || 'GET';
+                pipelineLog(`[38;5;159m[fetch][0m ${method} ${url}`);
+              } catch {}
+              return (window.fetch as any)(input, init);
+            }
+          }
+        }) as any;
+        this.log('🔄 Supabase client created ONCE (persistSession=true, autoRefreshToken=true)');
+
+        // Bind auth listeners to the permanent client
+        try {
+          await this.bindAuthListenersToClient();
+        } catch (e) {
+          this.log('⚠️ Failed to bind auth listeners on init:', e as any);
+        }
+
         // Attach internal auth listener to cache tokens
         try {
-          const sub = this.client.auth.onAuthStateChange((_event, session: any) => {
+          const sub = this.client.auth.onAuthStateChange((_event: AuthChangeEvent, session: any) => {
             try {
               const s = session || {};
               this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
               this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
               this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+              this.log(`🔑 Token cached: user=${this.lastKnownUserId?.slice(0, 8)} hasAccess=${!!this.lastKnownAccessToken} hasRefresh=${!!this.lastKnownRefreshToken}`);
             } catch {}
           });
           this.internalAuthUnsub = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
-        } catch (e) { this.log('⚠️ Failed to attach internal auth listener:', e as any); }
-        // Best-effort apply last-known token to realtime
-        try { (this.client as any)?.realtime?.setAuth?.(this.lastKnownAccessToken || undefined); } catch (_) {}
+        } catch (e) {
+          this.log('⚠️ Failed to attach internal auth listener:', e as any);
+        }
+      } else {
+        this.log('🔄 Client already exists, skipping creation');
       }
 
       this.isInitialized = true;
-      this.log('✅ Supabase client initialized successfully');
+      this.log('✅ Supabase client initialized successfully (PERMANENT INSTANCE)');
     })().finally(() => { this.initializePromise = null; });
 
     await this.initializePromise;
   }
 
   /**
+   * Cleanup method for proper resource disposal
+   */
+  public cleanup(): void {
+    this.log('🧹 Cleaning up Supabase pipeline resources');
+
+    // Cleanup internal auth listener
+    if (this.internalAuthUnsub) {
+      this.internalAuthUnsub();
+      this.internalAuthUnsub = null;
+      this.log('🧹 Internal auth listener unsubscribed');
+    }
+
+    // Clear cached data
+    this.cachedSession = null;
+    this.inFlightSessionPromise = null;
+
+    // Reset circuit breaker
+    this.circuitBreakerOpen = false;
+    this.failureCount = 0;
+
+    this.log('✅ Pipeline cleanup completed');
+  }
+
+  /**
    * Get the current client instance, initializing if needed
    */
-  private async getClient(): Promise<SupabaseClient<Database>> {
+  private async getClient(): Promise<any> {
     this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise}`);
     if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
-    // Reduced corruption check frequency - only check every 10 seconds and use simple check
+    // Less aggressive corruption check - only check every 30 seconds and require multiple failures
     try {
       const now = Date.now();
-      if (now - this.lastCorruptionCheckAt > 10000) {
+      if (now - this.lastCorruptionCheckAt > 30000) { // Increased from 10s to 30s
         this.lastCorruptionCheckAt = now;
-        const corrupted = await this.isClientCorrupted(); // Use simple timeout-based check
+        const corrupted = await this.isClientCorrupted();
         if (corrupted) {
-          this.log('🧪 getClient(): corruption detected → hard recreate');
-          await this.ensureRecreated('getClient-autoheal');
+          // Only recreate if we've had multiple consecutive failures
+          if (this.failureCount >= 3) {
+            this.log('🧪 getClient(): corruption detected with multiple failures → hard recreate');
+            await this.ensureRecreated('getClient-autoheal');
+          } else {
+            this.log('🧪 getClient(): corruption detected but failure count low, continuing');
+          }
         }
       }
     } catch {}
     return this.client!;
   }
 
-  // Unlock gating disabled; keep method for future toggling but unused currently
+
 
   /**
-   * Mark that device was recently unlocked
+   * Enhanced network state detection with WebView readiness check
    */
-  public markDeviceUnlocked(): void {
-    this.log(`📱 Device unlock marked, will prefer outbox for next ${this.unlockGracePeriodMs}ms`);
+  private async checkNetworkAndWebViewState(): Promise<{ isOnline: boolean; isWebViewReady: boolean; networkType?: string }> {
+    try {
+      // Check navigator.onLine first
+      const navigatorOnline = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : true;
+
+      // For Capacitor apps, also check Network plugin
+      let capacitorNetworkStatus = null;
+      if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
+        try {
+          const { Network } = await import('@capacitor/network');
+          capacitorNetworkStatus = await Network.getStatus();
+        } catch (error) {
+          this.log('🌐 Failed to get Capacitor network status:', error);
+        }
+      }
+
+      const isOnline = navigatorOnline && (capacitorNetworkStatus?.connected !== false);
+      const networkType = capacitorNetworkStatus?.connectionType || 'unknown';
+
+      // Check WebView readiness by testing if we can access basic DOM/window features
+      let isWebViewReady = true;
+      try {
+        if (typeof window !== 'undefined') {
+          // Test basic WebView functionality
+          const testDiv = document.createElement('div');
+          testDiv.style.display = 'none';
+          document.body.appendChild(testDiv);
+          document.body.removeChild(testDiv);
+        }
+      } catch (error) {
+        this.log('🌐 WebView readiness check failed:', error);
+        isWebViewReady = false;
+      }
+
+      this.log(`🌐 Network state: online=${isOnline} webViewReady=${isWebViewReady} type=${networkType}`);
+      return { isOnline, isWebViewReady, networkType };
+    } catch (error) {
+      this.log('🌐 Network state check failed:', error);
+      return { isOnline: false, isWebViewReady: false };
+    }
   }
 
   /**
-   * Simple health check with timeout
+   * Enhanced health check with network state detection
    */
   public async checkHealth(): Promise<boolean> {
     // Enhanced health check with retry logic and better timeout handling
@@ -263,134 +371,149 @@ class SupabasePipeline {
         return false;
       }
 
-      const client = await this.getClient();
-      const online = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? (navigator as any).onLine : 'unknown';
-      this.log(`🏥 Health check: starting (navigator.onLine=${online})`);
+      // Enhanced network and WebView state check
+      const networkState = await this.checkNetworkAndWebViewState();
+      this.log(`🏥 Health check: starting (online=${networkState.isOnline} webViewReady=${networkState.isWebViewReady})`);
 
       // Quick network check
-      if (online === false) {
+      if (!networkState.isOnline) {
         this.log('🏥 Health check: offline');
         return false;
       }
 
-      // Session check with increased timeout and retry logic
-      const timeoutMs = 5000; // Increased from 3s to 5s
-      const maxRetries = 2;
-
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('getSession timeout')), timeoutMs);
-          });
-
-          const sessionPromise = client.auth.getSession();
-          const result: any = await Promise.race([sessionPromise, timeoutPromise]);
-          const data = result?.data;
-          const session = data?.session;
-
-          if (!session?.access_token) {
-            this.log('🏥 Health check: no active session');
-            return false;
-          }
-
-          // Check session expiration
-          const nowSec = Math.floor(Date.now() / 1000);
-          const expiresAt = session.expires_at || 0;
-          if (expiresAt > 0 && expiresAt - nowSec <= 0) {
-            this.refreshSession().catch(() => {});
-            this.log('🏥 Health check: session expired');
-            return false;
-          }
-
-          const secsLeft = expiresAt > 0 ? (expiresAt - nowSec) : 'unknown';
-          const userId = (session as any)?.user?.id ? String((session as any).user.id).slice(0, 8) : 'unknown';
-          this.log(`🏥 Health check: healthy (user=${userId}, expiresIn=${secsLeft}s)`);
-          this.recordSuccess(); // Record successful health check
-          return true;
-        } catch (err: any) {
-          if (err && err.message === 'getSession timeout') {
-            this.log(`🏥 Health check: getSession timeout (attempt ${attempt}/${maxRetries})`);
-
-            if (attempt === maxRetries) {
-              // Only trigger hard recreate after all retries failed
-              this.log('🏥 Health check: all retries failed → scheduling hard recreate and marking unhealthy');
-              this.recordFailure(); // Record failure for circuit breaker
-              // Trigger a hard recreate in the background to heal corruption
-              this.ensureRecreated('health-check-getsession-timeout').catch(() => {});
-              return false; // mark unhealthy to avoid direct sends during rebuild
-            }
-
-            // Wait briefly before retry
-            await new Promise(resolve => setTimeout(resolve, 500));
-            continue;
-          }
-          throw err;
-        }
+      // WebView readiness check
+      if (!networkState.isWebViewReady) {
+        this.log('🏥 Health check: WebView not ready');
+        return false;
       }
 
+      // Use cached tokens for health check to avoid hanging getSession() calls
+      if (this.lastKnownAccessToken) {
+        // Check if we have a cached session with expiration info
+        if (this.cachedSession?.session?.expires_at) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const expiresAt = this.cachedSession.session.expires_at;
+          if (expiresAt > 0 && expiresAt - nowSec <= 60) {
+            this.log('🏥 Health check: cached session expires soon, needs refresh');
+            this.recordFailure();
+            return false; // Trigger refresh
+          }
+        }
+
+        this.log('🏥 Health check: using cached access token (healthy)');
+        this.recordSuccess();
+        return true;
+      }
+
+      // If no cached tokens, check if client exists
+      if (this.client && this.isInitialized) {
+        this.log('🏥 Health check: client exists but no cached tokens');
+        this.recordFailure();
+        return false; // Needs authentication
+      }
+
+      this.log('🏥 Health check: no client or tokens available');
+      this.recordFailure();
       return false;
     } catch (error) {
       // Fail open to reduce unnecessary outbox fallbacks during transient issues
       this.log('🏥 Health check encountered error; assuming healthy:', stringifyError(error));
+      this.recordFailure();
       return true;
     }
   }
 
   /**
-   * Refresh session with timeout
+   * Use cached tokens to recover session instead of calling getSession()
    */
-  public async refreshSession(): Promise<boolean> {
-    this.log('🔄 Refreshing session...');
+  public async recoverSession(): Promise<boolean> {
+    this.log('🔄 Recovering session using cached tokens...');
     try {
       const client = await this.getClient();
-      // Wrap pre-check getSession() with 5s timeout
-      const preSessionPromise = client.auth.getSession();
-      const preTimeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('getSession timeout')), 5000);
-      });
-      let current: any = null;
-      try {
-        const preResult: any = await Promise.race([preSessionPromise, preTimeoutPromise]);
-        current = preResult?.data?.session;
-      } catch (err: any) {
-        if (err && err.message === 'getSession timeout') {
-          this.log('🔄 getSession timeout before refresh → scheduling hard recreate');
-          this.ensureRecreated('refresh-precheck-timeout').catch(() => {});
-          return false;
+
+      // Use cached tokens if available
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔄 Using cached tokens to recover session');
+
+        try {
+          // Use setSession with cached tokens instead of getSession(), but bound it with a timeout
+          const setSessionPromise = client.auth.setSession({
+            access_token: this.lastKnownAccessToken,
+            refresh_token: this.lastKnownRefreshToken,
+          });
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('setSession timeout')), 5000)
+          );
+          let data: any;
+          try {
+            const result: any = await Promise.race([setSessionPromise, timeoutPromise]);
+            data = result?.data;
+            if (result?.error) {
+              this.log('🔄 Cached token recovery failed:', result.error.message || String(result.error));
+              return false;
+            }
+          } catch (e: any) {
+            if (e && e.message === 'setSession timeout') {
+              this.log('🔄 Token recovery timed out');
+              return false;
+            }
+            throw e;
+          }
+
+          if (data?.session) {
+            this.log('✅ Session recovered using cached tokens');
+            this.updateSessionCache(data.session);
+            return true;
+          }
+        } catch (error) {
+          this.log('🔄 Token recovery error:', stringifyError(error));
         }
-        throw err;
       }
-      if (!current?.access_token) {
-        this.log('🔄 No active session to refresh');
-        return false;
+
+      // Fallback: try refresh if we have refresh token
+      if (this.lastKnownRefreshToken) {
+        this.log('🔄 Attempting token refresh as fallback');
+        return await this.refreshSessionDirect();
       }
-      const nowSec = Math.floor(Date.now() / 1000);
-      const expiresAt = current.expires_at || 0;
-      if (expiresAt > 0 && expiresAt - nowSec > 60) {
-        this.log('🔄 Session is fresh; skipping refresh');
-        return true;
-      }
-      // Wrap refreshSession() with 5s timeout
+
+      this.log('🔄 No cached tokens available for recovery');
+      return false;
+    } catch (error) {
+      this.log('🔄 Session recovery failed:', stringifyError(error));
+      return false;
+    }
+  }
+
+  /**
+   * Direct session refresh without pre-checks
+   */
+  public async refreshSessionDirect(): Promise<boolean> {
+    this.log('🔄 Direct session refresh...');
+    try {
+      const client = await this.getClient();
+      // Direct refresh without pre-checks
       const refreshPromise = client.auth.refreshSession();
       const refreshTimeout = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
       });
+
       let result: any;
       try {
         result = await Promise.race([refreshPromise, refreshTimeout]);
       } catch (err: any) {
         if (err && err.message === 'refreshSession timeout') {
-          this.log('🔄 Session refresh: timeout');
+          this.log('🔄 Direct session refresh: timeout');
           return false;
         }
         throw err;
       }
-      const success = !!result?.data?.session?.access_token && !result?.error;
-      this.log(`🔄 Session refresh: ${success ? 'success' : 'failed'}`);
 
-      // Invalidate session cache since we just refreshed
-      if (success) {
-        this.invalidateSessionCache();
+      const success = !!result?.data?.session?.access_token && !result?.error;
+      this.log(`🔄 Direct session refresh: ${success ? 'success' : 'failed'}`);
+
+      // Update session cache if successful
+      if (success && result?.data?.session) {
+        this.updateSessionCache(result.data.session);
       }
 
       return success;
@@ -401,7 +524,15 @@ class SupabasePipeline {
   }
 
   /**
-   * Simplified corruption check - just verify client exists and is responsive
+   * Compatibility method - use recoverSession() for new code
+   */
+  public async refreshSession(): Promise<boolean> {
+    this.log('🔄 refreshSession() called - delegating to recoverSession()');
+    return await this.recoverSession();
+  }
+
+  /**
+   * Enhanced corruption check - avoid hanging getSession() and use cached tokens
    */
   public async isClientCorrupted(): Promise<boolean> {
     try {
@@ -410,33 +541,56 @@ class SupabasePipeline {
         return true;
       }
 
-      // Simple ping test - just check if client is responsive
-      const client = await this.getClient();
-      if (!client || !client.auth) {
-        this.log('🧪 Corruption check: client or auth is null');
+      if (!this.client.auth) {
+        this.log('🧪 Corruption check: client.auth is null');
         return true;
       }
 
-      return false;
+      // If we have cached tokens, try to use them instead of getSession()
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        try {
+          // Test if we can use setSession with cached tokens
+          const { data, error } = await this.client.auth.setSession({
+            access_token: this.lastKnownAccessToken,
+            refresh_token: this.lastKnownRefreshToken
+          });
+
+          if (!error && data?.session) {
+            this.log('🧪 Corruption check: client is healthy (token recovery successful)');
+            return false;
+          }
+        } catch (tokenError) {
+          this.log('🧪 Corruption check: token recovery failed, trying getSession');
+        }
+      }
+
+      // Fallback to getSession() with timeout, but with longer timeout
+      const sessionPromise = this.client.auth.getSession();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('getSession timeout')), 5000); // Increased from 1.5s to 5s
+      });
+
+      try {
+        await Promise.race([sessionPromise, timeoutPromise]);
+        this.log('🧪 Corruption check: client is healthy (getSession successful)');
+        return false;
+      } catch (err: any) {
+        if (err.message === 'getSession timeout') {
+          this.log('🧪 Corruption check: getSession() is hanging - potential corruption');
+          // Don't immediately mark as corrupted, let failure count build up
+          return true;
+        }
+        this.log('🧪 Corruption check: getSession() failed:', err.message);
+        // Network errors or auth errors don't necessarily mean corruption
+        return false;
+      }
     } catch (err: any) {
       this.log('🧪 Corruption check failed:', err.message);
-      return true;
+      return false; // Fail safe - don't assume corruption on check failure
     }
   }
 
-  /**
-   * Simplified corruption detector - just check if getSession hangs
-   * This replaces the complex multi-check detector that was causing more problems than it solved
-   */
-  public async detectCorruption(): Promise<boolean> {
-    try {
-      // Use the same simple timeout-based check as isClientCorrupted
-      return await this.isClientCorrupted();
-    } catch (e) {
-      this.log('🧪 Corruption detection error:', stringifyError(e));
-      return false;
-    }
-  }
+
 
 
 
@@ -449,7 +603,7 @@ class SupabasePipeline {
    */
   public async signInWithOtp(phone: string): Promise<AuthOperationResult> {
     this.log('🔐 Signing in with OTP for phone:', phone.substring(0, 6) + '...');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.signInWithOtp({ phone });
@@ -466,7 +620,7 @@ class SupabasePipeline {
    */
   public async verifyOtp(phone: string, token: string): Promise<AuthOperationResult> {
     this.log('🔐 Verifying OTP for phone:', phone.substring(0, 6) + '...');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.verifyOtp({ phone, token, type: 'sms' });
@@ -483,7 +637,7 @@ class SupabasePipeline {
    */
   public async signOut(): Promise<AuthOperationResult> {
     this.log('🔐 Signing out user');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.signOut();
@@ -538,10 +692,20 @@ class SupabasePipeline {
   }
 
   /**
-   * Internal method to actually fetch session from Supabase with timeout protection
+   * Enhanced session fetching with recovery fallback to avoid hanging getSession()
    */
   private async fetchSessionInternal(): Promise<AuthOperationResult> {
     try {
+      // First, try to recover using cached tokens if available
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔐 Attempting session recovery using cached tokens');
+        const recoveryResult = await this.attemptTokenRecovery();
+        if (recoveryResult.success) {
+          return { data: { session: recoveryResult.session } };
+        }
+      }
+
+      // If token recovery failed or no cached tokens, try getSession with timeout
       this.log('🔐 Fetching fresh session from Supabase');
       const client = await this.getClient();
 
@@ -576,12 +740,75 @@ class SupabasePipeline {
 
       // If we have a cached session and this is just a timeout, return cached
       if (error?.message === 'Session fetch timeout' && this.cachedSession) {
-        this.log('🔐 Session fetch timed out, returning cached session');
+        this.log('🔐 Session fetch timed out, using cached session as fallback');
         return { data: { session: this.cachedSession.session } };
+      }
+
+      // Last resort: try to construct session from cached tokens
+      if (this.lastKnownAccessToken && this.lastKnownUserId) {
+        this.log('🔐 Using last known tokens as final fallback');
+        const fallbackSession = {
+          access_token: this.lastKnownAccessToken,
+          refresh_token: this.lastKnownRefreshToken,
+          user: { id: this.lastKnownUserId },
+          expires_at: Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
+        };
+        return { data: { session: fallbackSession } };
       }
 
       return { error };
     }
+  }
+
+  /**
+   * Attempt to recover session using cached tokens with setSession
+   */
+  private async attemptTokenRecovery(): Promise<{ success: boolean; session?: any }> {
+    try {
+      const client = await this.getClient();
+
+      const { data, error } = await client.auth.setSession({
+        access_token: this.lastKnownAccessToken!,
+        refresh_token: this.lastKnownRefreshToken!
+      });
+
+      if (error) {
+        this.log('🔐 Token recovery failed:', error.message);
+        return { success: false };
+      }
+
+      if (data?.session) {
+        this.log('🔐 Session recovered successfully using cached tokens');
+        // Update cache and tokens
+        const s = data.session;
+        this.lastKnownUserId = s?.user?.id || this.lastKnownUserId || null;
+        this.lastKnownAccessToken = s?.access_token || this.lastKnownAccessToken || null;
+        this.lastKnownRefreshToken = s?.refresh_token || this.lastKnownRefreshToken || null;
+
+        this.cachedSession = {
+          session: s,
+          timestamp: Date.now()
+        };
+
+        return { success: true, session: s };
+      }
+
+      return { success: false };
+    } catch (error) {
+      this.log('🔐 Token recovery error:', stringifyError(error));
+      return { success: false };
+    }
+  }
+
+  /**
+   * Update session cache with new session
+   */
+  private updateSessionCache(session: any): void {
+    this.cachedSession = {
+      session,
+      timestamp: Date.now()
+    };
+    this.log('🔐 Session cache updated');
   }
 
   /**
@@ -691,19 +918,19 @@ class SupabasePipeline {
     timeoutMs: number = this.config.sendTimeoutMs
   ): Promise<{ data: T | null; error: any }> {
     this.log(`🗄️ Executing ${operation}...`);
-    
+
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
       });
 
       const result = await Promise.race([queryBuilder(), timeoutPromise]);
-      
+
       if (result.error) {
         this.log(`🗄️ ${operation} error:`, stringifyError(result.error));
         return { data: null, error: result.error };
       }
-      
+
       this.log(`🗄️ ${operation} success`);
       return result;
     } catch (error) {
@@ -748,16 +975,16 @@ class SupabasePipeline {
   public async joinGroup(inviteCode: string, userId: string): Promise<{ data: any | null; error: any }> {
     return this.executeQuery(async () => {
       const client = await this.getClient();
-      
+
       // First find the group
       const { data: group, error: groupError } = await client
         .from('groups')
         .select('id')
         .eq('invite_code', inviteCode)
         .single();
-        
+
       if (groupError) return { data: null, error: groupError };
-      
+
       // Then add user as member
       const { error: memberError } = await client
         .from('group_members')
@@ -766,9 +993,9 @@ class SupabasePipeline {
           user_id: userId,
           role: 'participant'
         });
-        
+
       if (memberError) return { data: null, error: memberError };
-      
+
       // Return the group data
       return client
         .from('groups')
@@ -955,7 +1182,7 @@ class SupabasePipeline {
   /**
    * Update user profile
    */
-  public async updateUser(userId: string, updates: any): Promise<{ data: any | null; error: any }> {
+  public async updateUser(userId: string, updates: Database['public']['Tables']['users']['Update']): Promise<{ data: any | null; error: any }> {
     return this.executeQuery(async () => {
       const client = await this.getClient();
       return client
@@ -1003,24 +1230,24 @@ class SupabasePipeline {
    * Upload file to storage
    */
   public async uploadFile(
-    bucket: string, 
-    path: string, 
-    file: File | Blob, 
+    bucket: string,
+    path: string,
+    file: File | Blob,
     options?: any
   ): Promise<{ data: any | null; error: any }> {
     this.log(`📁 Uploading file to ${bucket}/${path}...`);
-    
+
     try {
       const client = await this.getClient();
       const result = await client.storage
         .from(bucket)
         .upload(path, file, options);
-      
+
       if (result.error) {
         this.log('📁 File upload error:', result.error);
         return { data: null, error: result.error };
       }
-      
+
       this.log('📁 File upload success');
       return result;
     } catch (error) {
@@ -1042,24 +1269,7 @@ class SupabasePipeline {
     }
   }
 
-  /**
-   * Delta sync - fetch messages since a timestamp
-   */
-  public async deltaSyncMessages(groupId: string, sinceIso: string): Promise<{ data: any[] | null; error: any }> {
-    return this.executeQuery(async () => {
-      const client = await this.getClient();
-      return client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url)
-        `)
-        .eq('group_id', groupId)
-        .gt('created_at', sinceIso)
-        .order('created_at', { ascending: true });
-    }, 'delta sync messages');
-  }
+
 
   /**
    * Call RPC function
@@ -1097,18 +1307,7 @@ class SupabasePipeline {
     }
   }
 
-  /**
-   * Remove all realtime channels
-   */
-  public async removeAllChannels(): Promise<void> {
-    try {
-      const client = await this.getClient();
-      client.removeAllChannels();
-    } catch (error) {
-      this.log('📡 Remove all channels failed:', error);
-      throw error;
-    }
-  }
+
 
   /**
    * Send message with simplified direct send → fallback to outbox pipeline
@@ -1118,19 +1317,20 @@ class SupabasePipeline {
     const dbgLabel = `send-${message.id}`;
     try { console.time?.(`[${dbgLabel}] total`); } catch {}
     this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
-    
+
     try {
       await this.sendMessageInternal(message);
       this.log(`✅ Message ${message.id} sent successfully`);
       // Fire-and-forget: fan out push notification (best-effort)
       try {
-        const client = await this.getClient();
+        const client = await this.getDirectClient();
         const createdAt = new Date().toISOString();
+        const bearer = this.lastKnownAccessToken || '';
         await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+            'Authorization': bearer ? `Bearer ${bearer}` : '',
           },
           body: JSON.stringify({
             message_id: message.id,
@@ -1179,9 +1379,36 @@ class SupabasePipeline {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-        
-        const client = await this.getClient();
-        
+
+        const fastPathNoAuth = !!this.lastKnownAccessToken && this.lastKnownAccessToken === this.lastRealtimeAuthToken;
+        const client = fastPathNoAuth ? await this.getDirectClient() : await this.getClient();
+        this.log(`[${dbgLabel}] using ${fastPathNoAuth ? 'direct' : 'full'} client`);
+        try {
+          const hasRest = !!(client as any)?.rest;
+          const hasRestAuth = !!(client as any)?.rest?.auth;
+          this.log(`[${dbgLabel}] postgrest present=${hasRest} hasAuthFn=${hasRestAuth}`);
+        } catch (_) {}
+        if (fastPathNoAuth) {
+          try {
+            const token = this.lastKnownAccessToken;
+            if (token && (client as any)?.rest?.auth) {
+              (client as any).rest.auth(token);
+              this.log(`[${dbgLabel}] fast-path: postgrest Authorization set`);
+            }
+          } catch (e) {
+            this.log(`[${dbgLabel}] fast-path: failed to set postgrest Authorization: ${stringifyError(e)}`);
+          }
+        }
+        // If SDK cannot set PostgREST Authorization synchronously, bypass it for the first attempt
+        if (fastPathNoAuth && !(client as any)?.rest?.auth && attempt === 1) {
+          this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert`);
+          await this.fastPathDirectUpsert(message, dbgLabel);
+          this.log(`✅ Direct send successful - message ${message.id}`);
+          try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+          return;
+        }
+
+
         const timeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error(`Direct send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
         });
@@ -1220,14 +1447,20 @@ class SupabasePipeline {
         lastError = error;
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-        // If direct send timed out, schedule a background hard recreate to heal potential corruption
+        // If direct send timed out, only recreate after multiple consecutive timeouts
         try {
           const msg = (error as any)?.message || '';
           if (typeof msg === 'string' && msg.includes('Direct send timeout')) {
-            this.ensureRecreated('direct-send-timeout').catch(() => {});
+            // Only recreate client after 3 consecutive timeout failures to avoid excessive recreation
+            if (this.failureCount >= 3) {
+              this.log('🧹 Multiple timeout failures detected, scheduling client recreation');
+              this.ensureRecreated('multiple-direct-send-timeouts').catch(() => {});
+            } else {
+              this.log('🕐 Timeout occurred but not recreating client yet (failure count: ' + this.failureCount + ')');
+            }
           }
         } catch {}
-        
+
         if (attempt < this.config.maxRetries) {
           this.log(`⏳ Waiting ${this.config.retryBackoffMs}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, this.config.retryBackoffMs));
@@ -1245,6 +1478,63 @@ class SupabasePipeline {
   }
 
   /**
+   * Perform a direct PostgREST upsert using cached token to bypass any internal auth preflight
+   * Used only on the fast-path when the SDK's postgrest client does not expose .auth()
+   */
+  private async fastPathDirectUpsert(message: Message, dbgLabel: string): Promise<void> {
+    if (!this.supabaseUrl) throw new Error('Supabase URL not set');
+    const token = this.lastKnownAccessToken;
+    if (!token) throw new Error('No access token for fast-path upsert');
+
+    const url = `${this.supabaseUrl}/rest/v1/messages` +
+      `?on_conflict=dedupe_key` +
+      `&select=*,reactions(*),users!messages_user_id_fkey(display_name,avatar_url)`;
+
+    const payload = {
+      group_id: message.group_id,
+      user_id: message.user_id,
+      content: message.content,
+      is_ghost: message.is_ghost,
+      message_type: message.message_type,
+      category: message.category,
+      parent_id: message.parent_id,
+      image_url: message.image_url,
+      dedupe_key: message.dedupe_key,
+    } as any;
+
+    this.log(`[${dbgLabel}] fast-path: direct REST upsert -> ${url}`);
+
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), this.config.sendTimeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': this.supabaseAnonKey || '',
+          'Authorization': `Bearer ${token}`,
+          'Prefer': 'resolution=merge-duplicates,return=representation',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`REST upsert failed: ${res.status} ${text}`);
+      }
+
+      // Ensure response arrived
+      try { await res.json(); } catch (_) {}
+
+      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful`);
+    } finally {
+      clearTimeout(to);
+    }
+  }
+
+
+  /**
    * Fallback to outbox for later processing
    */
   private async fallbackToOutbox(message: Message): Promise<void> {
@@ -1253,7 +1543,7 @@ class SupabasePipeline {
       const ready = isNative && await sqliteService.isReady();
       const dbgLabel = `send-${message.id}`;
       this.log(`[${dbgLabel}] fallbackToOutbox(): isNative=${isNative} sqliteReady=${ready}`);
-      
+
       if (!ready) {
         throw new Error('SQLite not ready for outbox storage');
       }
@@ -1277,7 +1567,7 @@ class SupabasePipeline {
       });
 
       this.log(`📦 Message ${message.id} stored in outbox`);
-      
+
       // Trigger outbox processing immediately
       this.triggerOutboxProcessing('pipeline-fallback');
     } catch (error) {
@@ -1290,6 +1580,18 @@ class SupabasePipeline {
    * Process outbox messages with retries - simplified and more reliable
    */
   public async processOutbox(): Promise<void> {
+    // Single-flight guard and debounce
+    if (this.isOutboxProcessing) {
+      this.log('📦 Outbox processing already in progress; skipping');
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastOutboxStartAt < 1500) {
+      this.log('📦 Outbox processing debounced; too soon since last start');
+      return;
+    }
+    this.isOutboxProcessing = true;
+    this.lastOutboxStartAt = now;
     const sessionId = `outbox-${Date.now()}`;
     this.log(`📦 Starting outbox processing - session ${sessionId}`);
 
@@ -1297,7 +1599,7 @@ class SupabasePipeline {
       const isNative = Capacitor.isNativePlatform();
       const ready = isNative && await sqliteService.isReady();
       this.log(`📦 Outbox pre-check: isNative=${isNative} sqliteReady=${ready}`);
-      
+
       if (!ready) {
         this.log('📦 SQLite not ready, skipping outbox processing');
         return;
@@ -1321,7 +1623,7 @@ class SupabasePipeline {
         }
 
         // If client is unhealthy but circuit breaker is not open, try limited processing
-        this.logWarning('📦 Client unhealthy, attempting limited outbox processing');
+        this.log('⚠️ 📦 Client unhealthy, attempting limited outbox processing');
 
         // Try to process only a few messages to avoid overwhelming the system
         const limitedMessages = outboxMessages.slice(0, 3);
@@ -1330,9 +1632,9 @@ class SupabasePipeline {
         for (const outboxItem of limitedMessages) {
           try {
             const messageData = JSON.parse(outboxItem.content);
-            // Try a simple send with shorter timeout
+            // Try a simple send with reasonable timeout for mobile networks
             const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Degraded mode timeout')), 3000);
+              setTimeout(() => reject(new Error('Degraded mode timeout')), 8000);
             });
 
             const client = await this.getClient();
@@ -1417,7 +1719,7 @@ class SupabasePipeline {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+                'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
               },
               body: JSON.stringify({
                 message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
@@ -1430,12 +1732,12 @@ class SupabasePipeline {
 
         } catch (error) {
           this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
-          
+
           if (outboxItem.id !== undefined) {
             // Update retry count and schedule next retry
             const newRetryCount = (outboxItem.retry_count || 0) + 1;
             const maxRetries = 5;
-            
+
             if (newRetryCount >= maxRetries) {
               this.log(`🗑️ Outbox message ${outboxItem.id} exceeded max retries, removing`);
               await sqliteService.removeFromOutbox(outboxItem.id);
@@ -1443,7 +1745,7 @@ class SupabasePipeline {
             } else {
               const backoffMs = Math.min(newRetryCount * 30000, 300000); // 30s to 5min max
               const nextRetryAt = Date.now() + backoffMs;
-              
+
               await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
               this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
               retriedCount++;
@@ -1463,6 +1765,28 @@ class SupabasePipeline {
     } catch (error) {
       this.log(`❌ Outbox processing failed - session ${sessionId}:`, stringifyError(error));
       throw error;
+    } finally {
+      this.isOutboxProcessing = false;
+    }
+  }
+
+  /**
+   * Apply JWT to realtime websocket. Returns whether token changed since last application.
+   */
+  public async setRealtimeAuth(token: string | null | undefined): Promise<{ changed: boolean }> {
+    try {
+      const client = await this.getDirectClient();
+      const incoming = token || null;
+      const changed = incoming !== this.lastRealtimeAuthToken;
+      if ((client as any)?.realtime?.setAuth) {
+        (client as any).realtime.setAuth(incoming || undefined);
+      }
+      this.lastRealtimeAuthToken = incoming;
+      this.log(`📨 setRealtimeAuth: token ${changed ? 'changed' : 'unchanged'}${incoming ? ' (set)' : ' (cleared)'}`);
+      return { changed };
+    } catch (e) {
+      this.log(`❌ setRealtimeAuth failed: ${stringifyError(e)}`);
+      return { changed: false };
     }
   }
 
@@ -1470,8 +1794,14 @@ class SupabasePipeline {
    * Trigger outbox processing externally
    */
   private triggerOutboxProcessing(context: string): void {
+    const now = Date.now();
+    if (now - this.lastOutboxTriggerAt < 1000) {
+      this.log(`📦 Trigger suppressed (debounced) from: ${context}`);
+      return;
+    }
+    this.lastOutboxTriggerAt = now;
     this.log(`📦 Triggering outbox processing from: ${context}`);
-    
+
     // Use dynamic import to avoid circular dependencies
     import('../store/chatstore_refactored/offlineActions').then(({ triggerOutboxProcessing }) => {
       this.log('📦 triggerOutboxProcessing(): dynamic import succeeded');
@@ -1489,7 +1819,7 @@ class SupabasePipeline {
     this.log('🔄 Resetting connection (non-destructive)...');
     try {
       await this.initialize(false);
-      await this.refreshSession();
+      await this.recoverSession();
       this.log('✅ Connection reset complete');
     } catch (error) {
       this.log('❌ Connection reset failed:', stringifyError(error));
@@ -1542,7 +1872,7 @@ class SupabasePipeline {
           session = await this.getWorkingSession();
           if (!session?.access_token) {
             this.log('⚠️ Hard recreate: no valid session after recreation, attempting refresh');
-            const refreshed = await this.refreshSession();
+            const refreshed = await this.recoverSession();
             if (refreshed) {
               session = await this.getWorkingSession();
             }
@@ -1617,18 +1947,48 @@ class SupabasePipeline {
     return await this.recreatePromise;
   }
 
+  // Removed validateWebViewState - not needed with simplified resume flow
+
   /**
-   * Simplified app resume handler - just refresh session
+   * Simplified app resume handler - focus on session recovery without client recreation
    */
   public async onAppResume(): Promise<void> {
-    this.log('📱 App resume detected - refreshing session');
+    this.log('📱 App resume detected - checking session state');
 
     try {
-      // Simple session refresh
-      await this.refreshSession();
-      this.log('✅ App resume session refresh completed');
+      // Quick session recovery using cached tokens
+      const recovered = await this.recoverSession();
+
+      if (recovered) {
+        this.log('✅ App resume: session recovered using cached tokens');
+      } else {
+        this.log('⚠️ App resume: token recovery failed, session may need refresh');
+        // Don't force refresh here - let the realtime connection handle it
+      }
+
+      // Apply current token to realtime if available
+      try {
+        const client = await this.getClient();
+        const token = this.lastKnownAccessToken;
+        if (token) {
+          if ((client as any)?.realtime?.setAuth) {
+            (client as any).realtime.setAuth(token);
+            this.log('✅ App resume: token applied to realtime');
+          }
+          try {
+            if ((client as any)?.rest?.auth) {
+              (client as any).rest.auth(token);
+              this.log('✅ App resume: token applied to PostgREST');
+            }
+          } catch (_) {}
+        }
+      } catch (e) {
+        this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
+      }
+
+      this.log('✅ App resume completed using token recovery strategy');
     } catch (error) {
-      this.log('❌ App resume session refresh failed:', stringifyError(error));
+      this.log('❌ App resume failed:', stringifyError(error));
     }
   }
 
@@ -1646,7 +2006,7 @@ class SupabasePipeline {
 
     try {
       // Simple session refresh
-      await this.refreshSession();
+      await this.recoverSession();
       this.log('✅ Network reconnect session refresh completed');
     } catch (error) {
       this.log('❌ Network reconnect session refresh failed:', stringifyError(error));
@@ -1657,8 +2017,12 @@ class SupabasePipeline {
    * Get direct access to client for non-messaging operations
    * Use sparingly - prefer pipeline methods when possible
    */
-  public async getDirectClient(): Promise<SupabaseClient<Database>> {
-    return await this.getClient();
+  public async getDirectClient(): Promise<any> {
+    // Lightweight path: ensure initialized, skip corruption checks and any auth recovery probes
+    if (!this.client || !this.isInitialized) {
+      await this.initialize();
+    }
+    return this.client!;
   }
 
   /**
@@ -1684,10 +2048,7 @@ class SupabasePipeline {
 
 
 
-  private logWarning(message: string, ...args: any[]): void {
-    const timestamp = new Date().toISOString().slice(11, 23);
-    console.warn(`[supabase-pipeline] ${timestamp} ⚠️ ${message}`, ...args);
-  }
+
 
   /**
    * (Re)bind all registered auth listeners to current client. Idempotent across recreations.

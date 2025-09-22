@@ -27,6 +27,31 @@ createRoot(document.getElementById('root')!).render(
 	// Initialize WhatsApp-style connection system
 	mobileLogger.log('info', 'general', 'Initializing WhatsApp-style connection system');
 
+	// Get initial network status and update store
+	try {
+		const networkStatus = await Network.getStatus();
+		const chatStore = useChatStore.getState();
+		mobileLogger.log('info', 'network', `Initial network status: ${networkStatus.connected ? 'online' : 'offline'}`, {
+			connectionType: networkStatus.connectionType
+		});
+
+		// Set initial network status in store
+		chatStore.setOnlineStatus?.(networkStatus.connected);
+
+		// Set initial connection status based on network
+		if (networkStatus.connected) {
+			whatsappConnection.setConnectionState('connecting', 'Initializing connection...');
+		} else {
+			whatsappConnection.setConnectionState('disconnected', 'No network connection');
+		}
+	} catch (error) {
+		mobileLogger.log('error', 'network', 'Failed to get initial network status', { error });
+		// Default to offline to be safe
+		const chatStore = useChatStore.getState();
+		chatStore.setOnlineStatus?.(false);
+		whatsappConnection.setConnectionState('disconnected', 'Network status unknown');
+	}
+
 	// Setup connection status monitoring
 	whatsappConnection.onStatusChange((status) => {
 		mobileLogger.log('info', 'connection', `Connection status: ${status.state} - ${status.message}`, {
@@ -109,10 +134,12 @@ createRoot(document.getElementById('root')!).render(
 
 				reconnectionManager.reconnect('network-online').catch(error => {
 					mobileLogger.log('error', 'network', 'Network reconnection failed', { error });
+					whatsappConnection.setConnectionState('disconnected', 'Connection failed');
 				});
 			} else {
 				// Handle network going offline
 				mobileLogger.log('warn', 'network', 'Network disconnected');
+				whatsappConnection.setConnectionState('disconnected', 'No network connection');
 				chatStore.setConnectionStatus?.('disconnected');
 				chatStore.cleanupRealtimeSubscription?.();
 			}

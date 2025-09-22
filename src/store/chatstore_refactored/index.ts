@@ -76,7 +76,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     typingTimeout: null,
     showGroupDetailsPanel: false,
     groupMembers: [],
-    online: true,
+    online: false, // Start offline until network status is properly checked
     outboxProcessorInterval: null,
     activeSwipeMessageId: null,
     groupMedia: [],
