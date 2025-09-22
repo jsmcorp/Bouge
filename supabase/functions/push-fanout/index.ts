@@ -10,7 +10,7 @@ function buildCorsHeaders(origin: string | null): HeadersInit {
   return {
     'Access-Control-Allow-Origin': allowed,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'authorization, content-type, x-client-info',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -237,7 +237,7 @@ serve(async (req) => {
 		return new Response('ok', { headers: cors });
 	} catch (e) {
 		console.error('push-fanout error', e);
-		return new Response('error', { status: 500 });
+		return new Response('error', { status: 500, headers: cors });
 	}
 });
 

@@ -1330,6 +1330,7 @@ class SupabasePipeline {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'apikey': this.supabaseAnonKey || '',
             'Authorization': bearer ? `Bearer ${bearer}` : '',
           },
           body: JSON.stringify({
@@ -1719,6 +1720,7 @@ class SupabasePipeline {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
+                'apikey': this.supabaseAnonKey || '',
                 'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
               },
               body: JSON.stringify({
