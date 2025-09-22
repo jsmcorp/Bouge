@@ -151,11 +151,25 @@ export async function initPush(): Promise<void> {
 
 		// Associate token after auth events to ensure row exists in user_devices
 		try {
-			(await supabasePipeline.onAuthStateChange((event, session) => {
-				if (currentToken && session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
-					upsertDeviceToken(currentToken);
-				}
-			})).data.subscription;
+		(await supabasePipeline.onAuthStateChange(async (event, session) => {
+ 			 if (session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
+    		// If we already have a token, upsert it
+   		 if (currentToken) {
+ 		 await upsertDeviceToken(currentToken);
+    	} else {
+      // Try to fetch a new token now that we are authenticated
+      	const tokenResult = await FirebaseMessaging.getToken();
+      	if (tokenResult?.token) {
+        currentToken = tokenResult.token;
+        if (currentToken) {
+          console.log('[push] token received(after-auth):', truncateToken(currentToken));
+          await upsertDeviceToken(currentToken);
+        }
+      }
+    }
+  }
+})).data.subscription;
+
 		} catch {}
 	} catch (e) {
 		console.warn('Push init skipped (plugin missing or error):', e);
@@ -167,3 +181,31 @@ export function getCurrentToken(): string | null {
 }
 
 
+
+
+// Debug helper: force fetch and upsert a fresh FCM token (dev only)
+export async function forceRefreshPushToken(): Promise<string | undefined> {
+	try {
+		const moduleName = '@capacitor-firebase/messaging';
+		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
+		const res = await FirebaseMessaging.getToken();
+		const tok = res?.token;
+		if (!tok) {
+			console.log('[push] Failed to get FCM token.');
+			return undefined;
+		}
+		console.log('[push] Upserting new FCM token:', truncateToken(tok));
+		await upsertDeviceToken(tok);
+		console.log('[push] FCM token upserted successfully.');
+		return tok;
+	} catch (e) {
+		console.warn('forceRefreshPushToken error', e);
+		return undefined;
+	}
+}
+
+if (typeof window !== 'undefined') {
+	// Attach a global for ad-hoc testing from devtools: await window.__debugUpsertPushToken()
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(window as any).__debugUpsertPushToken = forceRefreshPushToken;
+}

@@ -204,11 +204,19 @@ serve(async (req: Request) => {
 		// If POST body provided, single message; otherwise drain queue (cron)
 		if (req.method === 'POST' && req.headers.get('content-type')?.includes('application/json')) {
 			const payload: Payload = await req.json();
-				try { console.log(JSON.stringify({ tag: 'push-fanout:payload', reqId, group_id: payload.group_id, sender_id: payload.sender_id, message_id: payload.message_id })); } catch {}
+			// Log full payload for diagnostics
+			try { console.log(JSON.stringify({ tag: "push-fanout:payload", payload })); } catch {}
+			// Keep existing structured payload log
+			try { console.log(JSON.stringify({ tag: 'push-fanout:payload', reqId, group_id: payload.group_id, sender_id: payload.sender_id, message_id: payload.message_id })); } catch {}
 
 			const recipients = await getRecipients(payload.group_id, payload.sender_id);
+			const recipientIds = recipients;
+			try { console.log(JSON.stringify({ tag: "push-fanout:members", group_id: payload.group_id, sender_id: payload.sender_id, recipientIds })); } catch {}
+			try { console.log(JSON.stringify({ tag: 'push-fanout:members', reqId, memberCount: recipients.length })); } catch {}
 			if (recipients.length === 0) return new Response('ok', { headers: cors });
 			const tokens = await getActiveTokens(recipients);
+			const tokensData = tokens;
+			try { console.log(JSON.stringify({ tag: "push-fanout:tokens", tokensData })); } catch {}
 			const tokenList = tokens.map((t) => t.token);
 				try { console.log(JSON.stringify({ tag: 'push-fanout:fanout', reqId, recipients: tokenList.length })); } catch {}
 
@@ -232,7 +240,12 @@ serve(async (req: Request) => {
 		for (const it of items || []) {
 			try {
 				const recipients = await getRecipients(it.group_id, it.sender_id);
+				const recipientIds = recipients;
+				try { console.log(JSON.stringify({ tag: "push-fanout:members", group_id: it.group_id, sender_id: it.sender_id, recipientIds })); } catch {}
+				try { console.log(JSON.stringify({ tag: 'push-fanout:members', reqId, memberCount: recipients.length })); } catch {}
 				const tokens = await getActiveTokens(recipients);
+				const tokensData = tokens;
+				try { console.log(JSON.stringify({ tag: "push-fanout:tokens", tokensData })); } catch {}
 				const tokenList = tokens.map((t) => t.token);
 					try { console.log(JSON.stringify({ tag: 'push-fanout:fanout', reqId, recipients: tokenList.length })); } catch {}
 
