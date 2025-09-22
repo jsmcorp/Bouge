@@ -1326,20 +1326,29 @@ class SupabasePipeline {
         const client = await this.getDirectClient();
         const createdAt = new Date().toISOString();
         const bearer = this.lastKnownAccessToken || '';
-        await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
-          method: 'POST',
-          headers: {
+        const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+        try {
+          const origin = (typeof window !== 'undefined' ? window.location.origin : 'native');
+          const headersObj: Record<string, string> = {
             'Content-Type': 'application/json',
             'apikey': this.supabaseAnonKey || '',
             'Authorization': bearer ? `Bearer ${bearer}` : '',
-          },
-          body: JSON.stringify({
-            message_id: message.id,
-            group_id: message.group_id,
-            sender_id: message.user_id,
-            created_at: createdAt,
-          }),
-        }).catch(() => {});
+          };
+          this.log(`[supabase-pipeline] push-fanout call: origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
+          const res = await fetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            headers: headersObj,
+            body: JSON.stringify({
+              message_id: message.id,
+              group_id: message.group_id,
+              sender_id: message.user_id,
+              created_at: createdAt,
+            })
+          });
+          this.log(`[supabase-pipeline] push-fanout response: status=${res.status}`);
+        } catch (_) {}
+
       } catch {}
     } catch (error) {
       if ((error as any)?.code === 'QUEUED_OUTBOX' || (error as any)?.name === 'MessageQueuedError') {
@@ -1716,20 +1725,29 @@ class SupabasePipeline {
           // Fire-and-forget: fan out push notification for outbox item
           try {
             const client = await this.getClient();
-            await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
-              method: 'POST',
-              headers: {
+            const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+            try {
+              const origin = (typeof window !== 'undefined' ? window.location.origin : 'native');
+              const headersObj: Record<string, string> = {
                 'Content-Type': 'application/json',
                 'apikey': this.supabaseAnonKey || '',
                 'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
-              },
-              body: JSON.stringify({
-                message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
-                group_id: outboxItem.group_id,
-                sender_id: outboxItem.user_id,
-                created_at: new Date().toISOString(),
-              }),
-            }).catch(() => {});
+              };
+              this.log(`[supabase-pipeline] push-fanout call: origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
+              const res = await fetch(url, {
+                method: 'POST',
+                mode: 'cors',
+                headers: headersObj,
+                body: JSON.stringify({
+                  message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
+                  group_id: outboxItem.group_id,
+                  sender_id: outboxItem.user_id,
+                  created_at: new Date().toISOString(),
+                })
+              });
+              this.log(`[supabase-pipeline] push-fanout response: status=${res.status}`);
+            } catch (_) {}
+
           } catch {}
 
         } catch (error) {

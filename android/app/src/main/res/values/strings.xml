@@ -4,4 +4,7 @@
     <string name="title_activity_main">Confessr</string>
     <string name="package_name">com.confessr.app</string>
     <string name="custom_url_scheme">com.confessr.app</string>
+    <string name="default_notification_channel_id">confessr_default</string>
+    <string name="default_notification_channel_name">Confessr Notifications</string>
+
 </resources>

@@ -51,14 +51,52 @@ export async function initPush(): Promise<void> {
 		const moduleName = '@capacitor-firebase/messaging';
 		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
 
-		await FirebaseMessaging.requestPermissions();
-		const tokenResult = await FirebaseMessaging.getToken();
-		if (tokenResult?.token) {
-			currentToken = tokenResult.token;
-			if (typeof currentToken === 'string') {
-				await upsertDeviceToken(currentToken);
+		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
+		// Prefer FirebaseMessaging permission API; fallback to Capacitor PushNotifications for prompt+register.
+		let permBefore: any = null;
+		let permAfter: any = null;
+		try { permBefore = await (FirebaseMessaging as any).checkPermissions?.(); } catch {}
+		console.log('[push] permission before(FirebaseMessaging):', permBefore?.receive || 'unknown');
+		if (!permBefore || permBefore.receive === 'prompt' || permBefore.receive === 'denied') {
+			try {
+				permAfter = await FirebaseMessaging.requestPermissions();
+				console.log('[push] permission after(FirebaseMessaging):', permAfter?.receive || 'unknown');
+			} catch (e) {
+				console.warn('[push] FirebaseMessaging.requestPermissions failed, falling back to PushNotifications', e);
+				try {
+					const moduleNamePN = '@capacitor/push-notifications';
+					// @ts-ignore
+					const { PushNotifications } = await import(/* @vite-ignore */ moduleNamePN as any);
+					const capPermBefore = await PushNotifications.checkPermissions();
+					console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
+					if (capPermBefore.receive !== 'granted') {
+						const capPermAfter = await PushNotifications.requestPermissions();
+						console.log('[push] permission after(PushNotifications):', capPermAfter.receive);
+					}
+					await PushNotifications.register();
+					PushNotifications.addListener('registration', async (token: any) => {
+						try {
+							currentToken = (token as any)?.value || (token as any)?.token || '';
+							if (currentToken) {
+								console.log('[push] token received(core):', truncateToken(currentToken));
+								await upsertDeviceToken(currentToken);
+							}
+						} catch {}
+					});
+				} catch {}
 			}
 		}
+		// Try to get FCM token via FirebaseMessaging as primary path
+		try {
+			const tokenResult = await FirebaseMessaging.getToken();
+			if (tokenResult?.token) {
+				currentToken = tokenResult.token;
+				console.log('[push] token received(firebase):', truncateToken(currentToken || ''));
+				if (typeof currentToken === 'string') {
+					await upsertDeviceToken(currentToken);
+				}
+			}
+		} catch {}
 
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
 			currentToken = event.token;
