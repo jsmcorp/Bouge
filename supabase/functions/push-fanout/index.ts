@@ -6,11 +6,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 // CORS helpers
 const DEV_ORIGINS = (Deno.env.get('DEV_CORS_ORIGINS') || 'https://localhost,capacitor://localhost,http://localhost').split(',');
 function buildCorsHeaders(origin: string | null): HeadersInit {
-  const allowed = origin && DEV_ORIGINS.includes(origin) ? origin : origin || '*';
+  const allowed = (origin && DEV_ORIGINS.includes(origin)) ? origin : '*';
   return {
     'Access-Control-Allow-Origin': allowed,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'authorization, content-type, x-client-info',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -114,7 +114,7 @@ async function getAccessToken(): Promise<string | null> {
 	}
 }
 
-async function sendFcmV1(tokens: string[], data: Record<string, string>): Promise<void> {
+async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?: string): Promise<void> {
 	if (!FCM_PROJECT_ID || tokens.length === 0) return;
 	const accessToken = await getAccessToken();
 	if (!accessToken) {
@@ -122,6 +122,7 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>): Promis
 		return;
 	}
 	const url = `https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`;
+	console.log(JSON.stringify({ tag: 'push-fcm-v1:request', projectId: FCM_PROJECT_ID, endpoint: url, tokenCount: tokens.length, reqId }));
 	const invalid: string[] = [];
 	for (const token of tokens) {
 		const body = {
@@ -145,16 +146,20 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>): Promis
 		if (!res.ok) {
 			const txt = await res.text();
 			if (/UNREGISTERED|InvalidArgument/i.test(txt)) invalid.push(token);
-			console.error('FCM v1 send error', res.status, txt);
+			console.error(JSON.stringify({ tag: 'push-fcm-v1:error', reqId, status: res.status, body: (txt || '').slice(0, 500) }));
+		} else {
+			let messageName: string | undefined = undefined;
+			try { const j = await res.clone().json(); messageName = j?.name; } catch (_) {}
+			console.log(JSON.stringify({ tag: 'push-fcm-v1:ok', reqId, status: res.status, messageName }));
 		}
 	}
 	if (invalid.length > 0) await deactivateTokens(invalid);
 }
 
-async function sendFcm(tokens: string[], data: Record<string, string>): Promise<void> {
+async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: string): Promise<void> {
 	// Prefer v1 if creds are configured; fallback to legacy key if not
 	if (GCP_CLIENT_EMAIL && GCP_PRIVATE_KEY && FCM_PROJECT_ID) {
-		return await sendFcmV1(tokens, data);
+		return await sendFcmV1(tokens, data, reqId);
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
@@ -180,9 +185,13 @@ async function sendFcm(tokens: string[], data: Record<string, string>): Promise<
 	if (invalid.length > 0) await deactivateTokens(invalid);
 }
 
-serve(async (req) => {
+serve(async (req: Request) => {
 	const origin = req.headers.get('origin');
 	const cors = buildCorsHeaders(origin);
+		const reqId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : Math.random().toString(36).slice(2);
+		const isPreflight = req.method === 'OPTIONS';
+		try { console.log(JSON.stringify({ tag: 'push-fanout:request', reqId, method: req.method, origin, allowedOrigin: (cors as any)['Access-Control-Allow-Origin'], isPreflight })); } catch {}
+
 
 	if (req.method === 'OPTIONS') {
 		return new Response(null, { status: 204, headers: cors });
@@ -195,17 +204,29 @@ serve(async (req) => {
 		// If POST body provided, single message; otherwise drain queue (cron)
 		if (req.method === 'POST' && req.headers.get('content-type')?.includes('application/json')) {
 			const payload: Payload = await req.json();
+			// Log full payload for diagnostics
+			try { console.log(JSON.stringify({ tag: "push-fanout:payload", payload })); } catch {}
+			// Keep existing structured payload log
+			try { console.log(JSON.stringify({ tag: 'push-fanout:payload', reqId, group_id: payload.group_id, sender_id: payload.sender_id, message_id: payload.message_id })); } catch {}
+
 			const recipients = await getRecipients(payload.group_id, payload.sender_id);
+			const recipientIds = recipients;
+			try { console.log(JSON.stringify({ tag: "push-fanout:members", group_id: payload.group_id, sender_id: payload.sender_id, recipientIds })); } catch {}
+			try { console.log(JSON.stringify({ tag: 'push-fanout:members', reqId, memberCount: recipients.length })); } catch {}
 			if (recipients.length === 0) return new Response('ok', { headers: cors });
 			const tokens = await getActiveTokens(recipients);
+			const tokensData = tokens;
+			try { console.log(JSON.stringify({ tag: "push-fanout:tokens", tokensData })); } catch {}
 			const tokenList = tokens.map((t) => t.token);
+				try { console.log(JSON.stringify({ tag: 'push-fanout:fanout', reqId, recipients: tokenList.length })); } catch {}
+
 			if (tokenList.length === 0) return new Response('ok', { headers: cors });
 			await sendFcm(tokenList, {
 				type: 'new_message',
 				group_id: payload.group_id,
 				message_id: payload.message_id,
 				created_at: payload.created_at,
-			});
+			}, reqId);
 			console.log(`[push] notify:fanout group=${payload.group_id} recipients=${tokenList.length}`);
 			return new Response('ok', { headers: cors });
 		}
@@ -219,15 +240,22 @@ serve(async (req) => {
 		for (const it of items || []) {
 			try {
 				const recipients = await getRecipients(it.group_id, it.sender_id);
+				const recipientIds = recipients;
+				try { console.log(JSON.stringify({ tag: "push-fanout:members", group_id: it.group_id, sender_id: it.sender_id, recipientIds })); } catch {}
+				try { console.log(JSON.stringify({ tag: 'push-fanout:members', reqId, memberCount: recipients.length })); } catch {}
 				const tokens = await getActiveTokens(recipients);
+				const tokensData = tokens;
+				try { console.log(JSON.stringify({ tag: "push-fanout:tokens", tokensData })); } catch {}
 				const tokenList = tokens.map((t) => t.token);
+					try { console.log(JSON.stringify({ tag: 'push-fanout:fanout', reqId, recipients: tokenList.length })); } catch {}
+
 				if (tokenList.length > 0) {
 					await sendFcm(tokenList, {
 						type: 'new_message',
 						group_id: it.group_id,
 						message_id: it.message_id,
 						created_at: it.created_at,
-					});
+					}, reqId);
 					console.log(`[push] notify:fanout group=${it.group_id} recipients=${tokenList.length}`);
 				}
 			} finally {
@@ -237,7 +265,7 @@ serve(async (req) => {
 		return new Response('ok', { headers: cors });
 	} catch (e) {
 		console.error('push-fanout error', e);
-		return new Response('error', { status: 500 });
+		return new Response('error', { status: 500, headers: cors });
 	}
 });
 

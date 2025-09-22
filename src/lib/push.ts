@@ -47,17 +47,68 @@ export async function initPush(): Promise<void> {
 	}
 
 	try {
-		// Dynamic import to avoid bundling on web
-		const moduleName = '@capacitor-firebase/messaging';
-		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
+		// Dynamic import that Vite can transform to a chunk
+		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
 
-		await FirebaseMessaging.requestPermissions();
-		const tokenResult = await FirebaseMessaging.getToken();
-		if (tokenResult?.token) {
-			currentToken = tokenResult.token;
-			if (typeof currentToken === 'string') {
-				await upsertDeviceToken(currentToken);
+		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
+		// Prefer FirebaseMessaging permission API; if not granted, fallback to Capacitor PushNotifications to prompt/register.
+		let permBefore: any = null;
+		let permAfter: any = null;
+		try { permBefore = await (FirebaseMessaging as any).checkPermissions?.(); } catch {}
+		console.log('[push] permission before(FirebaseMessaging):', permBefore?.receive || 'unknown');
+		let granted = permBefore?.receive === 'granted';
+		if (!granted) {
+			try {
+				permAfter = await FirebaseMessaging.requestPermissions();
+				console.log('[push] permission after(FirebaseMessaging):', permAfter?.receive || 'unknown');
+				granted = permAfter?.receive === 'granted';
+			} catch (e) {
+				console.warn('[push] FirebaseMessaging.requestPermissions threw; will try PushNotifications fallback', e);
 			}
+		}
+		if (!granted) {
+			try {
+				const { PushNotifications } = await import('@capacitor/push-notifications');
+				const capPermBefore = await PushNotifications.checkPermissions();
+				console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
+				if (capPermBefore.receive !== 'granted') {
+					const capPermAfter = await PushNotifications.requestPermissions();
+					console.log('[push] permission after(PushNotifications):', capPermAfter.receive);
+					granted = capPermAfter.receive === 'granted';
+				}
+				await PushNotifications.register();
+				PushNotifications.addListener('registration', async (token: any) => {
+					try {
+						currentToken = (token as any)?.value || (token as any)?.token || '';
+						if (currentToken) {
+							console.log('[push] token received(core):', truncateToken(currentToken));
+							await upsertDeviceToken(currentToken);
+						}
+					} catch (e) {
+						console.warn('[push] registration listener upsert failed', e);
+					}
+				});
+				(PushNotifications as any).addListener('registrationError', (e: any) => {
+					console.warn('[push] PushNotifications registrationError', e);
+				});
+			} catch (e) {
+				console.warn('[push] PushNotifications fallback failed', e);
+			}
+		}
+		// Try to get FCM token via FirebaseMessaging as primary path regardless of permission outcome
+		try {
+			const tokenResult = await FirebaseMessaging.getToken();
+			if (tokenResult?.token) {
+				currentToken = tokenResult.token;
+				console.log('[push] token received(firebase):', truncateToken(currentToken || ''));
+				if (typeof currentToken === 'string') {
+					await upsertDeviceToken(currentToken);
+				}
+			} else {
+				console.log('[push] FirebaseMessaging.getToken returned empty');
+			}
+		} catch (e) {
+			console.warn('[push] FirebaseMessaging.getToken failed', e);
 		}
 
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
@@ -113,11 +164,25 @@ export async function initPush(): Promise<void> {
 
 		// Associate token after auth events to ensure row exists in user_devices
 		try {
-			(await supabasePipeline.onAuthStateChange((event, session) => {
-				if (currentToken && session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
-					upsertDeviceToken(currentToken);
-				}
-			})).data.subscription;
+		(await supabasePipeline.onAuthStateChange(async (event, session) => {
+ 			 if (session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
+    		// If we already have a token, upsert it
+   		 if (currentToken) {
+ 		 await upsertDeviceToken(currentToken);
+    	} else {
+      // Try to fetch a new token now that we are authenticated
+      	const tokenResult = await FirebaseMessaging.getToken();
+      	if (tokenResult?.token) {
+        currentToken = tokenResult.token;
+        if (currentToken) {
+          console.log('[push] token received(after-auth):', truncateToken(currentToken));
+          await upsertDeviceToken(currentToken);
+        }
+      }
+    }
+  }
+})).data.subscription;
+
 		} catch {}
 	} catch (e) {
 		console.warn('Push init skipped (plugin missing or error):', e);
@@ -129,3 +194,30 @@ export function getCurrentToken(): string | null {
 }
 
 
+
+
+// Debug helper: force fetch and upsert a fresh FCM token (dev only)
+export async function forceRefreshPushToken(): Promise<string | undefined> {
+	try {
+		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+		const res = await FirebaseMessaging.getToken();
+		const tok = res?.token;
+		if (!tok) {
+			console.log('[push] Failed to get FCM token.');
+			return undefined;
+		}
+		console.log('[push] Upserting new FCM token:', truncateToken(tok));
+		await upsertDeviceToken(tok);
+		console.log('[push] FCM token upserted successfully.');
+		return tok;
+	} catch (e) {
+		console.warn('forceRefreshPushToken error', e);
+		return undefined;
+	}
+}
+
+if (typeof window !== 'undefined') {
+	// Attach a global for ad-hoc testing from devtools: await window.__debugUpsertPushToken()
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(window as any).__debugUpsertPushToken = forceRefreshPushToken;
+}
