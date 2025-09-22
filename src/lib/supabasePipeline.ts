@@ -1302,13 +1302,14 @@ class SupabasePipeline {
       this.log(`✅ Message ${message.id} sent successfully`);
       // Fire-and-forget: fan out push notification (best-effort)
       try {
-        const client = await this.getClient();
+        const client = await this.getDirectClient();
         const createdAt = new Date().toISOString();
+        const bearer = this.lastKnownAccessToken || '';
         await fetch(`${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+            'Authorization': bearer ? `Bearer ${bearer}` : '',
           },
           body: JSON.stringify({
             message_id: message.id,
@@ -1358,8 +1359,21 @@ class SupabasePipeline {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
         
-        const client = await this.getClient();
-        
+        const fastPathNoAuth = !!this.lastKnownAccessToken && this.lastKnownAccessToken === this.lastRealtimeAuthToken;
+        const client = fastPathNoAuth ? await this.getDirectClient() : await this.getClient();
+        this.log(`[${dbgLabel}] using ${fastPathNoAuth ? 'direct' : 'full'} client`);
+        if (fastPathNoAuth) {
+          try {
+            const token = this.lastKnownAccessToken;
+            if (token && (client as any)?.rest?.auth) {
+              (client as any).rest.auth(token);
+              this.log(`[${dbgLabel}] fast-path: postgrest Authorization set`);
+            }
+          } catch (e) {
+            this.log(`[${dbgLabel}] fast-path: failed to set postgrest Authorization: ${stringifyError(e)}`);
+          }
+        }
+
         const timeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error(`Direct send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
         });
@@ -1613,7 +1627,7 @@ class SupabasePipeline {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${(await client.auth.getSession()).data.session?.access_token || ''}`,
+                'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
               },
               body: JSON.stringify({
                 message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
@@ -1864,9 +1878,17 @@ class SupabasePipeline {
       try {
         const client = await this.getClient();
         const token = this.lastKnownAccessToken;
-        if (token && (client as any)?.realtime?.setAuth) {
-          (client as any).realtime.setAuth(token);
-          this.log('✅ App resume: token applied to realtime');
+        if (token) {
+          if ((client as any)?.realtime?.setAuth) {
+            (client as any).realtime.setAuth(token);
+            this.log('✅ App resume: token applied to realtime');
+          }
+          try {
+            if ((client as any)?.rest?.auth) {
+              (client as any).rest.auth(token);
+              this.log('✅ App resume: token applied to PostgREST');
+            }
+          } catch (_) {}
         }
       } catch (e) {
         this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
@@ -1904,7 +1926,11 @@ class SupabasePipeline {
    * Use sparingly - prefer pipeline methods when possible
    */
   public async getDirectClient(): Promise<any> {
-    return await this.getClient();
+    // Lightweight path: ensure initialized, skip corruption checks and any auth recovery probes
+    if (!this.client || !this.isInitialized) {
+      await this.initialize();
+    }
+    return this.client!;
   }
 
   /**

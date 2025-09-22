@@ -91,14 +91,15 @@ class ReconnectionManager {
         const currentToken = supabasePipeline.getCachedAccessToken();
         const lastApplied = supabasePipeline.getLastRealtimeAuthToken();
         if (currentToken && currentToken === lastApplied) {
-          this.log('Fast path: token unchanged, skipping session recovery.');
+          this.log('Fast path: token unchanged, no session recovery');
         } else {
           // Apply token directly without triggering session recovery flows
           try { await supabasePipeline.setRealtimeAuth(currentToken || null); } catch {}
         }
       } catch {}
+      this.log('Token applied; channel healthy, no reconnect');
       this.log('Reconnection decision: fast-path (no reconnect).');
-      this.log('Channel already subscribed');
+      this.log('Channel already subscribed (fast path)');
       return;
     }
 

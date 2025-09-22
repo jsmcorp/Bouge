@@ -735,7 +735,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         log('Fast path: no existing channel; creating new');
         return await (get() as any).setupSimplifiedRealtimeSubscription(groupId);
       }
-      if (connectionStatus === 'connected') { log('Fast path resume: Channel already subscribed'); return; }
+      if (connectionStatus === 'connected') { log('Channel already subscribed (fast path)'); return; }
 
       log('Fast path: re-subscribing existing channel');
       set({ connectionStatus: 'connecting' });
