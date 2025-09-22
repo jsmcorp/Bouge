@@ -47,9 +47,8 @@ export async function initPush(): Promise<void> {
 	}
 
 	try {
-		// Dynamic import to avoid bundling on web
-		const moduleName = '@capacitor-firebase/messaging';
-		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
+		// Dynamic import that Vite can transform to a chunk
+		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
 
 		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
 		// Prefer FirebaseMessaging permission API; fallback to Capacitor PushNotifications for prompt+register.
@@ -64,9 +63,7 @@ export async function initPush(): Promise<void> {
 			} catch (e) {
 				console.warn('[push] FirebaseMessaging.requestPermissions failed, falling back to PushNotifications', e);
 				try {
-					const moduleNamePN = '@capacitor/push-notifications';
-					// @ts-ignore
-					const { PushNotifications } = await import(/* @vite-ignore */ moduleNamePN as any);
+					const { PushNotifications } = await import('@capacitor/push-notifications');
 					const capPermBefore = await PushNotifications.checkPermissions();
 					console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
 					if (capPermBefore.receive !== 'granted') {
@@ -186,8 +183,7 @@ export function getCurrentToken(): string | null {
 // Debug helper: force fetch and upsert a fresh FCM token (dev only)
 export async function forceRefreshPushToken(): Promise<string | undefined> {
 	try {
-		const moduleName = '@capacitor-firebase/messaging';
-		const { FirebaseMessaging } = await import(/* @vite-ignore */ moduleName);
+		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
 		const res = await FirebaseMessaging.getToken();
 		const tok = res?.token;
 		if (!tok) {
