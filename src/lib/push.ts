@@ -51,39 +51,51 @@ export async function initPush(): Promise<void> {
 		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
 
 		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
-		// Prefer FirebaseMessaging permission API; fallback to Capacitor PushNotifications for prompt+register.
+		// Prefer FirebaseMessaging permission API; if not granted, fallback to Capacitor PushNotifications to prompt/register.
 		let permBefore: any = null;
 		let permAfter: any = null;
 		try { permBefore = await (FirebaseMessaging as any).checkPermissions?.(); } catch {}
 		console.log('[push] permission before(FirebaseMessaging):', permBefore?.receive || 'unknown');
-		if (!permBefore || permBefore.receive === 'prompt' || permBefore.receive === 'denied') {
+		let granted = permBefore?.receive === 'granted';
+		if (!granted) {
 			try {
 				permAfter = await FirebaseMessaging.requestPermissions();
 				console.log('[push] permission after(FirebaseMessaging):', permAfter?.receive || 'unknown');
+				granted = permAfter?.receive === 'granted';
 			} catch (e) {
-				console.warn('[push] FirebaseMessaging.requestPermissions failed, falling back to PushNotifications', e);
-				try {
-					const { PushNotifications } = await import('@capacitor/push-notifications');
-					const capPermBefore = await PushNotifications.checkPermissions();
-					console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
-					if (capPermBefore.receive !== 'granted') {
-						const capPermAfter = await PushNotifications.requestPermissions();
-						console.log('[push] permission after(PushNotifications):', capPermAfter.receive);
-					}
-					await PushNotifications.register();
-					PushNotifications.addListener('registration', async (token: any) => {
-						try {
-							currentToken = (token as any)?.value || (token as any)?.token || '';
-							if (currentToken) {
-								console.log('[push] token received(core):', truncateToken(currentToken));
-								await upsertDeviceToken(currentToken);
-							}
-						} catch {}
-					});
-				} catch {}
+				console.warn('[push] FirebaseMessaging.requestPermissions threw; will try PushNotifications fallback', e);
 			}
 		}
-		// Try to get FCM token via FirebaseMessaging as primary path
+		if (!granted) {
+			try {
+				const { PushNotifications } = await import('@capacitor/push-notifications');
+				const capPermBefore = await PushNotifications.checkPermissions();
+				console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
+				if (capPermBefore.receive !== 'granted') {
+					const capPermAfter = await PushNotifications.requestPermissions();
+					console.log('[push] permission after(PushNotifications):', capPermAfter.receive);
+					granted = capPermAfter.receive === 'granted';
+				}
+				await PushNotifications.register();
+				PushNotifications.addListener('registration', async (token: any) => {
+					try {
+						currentToken = (token as any)?.value || (token as any)?.token || '';
+						if (currentToken) {
+							console.log('[push] token received(core):', truncateToken(currentToken));
+							await upsertDeviceToken(currentToken);
+						}
+					} catch (e) {
+						console.warn('[push] registration listener upsert failed', e);
+					}
+				});
+				(PushNotifications as any).addListener('registrationError', (e: any) => {
+					console.warn('[push] PushNotifications registrationError', e);
+				});
+			} catch (e) {
+				console.warn('[push] PushNotifications fallback failed', e);
+			}
+		}
+		// Try to get FCM token via FirebaseMessaging as primary path regardless of permission outcome
 		try {
 			const tokenResult = await FirebaseMessaging.getToken();
 			if (tokenResult?.token) {
@@ -92,8 +104,12 @@ export async function initPush(): Promise<void> {
 				if (typeof currentToken === 'string') {
 					await upsertDeviceToken(currentToken);
 				}
+			} else {
+				console.log('[push] FirebaseMessaging.getToken returned empty');
 			}
-		} catch {}
+		} catch (e) {
+			console.warn('[push] FirebaseMessaging.getToken failed', e);
+		}
 
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
 			currentToken = event.token;
