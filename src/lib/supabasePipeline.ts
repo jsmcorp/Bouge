@@ -110,6 +110,10 @@ class SupabasePipeline {
   // Track last realtime auth token applied to websocket
   private lastRealtimeAuthToken: string | null = null;
 
+  // Cached Supabase env for direct REST calls on fast-path
+  private supabaseUrl: string = '';
+  private supabaseAnonKey: string = '';
+
   // Circuit breaker for repeated failures
   private failureCount = 0;
   private lastFailureAt = 0;
@@ -186,6 +190,10 @@ class SupabasePipeline {
     this.log('🔄 Initializing Supabase client...');
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
     const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+    // Cache env for direct REST fast-path
+    this.supabaseUrl = supabaseUrl;
+    this.supabaseAnonKey = supabaseAnonKey;
+
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error('Missing Supabase configuration');
     }
@@ -196,6 +204,9 @@ class SupabasePipeline {
       // Only create client if it doesn't exist
       if (!this.client) {
         // Use any type to bypass strict typing issues in newer Supabase versions
+        const pipelineLog = (msg: string, ...args: any[]) => {
+          try { this.log(msg, ...args); } catch (_) {}
+        };
         this.client = createClient(supabaseUrl, supabaseAnonKey, {
           auth: {
             persistSession: true,
@@ -205,6 +216,16 @@ class SupabasePipeline {
           realtime: {
             worker: true, // Enable Web Worker heartbeats to prevent background timer throttling
           },
+          global: {
+            fetch: async (input: any, init?: any) => {
+              try {
+                const url = typeof input === 'string' ? input : (input?.url || '');
+                const method = init?.method || 'GET';
+                pipelineLog(`[38;5;159m[fetch][0m ${method} ${url}`);
+              } catch {}
+              return (window.fetch as any)(input, init);
+            }
+          }
         }) as any;
         this.log('🔄 Supabase client created ONCE (persistSession=true, autoRefreshToken=true)');
 
@@ -582,7 +603,7 @@ class SupabasePipeline {
    */
   public async signInWithOtp(phone: string): Promise<AuthOperationResult> {
     this.log('🔐 Signing in with OTP for phone:', phone.substring(0, 6) + '...');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.signInWithOtp({ phone });
@@ -599,7 +620,7 @@ class SupabasePipeline {
    */
   public async verifyOtp(phone: string, token: string): Promise<AuthOperationResult> {
     this.log('🔐 Verifying OTP for phone:', phone.substring(0, 6) + '...');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.verifyOtp({ phone, token, type: 'sms' });
@@ -616,7 +637,7 @@ class SupabasePipeline {
    */
   public async signOut(): Promise<AuthOperationResult> {
     this.log('🔐 Signing out user');
-    
+
     try {
       const client = await this.getClient();
       const result = await client.auth.signOut();
@@ -897,19 +918,19 @@ class SupabasePipeline {
     timeoutMs: number = this.config.sendTimeoutMs
   ): Promise<{ data: T | null; error: any }> {
     this.log(`🗄️ Executing ${operation}...`);
-    
+
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
       });
 
       const result = await Promise.race([queryBuilder(), timeoutPromise]);
-      
+
       if (result.error) {
         this.log(`🗄️ ${operation} error:`, stringifyError(result.error));
         return { data: null, error: result.error };
       }
-      
+
       this.log(`🗄️ ${operation} success`);
       return result;
     } catch (error) {
@@ -954,16 +975,16 @@ class SupabasePipeline {
   public async joinGroup(inviteCode: string, userId: string): Promise<{ data: any | null; error: any }> {
     return this.executeQuery(async () => {
       const client = await this.getClient();
-      
+
       // First find the group
       const { data: group, error: groupError } = await client
         .from('groups')
         .select('id')
         .eq('invite_code', inviteCode)
         .single();
-        
+
       if (groupError) return { data: null, error: groupError };
-      
+
       // Then add user as member
       const { error: memberError } = await client
         .from('group_members')
@@ -972,9 +993,9 @@ class SupabasePipeline {
           user_id: userId,
           role: 'participant'
         });
-        
+
       if (memberError) return { data: null, error: memberError };
-      
+
       // Return the group data
       return client
         .from('groups')
@@ -1209,24 +1230,24 @@ class SupabasePipeline {
    * Upload file to storage
    */
   public async uploadFile(
-    bucket: string, 
-    path: string, 
-    file: File | Blob, 
+    bucket: string,
+    path: string,
+    file: File | Blob,
     options?: any
   ): Promise<{ data: any | null; error: any }> {
     this.log(`📁 Uploading file to ${bucket}/${path}...`);
-    
+
     try {
       const client = await this.getClient();
       const result = await client.storage
         .from(bucket)
         .upload(path, file, options);
-      
+
       if (result.error) {
         this.log('📁 File upload error:', result.error);
         return { data: null, error: result.error };
       }
-      
+
       this.log('📁 File upload success');
       return result;
     } catch (error) {
@@ -1296,7 +1317,7 @@ class SupabasePipeline {
     const dbgLabel = `send-${message.id}`;
     try { console.time?.(`[${dbgLabel}] total`); } catch {}
     this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
-    
+
     try {
       await this.sendMessageInternal(message);
       this.log(`✅ Message ${message.id} sent successfully`);
@@ -1358,10 +1379,15 @@ class SupabasePipeline {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-        
+
         const fastPathNoAuth = !!this.lastKnownAccessToken && this.lastKnownAccessToken === this.lastRealtimeAuthToken;
         const client = fastPathNoAuth ? await this.getDirectClient() : await this.getClient();
         this.log(`[${dbgLabel}] using ${fastPathNoAuth ? 'direct' : 'full'} client`);
+        try {
+          const hasRest = !!(client as any)?.rest;
+          const hasRestAuth = !!(client as any)?.rest?.auth;
+          this.log(`[${dbgLabel}] postgrest present=${hasRest} hasAuthFn=${hasRestAuth}`);
+        } catch (_) {}
         if (fastPathNoAuth) {
           try {
             const token = this.lastKnownAccessToken;
@@ -1373,6 +1399,15 @@ class SupabasePipeline {
             this.log(`[${dbgLabel}] fast-path: failed to set postgrest Authorization: ${stringifyError(e)}`);
           }
         }
+        // If SDK cannot set PostgREST Authorization synchronously, bypass it for the first attempt
+        if (fastPathNoAuth && !(client as any)?.rest?.auth && attempt === 1) {
+          this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert`);
+          await this.fastPathDirectUpsert(message, dbgLabel);
+          this.log(`✅ Direct send successful - message ${message.id}`);
+          try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+          return;
+        }
+
 
         const timeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error(`Direct send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
@@ -1425,7 +1460,7 @@ class SupabasePipeline {
             }
           }
         } catch {}
-        
+
         if (attempt < this.config.maxRetries) {
           this.log(`⏳ Waiting ${this.config.retryBackoffMs}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, this.config.retryBackoffMs));
@@ -1443,6 +1478,63 @@ class SupabasePipeline {
   }
 
   /**
+   * Perform a direct PostgREST upsert using cached token to bypass any internal auth preflight
+   * Used only on the fast-path when the SDK's postgrest client does not expose .auth()
+   */
+  private async fastPathDirectUpsert(message: Message, dbgLabel: string): Promise<void> {
+    if (!this.supabaseUrl) throw new Error('Supabase URL not set');
+    const token = this.lastKnownAccessToken;
+    if (!token) throw new Error('No access token for fast-path upsert');
+
+    const url = `${this.supabaseUrl}/rest/v1/messages` +
+      `?on_conflict=dedupe_key` +
+      `&select=*,reactions(*),users!messages_user_id_fkey(display_name,avatar_url)`;
+
+    const payload = {
+      group_id: message.group_id,
+      user_id: message.user_id,
+      content: message.content,
+      is_ghost: message.is_ghost,
+      message_type: message.message_type,
+      category: message.category,
+      parent_id: message.parent_id,
+      image_url: message.image_url,
+      dedupe_key: message.dedupe_key,
+    } as any;
+
+    this.log(`[${dbgLabel}] fast-path: direct REST upsert -> ${url}`);
+
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), this.config.sendTimeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': this.supabaseAnonKey || '',
+          'Authorization': `Bearer ${token}`,
+          'Prefer': 'resolution=merge-duplicates,return=representation',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`REST upsert failed: ${res.status} ${text}`);
+      }
+
+      // Ensure response arrived
+      try { await res.json(); } catch (_) {}
+
+      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful`);
+    } finally {
+      clearTimeout(to);
+    }
+  }
+
+
+  /**
    * Fallback to outbox for later processing
    */
   private async fallbackToOutbox(message: Message): Promise<void> {
@@ -1451,7 +1543,7 @@ class SupabasePipeline {
       const ready = isNative && await sqliteService.isReady();
       const dbgLabel = `send-${message.id}`;
       this.log(`[${dbgLabel}] fallbackToOutbox(): isNative=${isNative} sqliteReady=${ready}`);
-      
+
       if (!ready) {
         throw new Error('SQLite not ready for outbox storage');
       }
@@ -1475,7 +1567,7 @@ class SupabasePipeline {
       });
 
       this.log(`📦 Message ${message.id} stored in outbox`);
-      
+
       // Trigger outbox processing immediately
       this.triggerOutboxProcessing('pipeline-fallback');
     } catch (error) {
@@ -1507,7 +1599,7 @@ class SupabasePipeline {
       const isNative = Capacitor.isNativePlatform();
       const ready = isNative && await sqliteService.isReady();
       this.log(`📦 Outbox pre-check: isNative=${isNative} sqliteReady=${ready}`);
-      
+
       if (!ready) {
         this.log('📦 SQLite not ready, skipping outbox processing');
         return;
@@ -1640,12 +1732,12 @@ class SupabasePipeline {
 
         } catch (error) {
           this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
-          
+
           if (outboxItem.id !== undefined) {
             // Update retry count and schedule next retry
             const newRetryCount = (outboxItem.retry_count || 0) + 1;
             const maxRetries = 5;
-            
+
             if (newRetryCount >= maxRetries) {
               this.log(`🗑️ Outbox message ${outboxItem.id} exceeded max retries, removing`);
               await sqliteService.removeFromOutbox(outboxItem.id);
@@ -1653,7 +1745,7 @@ class SupabasePipeline {
             } else {
               const backoffMs = Math.min(newRetryCount * 30000, 300000); // 30s to 5min max
               const nextRetryAt = Date.now() + backoffMs;
-              
+
               await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
               this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
               retriedCount++;
