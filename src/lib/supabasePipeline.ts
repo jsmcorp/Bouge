@@ -134,6 +134,34 @@ class SupabasePipeline {
     return this.lastRealtimeAuthToken;
   }
 
+
+  /**
+   * Snapshot current access token for stale-while-refresh usage
+   */
+  private getTokenSnapshot(): string | null {
+    return this.lastKnownAccessToken || null;
+  }
+
+  /**
+   * Quick, bounded refresh attempt (stale-while-refresh policy)
+   */
+  private async refreshQuickBounded(maxMs: number = 1000): Promise<boolean> {
+    const started = Date.now();
+    this.log(`🔄 refreshQuickBounded(${maxMs}ms) start`);
+    try {
+      const refreshPromise = this.refreshSessionDirect();
+      const timed = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), maxMs));
+      const ok = await Promise.race([refreshPromise, timed]);
+      const took = Date.now() - started;
+      this.log(`🔄 refreshQuickBounded result=${!!ok} in ${took}ms`);
+      return !!ok;
+    } catch (e) {
+      const took = Date.now() - started;
+      this.log(`🔄 refreshQuickBounded error after ${took}ms: ${stringifyError(e)}`);
+      return false;
+    }
+  }
+
   /**
    * Circuit breaker methods for handling repeated failures
    */
@@ -1385,34 +1413,35 @@ class SupabasePipeline {
 
     // Attempt direct send with retries
     let lastError: any = null;
+    let did401Retry = false;
     for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
 
-        const fastPathNoAuth = !!this.lastKnownAccessToken && this.lastKnownAccessToken === this.lastRealtimeAuthToken;
+        const tokenSnap = this.getTokenSnapshot();
+        const fastPathNoAuth = !!tokenSnap && tokenSnap === this.lastRealtimeAuthToken;
         const client = fastPathNoAuth ? await this.getDirectClient() : await this.getClient();
         this.log(`[${dbgLabel}] using ${fastPathNoAuth ? 'direct' : 'full'} client`);
+        this.log(`[${dbgLabel}] auth: using cached token snapshot=${!!tokenSnap}`);
         try {
           const hasRest = !!(client as any)?.rest;
           const hasRestAuth = !!(client as any)?.rest?.auth;
           this.log(`[${dbgLabel}] postgrest present=${hasRest} hasAuthFn=${hasRestAuth}`);
         } catch (_) {}
-        if (fastPathNoAuth) {
-          try {
-            const token = this.lastKnownAccessToken;
-            if (token && (client as any)?.rest?.auth) {
-              (client as any).rest.auth(token);
-              this.log(`[${dbgLabel}] fast-path: postgrest Authorization set`);
-            }
-          } catch (e) {
-            this.log(`[${dbgLabel}] fast-path: failed to set postgrest Authorization: ${stringifyError(e)}`);
+        // Unconditionally prefer setting Authorization with our snapshot if available
+        try {
+          if (tokenSnap && (client as any)?.rest?.auth) {
+            (client as any).rest.auth(tokenSnap);
+            this.log(`[${dbgLabel}] postgrest Authorization set from snapshot`);
           }
+        } catch (e) {
+          this.log(`[${dbgLabel}] failed to set postgrest Authorization: ${stringifyError(e)}`);
         }
         // If SDK cannot set PostgREST Authorization synchronously, bypass it for the first attempt
-        if (fastPathNoAuth && !(client as any)?.rest?.auth && attempt === 1) {
-          this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert`);
-          await this.fastPathDirectUpsert(message, dbgLabel);
+        if (tokenSnap && !(client as any)?.rest?.auth && attempt === 1) {
+          this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert (snapshot token)`);
+          await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
           this.log(`✅ Direct send successful - message ${message.id}`);
           try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
           return;
@@ -1458,6 +1487,26 @@ class SupabasePipeline {
         lastError = error;
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+
+        // Stale-while-refresh: if 401/invalid token, attempt one bounded refresh then single retry
+        try {
+          const status = (error as any)?.status ?? (error as any)?.code;
+          const msg = String((error as any)?.message || '');
+          const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz/i.test(msg);
+          if (is401 && !did401Retry) {
+            this.log(`[${dbgLabel}] auth: 401 detected; trying quick refresh (≤1000ms) before single retry`);
+            const t0 = Date.now();
+            const ok = await this.refreshQuickBounded(1000);
+            const dt = Date.now() - t0;
+            this.log(`[${dbgLabel}] auth: quick refresh result=${ok} in ${dt}ms`);
+            did401Retry = true;
+            if (ok) {
+              // retry once immediately (do not increment effective attempt budget)
+              attempt--;
+              continue;
+            }
+          }
+        } catch (_) {}
 
         // Immediate fallback for timeout/network errors
         try {
@@ -1508,9 +1557,9 @@ class SupabasePipeline {
    * Perform a direct PostgREST upsert using cached token to bypass any internal auth preflight
    * Used only on the fast-path when the SDK's postgrest client does not expose .auth()
    */
-  private async fastPathDirectUpsert(message: Message, dbgLabel: string): Promise<void> {
+  private async fastPathDirectUpsert(message: Message, dbgLabel: string, tokenOverride?: string | null): Promise<void> {
     if (!this.supabaseUrl) throw new Error('Supabase URL not set');
-    const token = this.lastKnownAccessToken;
+    const token = tokenOverride || this.lastKnownAccessToken;
     if (!token) throw new Error('No access token for fast-path upsert');
 
     const url = `${this.supabaseUrl}/rest/v1/messages` +
@@ -1667,14 +1716,37 @@ class SupabasePipeline {
         for (const outboxItem of limitedMessages) {
           try {
             const messageData = JSON.parse(outboxItem.content);
-            // Try a simple send with reasonable timeout for mobile networks
+            // Try a simple send with reasonable timeout for mobile networks (bounded to 5s)
             const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Degraded mode timeout')), 8000);
+              setTimeout(() => reject(new Error('Degraded mode timeout after 5000ms')), 5000);
             });
 
             const client = await this.getClient();
+            // Prefer snapshot token to avoid blocking on auth refresh
+            const tokenSnap = this.getTokenSnapshot();
+            try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log('[outbox-degraded] postgrest Authorization set from snapshot'); } } catch {}
+
             const sendPromise = client.from('messages').insert(messageData);
-            await Promise.race([sendPromise, timeoutPromise]);
+            const res: any = await Promise.race([sendPromise, timeoutPromise]);
+            if (res && res.error) {
+              // If unauthorized, do one quick refresh and retry once
+              const status = res.error?.status ?? res.error?.code;
+              const msg = String(res.error?.message || '');
+              const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz/i.test(msg);
+              if (is401) {
+                this.log('[outbox-degraded] 401 detected; quick refresh (<=1000ms) then retry once');
+                const ok = await this.refreshQuickBounded(1000);
+                if (ok) {
+                  try { const newSnap = this.getTokenSnapshot(); if (newSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(newSnap); } } catch {}
+                  const retryRes: any = await Promise.race([client.from('messages').insert(messageData), timeoutPromise]);
+                  if (retryRes && retryRes.error) throw retryRes.error;
+                } else {
+                  throw res.error;
+                }
+              } else {
+                throw res.error;
+              }
+            }
 
             // Success - remove from outbox (guard undefined id)
             if (outboxItem.id !== undefined) {
@@ -1706,12 +1778,19 @@ class SupabasePipeline {
         try {
           const messageData = JSON.parse(outboxItem.content);
 
-          // Send to Supabase with simpler timeout
+          // Stale-while-refresh: prefer cached token and never block on auth here
+          const tokenSnap = this.getTokenSnapshot();
+          try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log(`[outbox] using cached token snapshot for item ${outboxItem.id}`); } } catch {}
+
+          // Bounded timeout to avoid 15s stalls
+          const attemptTimeoutMs = 5000;
           const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error(`Outbox send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
+            setTimeout(() => reject(new Error(`Outbox send timeout after ${attemptTimeoutMs}ms`)), attemptTimeoutMs);
           });
 
-          const insertPromise = client
+          let did401RetryItem = false;
+
+          const makeInsert = () => client
             .from('messages')
             .upsert({
               group_id: outboxItem.group_id,
@@ -1731,10 +1810,25 @@ class SupabasePipeline {
             `)
             .single();
 
-          const { error } = await Promise.race([insertPromise, timeoutPromise]);
-
-          if (error) {
-            throw error;
+          let raceRes: any = await Promise.race([makeInsert(), timeoutPromise]);
+          if (raceRes && raceRes.error) {
+            const status = raceRes.error?.status ?? raceRes.error?.code;
+            const msg = String(raceRes.error?.message || '');
+            const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz/i.test(msg);
+            if (is401 && !did401RetryItem) {
+              this.log(`[outbox] 401 for item ${outboxItem.id}; quick refresh (<=1000ms) then single retry`);
+              const ok = await this.refreshQuickBounded(1000);
+              did401RetryItem = true;
+              if (ok) {
+                try { const snap2 = this.getTokenSnapshot(); if (snap2 && (client as any)?.rest?.auth) { (client as any).rest.auth(snap2); } } catch {}
+                raceRes = await Promise.race([makeInsert(), timeoutPromise]);
+                if (raceRes && raceRes.error) throw raceRes.error;
+              } else {
+                throw raceRes.error;
+              }
+            } else {
+              throw raceRes.error;
+            }
           }
 
           // Success - remove from outbox

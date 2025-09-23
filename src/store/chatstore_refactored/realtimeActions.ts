@@ -776,9 +776,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     cleanupRealtimeSubscription: async () => {
       const { realtimeChannel, typingTimeout } = get();
 
-      log('Cleaning up realtime subscription');
+      log('Cleaning up realtime subscription (navigation) - keeping root socket alive');
       isConnecting = false; // Clear connection guard
-      resetOutboxProcessingState(); // Reset outbox state on cleanup
+      // Do NOT reset outbox state on routine navigation
 
       if (typingTimeout) clearTimeout(typingTimeout);
 
@@ -794,9 +794,10 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       // No reconnect timeout to clear with simplified logic
 
-      // Clear typing users and reset status
+      // Clear typing users and keep connection status based on actual socket/token health
+      const hasToken = !!(supabasePipeline as any).getCachedAccessToken?.() || !!(await supabasePipeline.getWorkingSession())?.access_token;
       set({
-        connectionStatus: 'disconnected',
+        connectionStatus: hasToken ? 'connected' : 'disconnected',
         typingUsers: [],
         typingTimeout: null,
         subscribedAt: null,
@@ -806,7 +807,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       // Update WhatsApp-style connection status
       try {
         const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
-        whatsappConnection.setConnectionState('disconnected', 'Disconnected');
+        if (hasToken) {
+          whatsappConnection.setConnectionState('connected', 'Connected');
+        } else {
+          whatsappConnection.setConnectionState('disconnected', 'Disconnected');
+        }
       } catch {}
     },
 
