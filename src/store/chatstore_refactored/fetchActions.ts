@@ -7,6 +7,11 @@ import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
 import { structureMessagesWithReplies } from './utils';
 
+
+// Throttle duplicate fetches for the same group within a short window
+const FETCH_THROTTLE_WINDOW_MS = 800;
+const lastFetchStartAt: Record<string, number> = {};
+
 export interface FetchActions {
   fetchGroups: () => Promise<void>;
   fetchMessages: (groupId: string) => Promise<void>;
@@ -177,9 +182,19 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
     }
   },
 
+
   fetchMessages: async (groupId: string) => {
     try {
       console.log('🔄 Fetching messages for group:', groupId);
+
+      // Throttle duplicate fetches for the same group
+      const now = Date.now();
+      const lastStart = lastFetchStartAt[groupId] || 0;
+      if (now - lastStart < FETCH_THROTTLE_WINDOW_MS) {
+        console.log('⏭️ Skipping duplicate fetchMessages for group', groupId);
+        return;
+      }
+      lastFetchStartAt[groupId] = now;
 
       // Check if we're on a native platform with SQLite available
       const isNative = Capacitor.isNativePlatform();
@@ -237,10 +252,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const cachedMessages = messageCache.getCachedMessages(groupId);
       if (cachedMessages && cachedMessages.length > 0) {
         console.log('⚡ INSTANT: Loading messages from in-memory cache');
-        
+
         // Structure messages with nested replies
         const structuredMessages = structureMessagesWithReplies(cachedMessages);
-        
+
         // Extract polls and user votes
         const polls = cachedMessages
           .filter(msg => msg.poll)
@@ -255,14 +270,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         });
 
         // Update UI instantly with cached data, preserving any pending optimistic messages
-        set({ 
-          messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+        set({
+          messages: mergeWithPending(mergePendingReplies(structuredMessages)),
           polls: polls,
           userVotes: userVotesMap
         });
-        
+
         console.log(`⚡ INSTANT: Displayed ${structuredMessages.length} cached messages instantly`);
-        
+
         // Continue with background refresh to ensure data is up to date
         setTimeout(() => {
           console.log('🔄 Background: Refreshing messages from SQLite to ensure cache is current');
@@ -275,7 +290,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (isSqliteReady) {
         const loadingMessage = cachedMessages ? 'Background refresh from SQLite' : 'Loading from SQLite';
         console.log(`📱 ${loadingMessage}`);
-        
+
         try {
           // Load only 10 recent messages for instant UI
           const localMessages = await sqliteService.getRecentMessages(groupId, 10);
@@ -303,12 +318,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Get poll messages to fetch poll data
             const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
             const pollMessageIds = pollMessages.map(msg => msg.id);
-            
+
             // Get current user for vote checking (with timeout to prevent hanging)
             let user = null;
             try {
               const userPromise = supabasePipeline.getUser();
-              const timeoutPromise = new Promise((_, reject) => 
+              const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('Auth timeout')), 3000)
               );
               const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
@@ -317,7 +332,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               console.warn('⚠️ Could not get current user for poll data, continuing without user context:', error);
               user = null;
             }
-            
+
             // Fetch poll data for poll messages
             let pollsData: any[] = [];
             let pollVotesData: any[] = [];
@@ -339,7 +354,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
               const pollOptions = JSON.parse(poll.options);
               const voteCounts = new Array(pollOptions.length).fill(0);
-              
+
               pollVotes.forEach(vote => {
                 if (vote.option_index < voteCounts.length) {
                   voteCounts[vote.option_index]++;
@@ -413,19 +428,19 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             // Update cache with fresh SQLite data
             messageCache.setCachedMessages(groupId, messages);
-            
+
             // Update UI with local data (only if we didn't already show cached data)
             if (!cachedMessages) {
-              set({ 
-                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+              set({
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
               });
               console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
             } else {
               // Silently update the UI with fresh data from SQLite
-              set({ 
-                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+              set({
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
               });
@@ -438,7 +453,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               try {
                 console.log('🔄 Loading remaining messages in background...');
                 const allLocalMessages = await sqliteService.getRecentMessages(groupId, 30);
-                
+
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
                   const userIds = [...new Set(allLocalMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
@@ -460,7 +475,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
                   const pollMessages = allLocalMessages.filter(msg => msg.message_type === 'poll');
                   const pollMessageIds = pollMessages.map(msg => msg.id);
-                  
+
                   let user = null;
                   try {
                     const { data } = await supabasePipeline.getUser();
@@ -469,7 +484,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     console.warn('⚠️ Could not get current user for poll data');
                     user = null;
                   }
-                  
+
                   let pollsData: any[] = [];
                   let pollVotesData: any[] = [];
                   if (pollMessageIds.length > 0) {
@@ -489,7 +504,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
                     const pollOptions = JSON.parse(poll.options);
                     const voteCounts = new Array(pollOptions.length).fill(0);
-                    
+
                     pollVotes.forEach(vote => {
                       if (vote.option_index < voteCounts.length) {
                         voteCounts[vote.option_index]++;
@@ -556,8 +571,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   messageCache.setCachedMessages(groupId, allMessages);
 
                   // Update with all messages silently, preserving any pending optimistic messages
-                  set({ 
-                    messages: mergeWithPending(mergePendingReplies(allStructuredMessages)), 
+                  set({
+                    messages: mergeWithPending(mergePendingReplies(allStructuredMessages)),
                     polls: allPolls,
                     userVotes: allUserVotesMap
                   });

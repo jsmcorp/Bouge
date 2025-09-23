@@ -6,6 +6,9 @@ import { Capacitor } from '@capacitor/core';
 class PreloadingService {
   private isPreloading = false;
   private preloadQueue = new Set<string>();
+  // Throttling to prevent duplicate preloads
+  private lastGlobalPreloadAt = 0;
+  private lastGroupPreloadAt = new Map<string, number>();
 
   /**
    * Preload messages for top groups while user is on dashboard
@@ -15,6 +18,15 @@ class PreloadingService {
       console.log('🚀 Preloader: Already preloading, skipping');
       return;
     }
+
+	    // Global throttle to avoid rapid duplicate preloads
+	    const now = Date.now();
+	    if (now - this.lastGlobalPreloadAt < 5000) {
+	      console.log('⏭️ Preloader: Skipping (global throttle)');
+	      return;
+	    }
+	    this.lastGlobalPreloadAt = now;
+
 
     // Only preload on native platforms with SQLite
     if (!Capacitor.isNativePlatform()) {
@@ -34,9 +46,18 @@ class PreloadingService {
     try {
       // Get top 3 groups for preloading
       const topGroupIds = messageCache.getTopGroupsForPreloading(groups, 3);
-      
+
       // Preload each group's messages
       for (const groupId of topGroupIds) {
+
+        // Per-group throttle to avoid reloading same group repeatedly
+	        const last = this.lastGroupPreloadAt.get(groupId) || 0;
+	        if (now - last < 15000) {
+	          console.log(`⏭️ Preloader: Skipping group ${groupId} (recently preloaded)`);
+	          continue;
+	        }
+	        this.lastGroupPreloadAt.set(groupId, now);
+
         if (this.preloadQueue.has(groupId)) {
           console.log(`🚀 Preloader: Group ${groupId} already in queue, skipping`);
           continue;
@@ -49,7 +70,7 @@ class PreloadingService {
         }
 
         this.preloadQueue.add(groupId);
-        
+
         // Preload in background without blocking
         this.preloadGroupMessages(groupId).finally(() => {
           this.preloadQueue.delete(groupId);
@@ -68,10 +89,10 @@ class PreloadingService {
   private async preloadGroupMessages(groupId: string): Promise<void> {
     try {
       console.log(`🚀 Preloader: Loading messages for group ${groupId}`);
-      
+
       // Get recent messages from SQLite
       const localMessages = await sqliteService.getRecentMessages(groupId, 10);
-      
+
       if (!localMessages || localMessages.length === 0) {
         console.log(`🚀 Preloader: No messages found for group ${groupId}`);
         return;
@@ -99,7 +120,7 @@ class PreloadingService {
       // Get poll data for poll messages
       const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
       const pollMessageIds = pollMessages.map(msg => msg.id);
-      
+
       let pollsData: any[] = [];
       let pollVotesData: any[] = [];
       if (pollMessageIds.length > 0) {
@@ -120,7 +141,7 @@ class PreloadingService {
         const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
         const pollOptions = JSON.parse(poll.options);
         const voteCounts = new Array(pollOptions.length).fill(0);
-        
+
         pollVotes.forEach(vote => {
           if (vote.option_index < voteCounts.length) {
             voteCounts[vote.option_index]++;
@@ -171,7 +192,7 @@ class PreloadingService {
 
       // Cache the preloaded messages
       messageCache.setCachedMessages(groupId, messages, true);
-      
+
       console.log(`🚀 Preloader: Successfully preloaded ${messages.length} messages for group ${groupId}`);
     } catch (error) {
       console.error(`🚀 Preloader: Error preloading group ${groupId}:`, error);

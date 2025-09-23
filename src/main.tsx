@@ -10,7 +10,8 @@ import { useChatStore } from '@/store/chatstore_refactored';
 import { whatsappConnection } from '@/lib/whatsappStyleConnection';
 import { mobileLogger } from '@/lib/mobileLogger';
 // Import connectivity tester for debugging
-import '@/lib/connectivityTest';
+// Dev-only connectivity tester to avoid extra startup cost in production
+// Moved to dynamic import inside the async IIFE below
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -23,6 +24,12 @@ createRoot(document.getElementById('root')!).render(
 	try {
 		initPush();
 	} catch {}
+
+		// Dev-only: load connectivity tester
+		if (import.meta.env.DEV) {
+			try { await import('@/lib/connectivityTest'); } catch {}
+		}
+
 
 	// Initialize WhatsApp-style connection system
 	mobileLogger.log('info', 'general', 'Initializing WhatsApp-style connection system');

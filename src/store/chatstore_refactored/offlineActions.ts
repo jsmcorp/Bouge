@@ -15,6 +15,8 @@ let pendingRerunCount = 0; // Count instead of boolean to handle multiple rapid 
 let processingWatchdog: NodeJS.Timeout | null = null;
 let triggerTimeout: NodeJS.Timeout | null = null;
 let watchdogTimeoutCount = 0; // Track consecutive watchdog timeouts to prevent infinite loops
+// Throttle empty outbox checks to avoid spinning when there's nothing to send
+let lastEmptyOutboxAt = 0;
 
 // Simple per-group refresh throttling (WhatsApp-style: avoid frequent back-to-back refresh)
 const groupRefreshThrottleMs = 2000;
@@ -48,12 +50,13 @@ export const triggerOutboxProcessing = (context: string, priority: 'immediate' |
     return;
   }
   
-  // Clear any existing trigger timeout
+  // Clear any existing trigger timeout (coalesce; trailing-edge true)
   if (triggerTimeout) {
+    console.log(`[outbox-unified] Coalescing trigger (debounced) from: ${context}`);
     clearTimeout(triggerTimeout);
     triggerTimeout = null;
   }
-  
+
   // Simplified debouncing with shorter delays for better responsiveness
   const delays = {
     immediate: 0,       // For critical situations (resets, errors)
@@ -225,20 +228,38 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         console.log(`[outbox-unified] ${sessionId} - SQLite not ready, aborting`);
         return;
       }
-      
+
+      // Short-circuit if we've very recently checked and found no work
+      if (Date.now() - lastEmptyOutboxAt < 1000) {
+        console.log(`[outbox-unified] ${sessionId} - Skipping (recent empty outbox)`);
+        return;
+      }
+
       if (!await checkOnline()) {
         console.log(`[outbox-unified] ${sessionId} - Network offline, aborting`);
         return;
       }
 
+      // Preflight: avoid invoking pipeline when outbox is empty
+      try {
+        const pending = await sqliteService.getOutboxMessages();
+        if (!pending || pending.length === 0) {
+          lastEmptyOutboxAt = Date.now();
+          console.log(`[outbox-unified] ${sessionId} - No outbox messages to process (preflight)`);
+          return;
+        }
+      } catch (e) {
+        console.warn(`[outbox-unified] ${sessionId} - Preflight outbox check failed (continuing):`, e);
+      }
+
       // Use pipeline to process outbox (handles all retry logic, auth, timeouts)
       await supabasePipeline.processOutbox();
       const stats = supabasePipeline.getLastOutboxStats();
-      
+
       // Reset watchdog timeout count on successful completion
       watchdogTimeoutCount = 0;
       console.log(`[outbox-unified] ${sessionId} - Pipeline processing completed successfully`, stats);
-      
+
       // Refresh only if any messages were delivered, with per-group throttle
       const state = get();
       const groupsToRefresh = new Set<string>(stats?.groupsWithSent || []);

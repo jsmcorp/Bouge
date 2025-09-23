@@ -10,6 +10,8 @@ const KEY_VALIDATION_TEST = 'sqlite_key_validation_test';
 let isPassphraseSet = false;
 let lastValidationTime = 0;
 let currentPassphrase: string | null = null;
+// Coalesce concurrent initialization attempts to avoid duplicate native calls
+let initSecretPromise: Promise<void> | null = null;
 
 // Caching for validation results
 const VALIDATION_CACHE_DURATION = 30000; // 30 seconds
@@ -32,39 +34,46 @@ export async function initEncryptionSecret(): Promise<void> {
     console.log('🔑 SQLite encryption key already set in this session');
     return;
   }
-
-  try {
-    const stored = await Preferences.get({ key: KEY });
-    const secret =
-      stored.value ??
-      crypto.randomUUID().replace(/-/g, '').slice(0, 32); // 32‑char random string
-
-    // Set/refresh the passphrase for this app session
-    try {
-      await CapacitorSQLite.setEncryptionSecret({ passphrase: secret });
-      isPassphraseSet = true;
-
-      if (!stored.value) {
-        await Preferences.set({ key: KEY, value: secret });
-        console.log('🔑 SQLite encryption key generated and stored');
-      } else {
-        console.log('🔑 SQLite encryption key already present');
-      }
-    } catch (error: any) {
-      // If error is about passphrase already set, that's fine - mark as set and continue
-      if (error.message && error.message.includes('a passphrase has already been set')) {
-        console.log('🔑 SQLite encryption key was already set');
-        isPassphraseSet = true;
-        return; // Continue initialization
-      } else {
-        // Only throw for other types of errors
-        throw error;
-      }
-    }
-  } catch (error) {
-    console.error('❌ Error setting encryption secret:', error);
-    throw error;
+  // Coalesce concurrent calls
+  if (initSecretPromise) {
+    await initSecretPromise;
+    return;
   }
+
+  initSecretPromise = (async () => {
+    try {
+      const stored = await Preferences.get({ key: KEY });
+      const secret = stored.value ?? crypto.randomUUID().replace(/-/g, '').slice(0, 32);
+
+      // Set/refresh the passphrase for this app session
+      try {
+        await CapacitorSQLite.setEncryptionSecret({ passphrase: secret });
+        isPassphraseSet = true;
+
+        if (!stored.value) {
+          await Preferences.set({ key: KEY, value: secret });
+          console.log('🔑 SQLite encryption key generated and stored');
+        } else {
+          console.log('🔑 SQLite encryption key already present');
+        }
+      } catch (error: any) {
+        // If error is about passphrase already set, that's fine - mark as set and continue
+        if (error.message && error.message.includes('a passphrase has already been set')) {
+          console.log('🔑 SQLite encryption key was already set');
+          isPassphraseSet = true;
+          return; // Continue initialization
+        } else {
+          // Only throw for other types of errors
+          throw error;
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error setting encryption secret:', error);
+      throw error;
+    }
+  })().finally(() => { initSecretPromise = null; });
+
+  await initSecretPromise;
 }
 
 /**
@@ -223,6 +232,11 @@ export async function initEncryptionSecretWithValidation(): Promise<void> {
   // Skip if we've already set the passphrase in this session and it was recent
   if (isPassphraseSet && (Date.now() - lastValidationTime < 30000)) {
     log('🔑 SQLite encryption key already set and validated recently');
+    return;
+  }
+  // Coalesce with any in-flight basic init
+  if (initSecretPromise) {
+    await initSecretPromise;
     return;
   }
 

@@ -1419,8 +1419,9 @@ class SupabasePipeline {
         }
 
 
+        const attemptTimeoutMs = 5000;
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`Direct send timeout after ${this.config.sendTimeoutMs}ms`)), this.config.sendTimeoutMs);
+          setTimeout(() => reject(new Error(`Direct send timeout after ${attemptTimeoutMs}ms`)), attemptTimeoutMs);
         });
 
         const sendPromise = client
@@ -1457,6 +1458,22 @@ class SupabasePipeline {
         lastError = error;
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+
+        // Immediate fallback for timeout/network errors
+        try {
+          const emsg = String((error as any)?.message || error || '');
+          if (/timeout|abort|network|fetch/i.test(emsg)) {
+            this.log(`[${dbgLabel}] immediate fallback due to error="${emsg}" at ${new Date().toISOString()}`);
+            await this.fallbackToOutbox(message);
+            const queuedError: any = new Error(`Message ${message.id} queued to outbox (direct send error)`);
+            queuedError.code = 'QUEUED_OUTBOX';
+            queuedError.name = 'MessageQueuedError';
+            throw queuedError;
+          }
+        } catch (fallbackErr) {
+          throw fallbackErr;
+        }
+
         // If direct send timed out, only recreate after multiple consecutive timeouts
         try {
           const msg = (error as any)?.message || '';
@@ -1515,7 +1532,7 @@ class SupabasePipeline {
     this.log(`[${dbgLabel}] fast-path: direct REST upsert -> ${url}`);
 
     const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), this.config.sendTimeoutMs);
+    const to = setTimeout(() => controller.abort(), 5000);
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -1550,12 +1567,13 @@ class SupabasePipeline {
   private async fallbackToOutbox(message: Message): Promise<void> {
     try {
       const isNative = Capacitor.isNativePlatform();
-      const ready = isNative && await sqliteService.isReady();
       const dbgLabel = `send-${message.id}`;
-      this.log(`[${dbgLabel}] fallbackToOutbox(): isNative=${isNative} sqliteReady=${ready}`);
-
-      if (!ready) {
-        throw new Error('SQLite not ready for outbox storage');
+      if (isNative) {
+        const t0 = Date.now();
+        while (!(await sqliteService.isReady())) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+        this.log(`[${dbgLabel}] fallbackToOutbox(): waited sqliteReady in ${Date.now()-t0}ms`);
       }
 
       // Store message in outbox with all original data
@@ -1607,17 +1625,24 @@ class SupabasePipeline {
 
     try {
       const isNative = Capacitor.isNativePlatform();
-      const ready = isNative && await sqliteService.isReady();
-      this.log(`📦 Outbox pre-check: isNative=${isNative} sqliteReady=${ready}`);
-
-      if (!ready) {
-        this.log('📦 SQLite not ready, skipping outbox processing');
-        return;
+      if (isNative) {
+        const t0 = Date.now();
+        while (!(await sqliteService.isReady())) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+        this.log(`📦 Outbox pre-check: sqliteReady after ${Date.now()-t0}ms`);
+      } else {
+        this.log(`📦 Outbox pre-check: non-native platform`);
       }
 
       const outboxMessages = await sqliteService.getOutboxMessages();
       if (outboxMessages.length === 0) {
-        this.log('📦 No outbox messages to process');
+        this.log('📦 No outbox messages to process; scheduling light recheck in ~1500ms');
+        try {
+          setTimeout(() => {
+            try { this.triggerOutboxProcessing('empty-preflight'); } catch {}
+          }, 1500);
+        } catch {}
         return;
       }
 
@@ -1815,8 +1840,8 @@ class SupabasePipeline {
    */
   private triggerOutboxProcessing(context: string): void {
     const now = Date.now();
-    if (now - this.lastOutboxTriggerAt < 1000) {
-      this.log(`📦 Trigger suppressed (debounced) from: ${context}`);
+    if (now - this.lastOutboxTriggerAt < 300) {
+      this.log(`📦 Trigger coalesced (debounced 300ms) from: ${context}`);
       return;
     }
     this.lastOutboxTriggerAt = now;
