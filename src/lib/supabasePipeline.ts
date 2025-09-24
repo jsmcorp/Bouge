@@ -104,8 +104,11 @@ class SupabasePipeline {
 
   // Single-flight outbox processing guards
   private isOutboxProcessing = false;
-  private lastOutboxStartAt = 0;
+
   private lastOutboxTriggerAt = 0;
+
+  // Terminal instrumentation timers per message id
+  private terminalTimers: Map<string, NodeJS.Timeout> = new Map();
 
   // Track last realtime auth token applied to websocket
   private lastRealtimeAuthToken: string | null = null;
@@ -124,6 +127,24 @@ class SupabasePipeline {
   constructor() {
     this.log('🚀 Pipeline initialized');
     this.log('🧪 Debug tag: v2025-08-22.1');
+  }
+
+  // Terminal instrumentation helpers
+  private startTerminalWatch(messageId: string, callsite: string) {
+    // Cancel any existing timer
+    const existing = this.terminalTimers.get(messageId);
+    if (existing) { clearTimeout(existing); this.terminalTimers.delete(messageId); }
+    const to = setTimeout(() => {
+      try { this.log(`[TERMINAL] SEND_STALLED_BUG id=${messageId} callsite=${callsite} ts=${new Date().toISOString()}`); } catch {}
+      // Nudge outbox in case something is stuck
+      this.triggerOutboxProcessing('terminal-watch-timeout');
+    }, 10000);
+    this.terminalTimers.set(messageId, to);
+  }
+  private resolveTerminal(messageId: string, code: 'DIRECT_SUCCESS' | 'OUTBOX_DELIVERED' | `OUTBOX_BACKOFF_SCHEDULED<${number}>`) {
+    const to = this.terminalTimers.get(messageId);
+    if (to) { clearTimeout(to); this.terminalTimers.delete(messageId); }
+    this.log(`[TERMINAL] ${code} id=${messageId} ts=${new Date().toISOString()}`);
   }
 
   /** Lightweight accessors for cached/auth tokens used by reconnectionManager fast-path */
@@ -1344,6 +1365,8 @@ class SupabasePipeline {
     this.log(`📤 Sending message ${message.id}...`);
     const dbgLabel = `send-${message.id}`;
     try { console.time?.(`[${dbgLabel}] total`); } catch {}
+    // Start terminal watchdog for this message id
+    this.startTerminalWatch(message.id, 'sendMessage');
     this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
 
     try {
@@ -1443,6 +1466,7 @@ class SupabasePipeline {
           this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert (snapshot token)`);
           await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
           this.log(`✅ Direct send successful - message ${message.id}`);
+          this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
           try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
           return;
         }
@@ -1481,6 +1505,7 @@ class SupabasePipeline {
         }
 
         this.log(`✅ Direct send successful - message ${message.id}`);
+        this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
         return; // Success!
       } catch (error) {
@@ -1637,13 +1662,14 @@ class SupabasePipeline {
           category: message.category,
           parent_id: message.parent_id,
           image_url: message.image_url,
-          dedupe_key: message.dedupe_key,
+          dedupe_key: message.dedupe_key || undefined,
+          requires_pseudonym: message.is_ghost ? true : undefined,
         }),
         retry_count: 0,
         next_retry_at: Date.now(), // Immediate retry
       });
 
-      this.log(`📦 Message ${message.id} stored in outbox`);
+      this.log(`📦 Message ${message.id} stored in outbox (dedupe_key=${message.dedupe_key || 'n/a'})`);
 
       // Trigger outbox processing immediately
       this.triggerOutboxProcessing('pipeline-fallback');
@@ -1657,18 +1683,12 @@ class SupabasePipeline {
    * Process outbox messages with retries - simplified and more reliable
    */
   public async processOutbox(): Promise<void> {
-    // Single-flight guard and debounce
+    // Single-flight guard only
     if (this.isOutboxProcessing) {
       this.log('📦 Outbox processing already in progress; skipping');
       return;
     }
-    const now = Date.now();
-    if (now - this.lastOutboxStartAt < 1500) {
-      this.log('📦 Outbox processing debounced; too soon since last start');
-      return;
-    }
     this.isOutboxProcessing = true;
-    this.lastOutboxStartAt = now;
     const sessionId = `outbox-${Date.now()}`;
     this.log(`📦 Starting outbox processing - session ${sessionId}`);
 
@@ -1686,93 +1706,22 @@ class SupabasePipeline {
 
       const outboxMessages = await sqliteService.getOutboxMessages();
       if (outboxMessages.length === 0) {
-        this.log('📦 No outbox messages to process; scheduling light recheck in ~1500ms');
-        try {
-          setTimeout(() => {
-            try { this.triggerOutboxProcessing('empty-preflight'); } catch {}
-          }, 1500);
-        } catch {}
+        this.log('📦 No outbox messages to process; idle');
         return;
       }
 
-      this.log(`📦 Processing ${outboxMessages.length} outbox messages`);
+      this.log(`📦 processing N=${outboxMessages.length} items`);
 
-      // Check health before processing, but implement graceful degradation
+      // Check health before processing, but never abort a non-empty run
       const isHealthy = await this.checkHealth();
       if (!isHealthy) {
-        // If circuit breaker is open, skip processing to avoid further failures
         if (this.isCircuitBreakerOpen()) {
-          this.log('📦 Circuit breaker open, skipping outbox processing');
-          return;
+          this.log('📦 Circuit breaker open, but continuing with per-item timeouts and backoff scheduling');
+        } else {
+          this.log('⚠️ 📦 Client unhealthy, continuing: per-item 5s timeout + backoff');
         }
-
-        // If client is unhealthy but circuit breaker is not open, try limited processing
-        this.log('⚠️ 📦 Client unhealthy, attempting limited outbox processing');
-
-        // Try to process only a few messages to avoid overwhelming the system
-        const limitedMessages = outboxMessages.slice(0, 3);
-        this.log(`📦 Processing ${limitedMessages.length} messages in degraded mode`);
-
-        for (const outboxItem of limitedMessages) {
-          try {
-            const messageData = JSON.parse(outboxItem.content);
-            // Try a simple send with reasonable timeout for mobile networks (bounded to 5s)
-            const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Degraded mode timeout after 5000ms')), 5000);
-            });
-
-            const client = await this.getClient();
-            // Prefer snapshot token to avoid blocking on auth refresh
-            const tokenSnap = this.getTokenSnapshot();
-            try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log('[outbox-degraded] postgrest Authorization set from snapshot'); } } catch {}
-
-            const payload = {
-              group_id: outboxItem.group_id,
-              user_id: outboxItem.user_id,
-              content: messageData.content,
-              is_ghost: messageData.is_ghost,
-              message_type: messageData.message_type,
-              category: messageData.category,
-              parent_id: messageData.parent_id,
-              image_url: messageData.image_url,
-              dedupe_key: messageData.dedupe_key || `d:${outboxItem.user_id}:${outboxItem.group_id}:${messageData.id}`,
-            };
-            const sendPromise = client.from('messages').insert(payload);
-            const res: any = await Promise.race([sendPromise, timeoutPromise]);
-            if (res && res.error) {
-              // If unauthorized, do one quick refresh and retry once
-              const status = res.error?.status ?? res.error?.code;
-              const msg = String(res.error?.message || '');
-              const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz/i.test(msg);
-              if (is401) {
-                this.log('[outbox-degraded] 401 detected; quick refresh (<=1000ms) then retry once');
-                const ok = await this.refreshQuickBounded(1000);
-                if (ok) {
-                  try { const newSnap = this.getTokenSnapshot(); if (newSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(newSnap); } } catch {}
-                  const retryRes: any = await Promise.race([client.from('messages').insert(messageData), timeoutPromise]);
-                  if (retryRes && retryRes.error) throw retryRes.error;
-                } else {
-                  throw res.error;
-                }
-              } else {
-                throw res.error;
-              }
-            }
-
-            // Success - remove from outbox (guard undefined id)
-            if (outboxItem.id !== undefined) {
-              await sqliteService.removeFromOutbox(outboxItem.id);
-              this.log(`📦 Degraded mode: successfully sent message ${outboxItem.id}`);
-            } else {
-              this.log('📦 Degraded mode: sent message but outbox id was undefined; skip removal');
-            }
-          } catch (error) {
-            this.log(`📦 Degraded mode: failed to send message ${outboxItem.id}:`, error);
-            // Don't retry in degraded mode, just continue
-          }
-        }
-        return;
       }
+
 
       const client = await this.getClient();
 
@@ -1788,6 +1737,37 @@ class SupabasePipeline {
 
         try {
           const messageData = JSON.parse(outboxItem.content);
+
+          // Optional compound step: ensure pseudonym before sending ghost message
+          if (messageData?.requires_pseudonym === true) {
+            this.log(`[#${outboxItem.id}] requires_pseudonym=true  attempting upsert before send`);
+            const doPseudonym = async () => {
+              const mod = await import('./pseudonymService');
+              const svc: any = (mod as any).pseudonymService || mod;
+              // 2 attempts, 3s each with 400-1200ms jitter
+              for (let attempt = 1; attempt <= 2; attempt++) {
+                const jitter = 400 + Math.floor(Math.random() * 800);
+                const res = await Promise.race([
+                  svc.getPseudonym(outboxItem.group_id, outboxItem.user_id),
+                  new Promise<'__timeout__'>(resolve => setTimeout(() => resolve('__timeout__'), 3000))
+                ]);
+                if (res && res !== '__timeout__') return true;
+                await new Promise(r => setTimeout(r, jitter));
+              }
+              return false;
+            };
+            const ok = await doPseudonym();
+            if (!ok) {
+              // Short backoff and continue; do not block the entire run
+              const backoffMs = 1000 + Math.floor(Math.random() * 2000);
+              if (outboxItem.id !== undefined) {
+                await sqliteService.updateOutboxRetry(outboxItem.id, (outboxItem.retry_count || 0) + 1, Date.now() + backoffMs);
+                this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_BACKOFF_SCHEDULED<${(outboxItem.retry_count||0)+1}>` as any);
+              }
+              this.log(`[#${outboxItem.id}] pseudonym upsert failed; backoff ${backoffMs}ms`);
+              continue;
+            }
+          }
 
           // Stale-while-refresh: prefer cached token and never block on auth here
           const tokenSnap = this.getTokenSnapshot();
@@ -1845,7 +1825,10 @@ class SupabasePipeline {
           // Success - remove from outbox
           if (outboxItem.id !== undefined) {
             await sqliteService.removeFromOutbox(outboxItem.id);
-            this.log(`✅ Outbox message ${outboxItem.id} sent and removed`);
+            const deliveredId = (JSON.parse(outboxItem.content) || {}).id || outboxItem.id;
+            const dk = (JSON.parse(outboxItem.content) || {}).dedupe_key;
+            this.log(`✅ Outbox message ${outboxItem.id} sent and removed (dedupe_key=${dk || 'n/a'})`);
+            try { this.resolveTerminal(String(deliveredId), 'OUTBOX_DELIVERED'); } catch {}
           }
           sentCount++;
           if (outboxItem.group_id) {
@@ -1893,11 +1876,12 @@ class SupabasePipeline {
               await sqliteService.removeFromOutbox(outboxItem.id);
               failedCount++;
             } else {
-              const backoffMs = Math.min(newRetryCount * 30000, 300000); // 30s to 5min max
+              const backoffMs = 1000 + Math.floor(Math.random() * 2000); // 1–3s short backoff
               const nextRetryAt = Date.now() + backoffMs;
 
               await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
               this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
+              try { this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_BACKOFF_SCHEDULED<${newRetryCount}>` as any); } catch {}
               retriedCount++;
             }
           }

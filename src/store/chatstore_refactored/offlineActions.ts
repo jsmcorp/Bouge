@@ -14,9 +14,7 @@ let isProcessingOutbox = false;
 let pendingRerunCount = 0; // Count instead of boolean to handle multiple rapid triggers
 let processingWatchdog: NodeJS.Timeout | null = null;
 let triggerTimeout: NodeJS.Timeout | null = null;
-let watchdogTimeoutCount = 0; // Track consecutive watchdog timeouts to prevent infinite loops
-// Throttle empty outbox checks to avoid spinning when there's nothing to send
-let lastEmptyOutboxAt = 0;
+// (watchdog removed) // Throttle removed: we no longer track last empty time to avoid suppressing future work
 
 // Simple per-group refresh throttling (WhatsApp-style: avoid frequent back-to-back refresh)
 const groupRefreshThrottleMs = 2000;
@@ -35,9 +33,7 @@ export const resetOutboxProcessingState = () => {
     clearTimeout(triggerTimeout);
     triggerTimeout = null;
   }
-  // Reset watchdog timeout count on manual reset
-  watchdogTimeoutCount = 0;
-  console.log('[outbox-unified] Reset watchdog timeout count - state cleared, no auto-trigger');
+  // No global watchdog anymore; per-item timeouts handled in pipeline
 };
 
 // Unified trigger system - this is the ONLY way to trigger outbox processing
@@ -179,6 +175,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         image_url: msg.image_url,
         // Optional dedupe_key for stable replacement; compute fallback on processing if absent
         dedupe_key: (msg as any).dedupe_key || undefined,
+        // Optional pseudonym compound step for ghost messages
+        requires_pseudonym: (msg as any).requires_pseudonym || (msg as any).pseudonym_task || undefined,
       };
       await sqliteService.addToOutbox({
         group_id: msg.group_id,
@@ -193,7 +191,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         is_ghost: msg.is_ghost ? 1 : 0
       });
 
-      console.log(`[outbox-enqueue] Successfully enqueued message ${msg.id}, triggering processing...`);
+      console.log(`[outbox-enqueue] Successfully enqueued message ${msg.id}, dedupe_key=${(msg as any).dedupe_key || 'n/a'}, requires_pseudonym=${(msg as any).requires_pseudonym ? 'true' : 'false'}; triggering processing...`);
       // Trigger processing immediately after enqueueing
       triggerOutboxProcessing('enqueue-outbox', 'high');
     } catch (e) {
@@ -204,7 +202,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
     // Prevent overlapping outbox processing
     if (isProcessingOutbox) {
       pendingRerunCount++;
-      console.log(`[outbox-unified] Processing already active, queued rerun #${pendingRerunCount}`);
+      console.log(`[outbox-unified] Queued follow-up outbox run (coalesced). Count=${pendingRerunCount}`);
       return;
     }
     
@@ -213,56 +211,31 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
     console.log(`[outbox-unified] Starting processing session ${sessionId}`);
     
     try {
-      // Set watchdog to prevent permanent blocking
-      processingWatchdog = setTimeout(() => {
-        watchdogTimeoutCount++;
-        console.warn(`⚠️ [outbox-unified] Watchdog timeout after 15s - session ${sessionId} - timeout count: ${watchdogTimeoutCount}`);
-        
-        if (watchdogTimeoutCount >= 5) {
-          console.warn(`⚠️ [outbox-unified] Too many consecutive timeouts (${watchdogTimeoutCount}), stopping auto-recovery`);
-          resetOutboxProcessingState();
-          return;
-        }
-        
-        resetOutboxProcessingState();
-      }, 15000);
-
-      // Check prerequisites
-      if (!await checkSqliteReady()) {
-        console.log(`[outbox-unified] ${sessionId} - SQLite not ready, aborting`);
-        return;
+      // Gate on sqlite readiness with a short loop; do not abort
+      const t0 = Date.now();
+      while (!(await checkSqliteReady())) {
+        await new Promise(r => setTimeout(r, 200));
       }
+      console.log(`[outbox-unified] ${sessionId} - sqliteReady waited ${Date.now() - t0}ms`);
 
-      // Short-circuit if we've very recently checked and found no work
-      if (Date.now() - lastEmptyOutboxAt < 1000) {
-        console.log(`[outbox-unified] ${sessionId} - Skipping (recent empty outbox)`);
-        return;
-      }
-
-      if (!await checkOnline()) {
-        console.log(`[outbox-unified] ${sessionId} - Network offline, aborting`);
-        return;
-      }
-
-      // Preflight: avoid invoking pipeline when outbox is empty
+      // Preflight: if outbox is empty, exit immediately and do not schedule more runs
       try {
         const pending = await sqliteService.getOutboxMessages();
         if (!pending || pending.length === 0) {
-          lastEmptyOutboxAt = Date.now();
-          console.log(`[outbox-unified] ${sessionId} - No outbox messages to process (preflight)`);
+          console.log(`[outbox-unified] ${sessionId} - preflight-empty: skip`);
           return;
+        } else {
+          console.log(`[outbox-unified] ${sessionId} - non-empty: start (items=${pending.length})`);
         }
       } catch (e) {
         console.warn(`[outbox-unified] ${sessionId} - Preflight outbox check failed (continuing):`, e);
       }
 
-      // Use pipeline to process outbox (handles all retry logic, auth, timeouts)
+      // Run the pipeline to drain the queue; no early aborts once work is detected
       await supabasePipeline.processOutbox();
       const stats = supabasePipeline.getLastOutboxStats();
 
-      // Reset watchdog timeout count on successful completion
-      watchdogTimeoutCount = 0;
-      console.log(`[outbox-unified] ${sessionId} - Pipeline processing completed successfully`, stats);
+      console.log(`[outbox-unified] ${sessionId} - drained. stats=`, stats);
 
       // Refresh only if any messages were delivered, with per-group throttle
       const state = get();
@@ -311,21 +284,15 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
     } catch (error) {
       console.error(`[outbox-unified] ${sessionId} - Pipeline processing failed:`, error);
     } finally {
-      // Clear watchdog
-      if (processingWatchdog) {
-        clearTimeout(processingWatchdog);
-        processingWatchdog = null;
-      }
-      
       isProcessingOutbox = false;
       console.log(`[outbox-unified] ${sessionId} - Processing session completed`);
-      
+
       // Handle pending reruns if any were queued during processing
       if (pendingRerunCount > 0) {
         const queuedRuns = pendingRerunCount;
         pendingRerunCount = 0; // Reset count atomically
         console.log(`[outbox-unified] ${sessionId} - Executing ${queuedRuns} queued rerun(s) immediately`);
-        
+
         // Use immediate priority for queued reruns to prevent further delays
         triggerOutboxProcessing('pending-rerun', 'immediate');
       }

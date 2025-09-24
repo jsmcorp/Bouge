@@ -1,5 +1,6 @@
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
+import { pseudonymService } from '@/lib/pseudonymService';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { useAuthStore } from '@/store/authStore';
@@ -200,6 +201,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               parent_id: parentId || null,
               image_url: imageUrl || null,
               dedupe_key: dedupeKey,
+              requires_pseudonym: isGhost ? true : undefined,
             });
 
             const { triggerOutboxProcessing } = get();
@@ -228,6 +230,52 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
       };
 
       try {
+        // For ghost messages, serialize pseudonym upsert to avoid race with send
+        if (isGhost) {
+          const lockKey = `${groupId}:${user.id}`;
+          const doUpsert = async () => {
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const jitter = 400 + Math.floor(Math.random() * 800);
+              const res = await Promise.race([
+                pseudonymService.getPseudonym(groupId, user.id),
+                new Promise<'__timeout__'>(resolve => setTimeout(() => resolve('__timeout__'), 3000))
+              ]);
+              if (res && res !== '__timeout__') return true;
+              await new Promise(r => setTimeout(r, jitter));
+            }
+            return false;
+          };
+
+          // Simple per-key lock: if an upsert is inflight for this key, wait for it
+          const locks = (window as any).__pseudonymLocks || ((window as any).__pseudonymLocks = new Map());
+          const inflight: Promise<any> | undefined = locks.get(lockKey);
+          if (inflight) { try { await inflight; } catch {} }
+          const p = doUpsert();
+          locks.set(lockKey, p);
+          const ok = await p.catch(() => false);
+          locks.delete(lockKey);
+
+          if (!ok) {
+            // Enqueue compound outbox task (pseudonym->send) and return
+            console.log(`[ghost] pseudonym upsert failed; enqueue compound outbox for ${messageId} dedupe_key=${dedupeKey}`);
+            await get().enqueueOutbox({
+              id: messageId,
+              group_id: groupId,
+              user_id: user.id,
+              content,
+              is_ghost: isGhost,
+              message_type: messageType,
+              category: category || null,
+              parent_id: parentId || null,
+              image_url: imageUrl || null,
+              dedupe_key: dedupeKey,
+              requires_pseudonym: true,
+            });
+            get().triggerOutboxProcessing('ghost-upsert-failed', 'high');
+            return;
+          }
+        }
+
         // Send through pipeline (handles retries, health checks, fallback to outbox)
         await supabasePipeline.sendMessage(messageForPipeline);
 
