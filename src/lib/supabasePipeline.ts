@@ -109,6 +109,8 @@ class SupabasePipeline {
 
   // Terminal instrumentation timers per message id
   private terminalTimers: Map<string, NodeJS.Timeout> = new Map();
+  // Snapshot of pending sends to allow terminal watchdog to create a job if missing
+  private pendingSendSnapshots: Map<string, Message> = new Map();
 
   // Track last realtime auth token applied to websocket
   private lastRealtimeAuthToken: string | null = null;
@@ -126,7 +128,8 @@ class SupabasePipeline {
 
   constructor() {
     this.log('🚀 Pipeline initialized');
-    this.log('🧪 Debug tag: v2025-08-22.1');
+    this.log('🧪 Debug tag: v2025-09-24.stage-markers.v2');
+    this.log('🧪 Marker pack installed: entered-send, pre-network, POST markers, 5s timeout→outbox, watchdog job creation');
   }
 
   // Terminal instrumentation helpers
@@ -134,16 +137,50 @@ class SupabasePipeline {
     // Cancel any existing timer
     const existing = this.terminalTimers.get(messageId);
     if (existing) { clearTimeout(existing); this.terminalTimers.delete(messageId); }
-    const to = setTimeout(() => {
-      try { this.log(`[TERMINAL] SEND_STALLED_BUG id=${messageId} callsite=${callsite} ts=${new Date().toISOString()}`); } catch {}
-      // Nudge outbox in case something is stuck
-      this.triggerOutboxProcessing('terminal-watch-timeout');
+    const to = setTimeout(async () => {
+      try {
+        this.log(`[TERMINAL] SEND_STALLED_BUG id=${messageId} callsite=${callsite} ts=${new Date().toISOString()}`);
+        // Ensure there is an outbox job for this id; if missing, create one from snapshot
+        const snapshot = this.pendingSendSnapshots.get(messageId);
+        if (snapshot) {
+          try {
+            const isNative = Capacitor.isNativePlatform();
+            if (isNative) {
+              const t0 = Date.now();
+              while (!(await sqliteService.isReady())) {
+                await new Promise(r => setTimeout(r, 200));
+              }
+              this.log(`[terminal-watch] sqliteReady after ${Date.now()-t0}ms`);
+            }
+            const items = await sqliteService.getOutboxMessages();
+            const exists = items.some(it => {
+              try {
+                const c = JSON.parse(it.content);
+                return (c?.id === messageId) || (!!c?.dedupe_key && c.dedupe_key === snapshot.dedupe_key);
+              } catch { return false; }
+            });
+            if (!exists) {
+              await this.fallbackToOutbox(snapshot);
+              this.log(`Terminal watchdog: created outbox job for ${messageId} (dedupe=${snapshot.dedupe_key || 'n/a'})`);
+            } else {
+              this.log(`Terminal watchdog: outbox job already exists for ${messageId}`);
+            }
+          } catch (e) {
+            this.log(`[terminal-watch] failed to ensure outbox job for ${messageId}: ${stringifyError(e)}`);
+          }
+        } else {
+          this.log(`[terminal-watch] no snapshot available for ${messageId}; trigger only`);
+        }
+        // Trigger regardless
+        this.triggerOutboxProcessing('terminal-watch-timeout');
+      } catch {}
     }, 10000);
     this.terminalTimers.set(messageId, to);
   }
   private resolveTerminal(messageId: string, code: 'DIRECT_SUCCESS' | 'OUTBOX_DELIVERED' | `OUTBOX_BACKOFF_SCHEDULED<${number}>`) {
     const to = this.terminalTimers.get(messageId);
     if (to) { clearTimeout(to); this.terminalTimers.delete(messageId); }
+    this.pendingSendSnapshots.delete(messageId);
     this.log(`[TERMINAL] ${code} id=${messageId} ts=${new Date().toISOString()}`);
   }
 
@@ -1365,8 +1402,11 @@ class SupabasePipeline {
     this.log(`📤 Sending message ${message.id}...`);
     const dbgLabel = `send-${message.id}`;
     try { console.time?.(`[${dbgLabel}] total`); } catch {}
+    // Snapshot for terminal watchdog recovery
+    this.pendingSendSnapshots.set(message.id, { ...message });
     // Start terminal watchdog for this message id
     this.startTerminalWatch(message.id, 'sendMessage');
+    this.log(`[${dbgLabel}] stage: entered send`);
     this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
 
     try {
@@ -1411,6 +1451,8 @@ class SupabasePipeline {
     } finally {
       try { console.timeEnd?.(`[${dbgLabel}] total`); } catch {}
       this.log(`[${dbgLabel}] finished`);
+      // Ensure snapshot cleanup if any path threw before resolveTerminal
+      this.pendingSendSnapshots.delete(message.id);
     }
   }
 
@@ -1425,6 +1467,7 @@ class SupabasePipeline {
     this.log(`[${dbgLabel}] checkHealth() -> start`);
     const isHealthy = await this.checkHealth();
     this.log(`[${dbgLabel}] checkHealth() -> ${isHealthy ? 'healthy' : 'unhealthy'}`);
+    if (isHealthy) this.log(`[${dbgLabel}] stage: health ok`);
     if (!isHealthy) {
       this.log(`📤 Client unhealthy, falling back to outbox - message ${message.id}`);
       await this.fallbackToOutbox(message);
@@ -1441,6 +1484,7 @@ class SupabasePipeline {
       try {
         this.log(`📤 Direct send attempt ${attempt}/${this.config.maxRetries} - message ${message.id}`);
         try { console.time?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
+        this.log(`[${dbgLabel}] stage: pre-network`);
 
         const tokenSnap = this.getTokenSnapshot();
         const fastPathNoAuth = !!tokenSnap && tokenSnap === this.lastRealtimeAuthToken;
@@ -1464,7 +1508,10 @@ class SupabasePipeline {
         // If SDK cannot set PostgREST Authorization synchronously, bypass it for the first attempt
         if (tokenSnap && !(client as any)?.rest?.auth && attempt === 1) {
           this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert (snapshot token)`);
+          this.log(`[${dbgLabel}] stage: network attempt started (path=rest)`);
+          this.log(`[${dbgLabel}] POST /messages (fast-path)`);
           await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
+          this.log(`[${dbgLabel}] stage: response received`);
           this.log(`✅ Direct send successful - message ${message.id}`);
           this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
           try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
@@ -1477,6 +1524,8 @@ class SupabasePipeline {
           setTimeout(() => reject(new Error(`Direct send timeout after ${attemptTimeoutMs}ms`)), attemptTimeoutMs);
         });
 
+        this.log(`[${dbgLabel}] stage: network attempt started (path=sdk)`);
+        this.log(`[${dbgLabel}] POST /messages (sdk)`);
         const sendPromise = client
           .from('messages')
           .upsert({
@@ -1504,13 +1553,18 @@ class SupabasePipeline {
           throw error;
         }
 
+        this.log(`[${dbgLabel}] stage: response received`);
         this.log(`✅ Direct send successful - message ${message.id}`);
         this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
         return; // Success!
       } catch (error) {
         lastError = error;
+        const emsg = String((error as any)?.message || error || '');
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
+        if (emsg.includes('Direct send timeout after 5000ms')) {
+          this.log(`[${dbgLabel}] Direct send timeout after 5000ms → enqueued to outbox`);
+        }
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
 
         // Stale-while-refresh: if 401/invalid token, attempt one bounded refresh then single retry
@@ -1603,11 +1657,14 @@ class SupabasePipeline {
       dedupe_key: message.dedupe_key,
     } as any;
 
+    this.log(`[${dbgLabel}] stage: pre-network`);
     this.log(`[${dbgLabel}] fast-path: direct REST upsert -> ${url}`);
+    this.log(`[${dbgLabel}] POST /messages (fast-path)`);
 
     const controller = new AbortController();
     const to = setTimeout(() => controller.abort(), 5000);
     try {
+      this.log(`[${dbgLabel}] stage: network attempt started (path=rest)`);
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -1710,7 +1767,7 @@ class SupabasePipeline {
         return;
       }
 
-      this.log(`📦 processing N=${outboxMessages.length} items`);
+      this.log(`📦 non-empty: start (${outboxMessages.length})`);
 
       // Check health before processing, but never abort a non-empty run
       const isHealthy = await this.checkHealth();
@@ -1737,6 +1794,8 @@ class SupabasePipeline {
 
         try {
           const messageData = JSON.parse(outboxItem.content);
+          const dk = messageData?.dedupe_key || `d:${outboxItem.user_id}:${outboxItem.group_id}:${messageData?.id}`;
+          this.log(`[#${outboxItem.id}] attempt start (dk=${dk})`);
 
           // Optional compound step: ensure pseudonym before sending ghost message
           if (messageData?.requires_pseudonym === true) {
@@ -1801,6 +1860,7 @@ class SupabasePipeline {
             `)
             .single();
 
+          this.log(`[#${outboxItem.id}] POST /messages (outbox)`);
           let raceRes: any = await Promise.race([makeInsert(), timeoutPromise]);
           if (raceRes && raceRes.error) {
             const status = raceRes.error?.status ?? raceRes.error?.code;
@@ -1827,7 +1887,7 @@ class SupabasePipeline {
             await sqliteService.removeFromOutbox(outboxItem.id);
             const deliveredId = (JSON.parse(outboxItem.content) || {}).id || outboxItem.id;
             const dk = (JSON.parse(outboxItem.content) || {}).dedupe_key;
-            this.log(`✅ Outbox message ${outboxItem.id} sent and removed (dedupe_key=${dk || 'n/a'})`);
+            this.log(`✅ Outbox item delivered→deleted id=${outboxItem.id} (dedupe_key=${dk || 'n/a'})`);
             try { this.resolveTerminal(String(deliveredId), 'OUTBOX_DELIVERED'); } catch {}
           }
           sentCount++;
@@ -1864,7 +1924,11 @@ class SupabasePipeline {
           } catch {}
 
         } catch (error) {
+          const emsg = String((error as any)?.message || error || '');
           this.log(`❌ Outbox message ${outboxItem.id} failed:`, stringifyError(error));
+          if (emsg.includes('Outbox send timeout after')) {
+            this.log(`[#${outboxItem.id}] attempt timeout→backoff`);
+          }
 
           if (outboxItem.id !== undefined) {
             // Update retry count and schedule next retry
