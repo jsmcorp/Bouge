@@ -168,18 +168,22 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         return;
       }
       console.log(`[outbox-enqueue] Adding message ${msg.id} to SQLite outbox...`);
+      // Persist dedupe_key inside content to ensure realtime replacement later
+      const contentPayload: any = {
+        id: msg.id,
+        content: msg.content,
+        is_ghost: msg.is_ghost,
+        message_type: msg.message_type,
+        category: msg.category,
+        parent_id: msg.parent_id,
+        image_url: msg.image_url,
+        // Optional dedupe_key for stable replacement; compute fallback on processing if absent
+        dedupe_key: (msg as any).dedupe_key || undefined,
+      };
       await sqliteService.addToOutbox({
         group_id: msg.group_id,
         user_id: msg.user_id,
-        content: JSON.stringify({
-          id: msg.id,
-          content: msg.content,
-          is_ghost: msg.is_ghost,
-          message_type: msg.message_type,
-          category: msg.category,
-          parent_id: msg.parent_id,
-          image_url: msg.image_url
-        }),
+        content: JSON.stringify(contentPayload),
         retry_count: 0,
         next_retry_at: Date.now(),
         message_type: msg.message_type,
@@ -188,7 +192,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         image_url: msg.image_url,
         is_ghost: msg.is_ghost ? 1 : 0
       });
-      
+
       console.log(`[outbox-enqueue] Successfully enqueued message ${msg.id}, triggering processing...`);
       // Trigger processing immediately after enqueueing
       triggerOutboxProcessing('enqueue-outbox', 'high');

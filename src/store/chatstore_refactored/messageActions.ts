@@ -198,7 +198,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               message_type: messageType,
               category: category || null,
               parent_id: parentId || null,
-              image_url: imageUrl || null
+              image_url: imageUrl || null,
+              dedupe_key: dedupeKey,
             });
 
             const { triggerOutboxProcessing } = get();

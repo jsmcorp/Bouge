@@ -1726,7 +1726,18 @@ class SupabasePipeline {
             const tokenSnap = this.getTokenSnapshot();
             try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log('[outbox-degraded] postgrest Authorization set from snapshot'); } } catch {}
 
-            const sendPromise = client.from('messages').insert(messageData);
+            const payload = {
+              group_id: outboxItem.group_id,
+              user_id: outboxItem.user_id,
+              content: messageData.content,
+              is_ghost: messageData.is_ghost,
+              message_type: messageData.message_type,
+              category: messageData.category,
+              parent_id: messageData.parent_id,
+              image_url: messageData.image_url,
+              dedupe_key: messageData.dedupe_key || `d:${outboxItem.user_id}:${outboxItem.group_id}:${messageData.id}`,
+            };
+            const sendPromise = client.from('messages').insert(payload);
             const res: any = await Promise.race([sendPromise, timeoutPromise]);
             if (res && res.error) {
               // If unauthorized, do one quick refresh and retry once
@@ -1801,7 +1812,7 @@ class SupabasePipeline {
               category: messageData.category,
               parent_id: messageData.parent_id,
               image_url: messageData.image_url,
-              dedupe_key: messageData.dedupe_key,
+              dedupe_key: messageData.dedupe_key || `d:${outboxItem.user_id}:${outboxItem.group_id}:${messageData.id}`,
             }, { onConflict: 'dedupe_key' })
             .select(`
               *,
