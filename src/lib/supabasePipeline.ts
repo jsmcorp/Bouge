@@ -1849,55 +1849,25 @@ class SupabasePipeline {
           const tokenSnap = this.getTokenSnapshot();
           try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log(`[outbox] using cached token snapshot for item ${outboxItem.id}`); } } catch {}
 
-          // Bounded timeout to avoid 15s stalls
-          const attemptTimeoutMs = 5000;
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error(`Outbox send timeout after ${attemptTimeoutMs}ms`)), attemptTimeoutMs);
-          });
 
-          let did401RetryItem = false;
+          // Use the same fast-path direct REST upsert as direct sends to avoid SDK auth quirks
+          const msgId = messageData.id;
+          const payload: Message = {
+            id: msgId,
+            group_id: outboxItem.group_id,
+            user_id: outboxItem.user_id,
+            content: messageData.content,
+            is_ghost: !!messageData.is_ghost,
+            message_type: messageData.message_type,
+            category: messageData.category ?? null,
+            parent_id: messageData.parent_id ?? null,
+            image_url: messageData.image_url ?? null,
+            dedupe_key: dk,
+          };
 
-          const makeInsert = () => client
-            .from('messages')
-            .upsert({
-              group_id: outboxItem.group_id,
-              user_id: outboxItem.user_id,
-              content: messageData.content,
-              is_ghost: messageData.is_ghost,
-              message_type: messageData.message_type,
-              category: messageData.category,
-              parent_id: messageData.parent_id,
-              image_url: messageData.image_url,
-              dedupe_key: messageData.dedupe_key || `d:${outboxItem.user_id}:${outboxItem.group_id}:${messageData.id}`,
-            }, { onConflict: 'dedupe_key' })
-            .select(`
-              *,
-              reactions(*),
-              users!messages_user_id_fkey(display_name, avatar_url)
-            `)
-            .single();
-
-          this.log(`[#${outboxItem.id}] POST /messages (outbox)`);
-          let raceRes: any = await Promise.race([makeInsert(), timeoutPromise]);
-          if (raceRes && raceRes.error) {
-            const status = raceRes.error?.status ?? raceRes.error?.code;
-            const msg = String(raceRes.error?.message || '');
-            const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz/i.test(msg);
-            if (is401 && !did401RetryItem) {
-              this.log(`[outbox] 401 for item ${outboxItem.id}; quick refresh (<=1000ms) then single retry`);
-              const ok = await this.refreshQuickBounded(1000);
-              did401RetryItem = true;
-              if (ok) {
-                try { const snap2 = this.getTokenSnapshot(); if (snap2 && (client as any)?.rest?.auth) { (client as any).rest.auth(snap2); } } catch {}
-                raceRes = await Promise.race([makeInsert(), timeoutPromise]);
-                if (raceRes && raceRes.error) throw raceRes.error;
-              } else {
-                throw raceRes.error;
-              }
-            } else {
-              throw raceRes.error;
-            }
-          }
+          this.log(`[#${outboxItem.id}] POST /messages (outbox fast-path)`);
+          // Bound to 5s internally via AbortController
+          await this.fastPathDirectUpsert(payload, `outbox-${outboxItem.id}`);
 
           // Success - remove from outbox
           if (outboxItem.id !== undefined) {
