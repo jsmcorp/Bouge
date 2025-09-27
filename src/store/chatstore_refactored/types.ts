@@ -105,6 +105,9 @@ export interface ChatState {
   mainChatGhostMode: boolean;
   threadGhostMode: boolean;
   isLoading: boolean;
+  // Lazy-load state
+  isLoadingOlder: boolean;
+  hasMoreOlder: boolean;
   replyingTo: Message | null;
   activeThread: Message | null;
   threadReplies: Message[];

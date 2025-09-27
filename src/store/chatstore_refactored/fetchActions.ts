@@ -15,6 +15,8 @@ const lastFetchStartAt: Record<string, number> = {};
 export interface FetchActions {
   fetchGroups: () => Promise<void>;
   fetchMessages: (groupId: string) => Promise<void>;
+  // New: lazy-load older messages when scrolling up
+  loadOlderMessages: (groupId: string, pageSize?: number) => Promise<number>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
   preloadTopGroupMessages: () => Promise<void>;
@@ -772,6 +774,126 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       set({ isLoading: false });
     }
   },
+
+  // Lazy-load older messages for infinite scroll
+  	loadOlderMessages: async (groupId: string, pageSize: number = 30) => {
+  	  try {
+  	    const state = get();
+  	    if (state.isLoadingOlder || !state.activeGroup || state.activeGroup.id !== groupId) {
+  	      return 0;
+  	    }
+  	    const current = state.messages || [];
+  	    if (current.length === 0) return 0;
+
+  	    set({ isLoadingOlder: true });
+
+  	    const oldestIso = current[0].created_at;
+  	    const oldestMs = new Date(oldestIso).getTime();
+
+  	    let combined: Message[] = [];
+
+  	    // Try local first (SQLite)
+  	    const isNative = Capacitor.isNativePlatform();
+  	    const isSqliteReady = isNative && await sqliteService.isReady();
+  	    if (isSqliteReady) {
+  	      try {
+  	        const localOlder = await (sqliteService as any).getMessagesBefore(groupId, oldestMs, pageSize);
+  	        if (localOlder && localOlder.length > 0) {
+  	          // Batch load authors
+  	          const userIds: string[] = Array.from(
+	            new Set<string>(
+	              localOlder
+	                .filter((m: any) => !m.is_ghost)
+	                .map((m: any) => String(m.user_id))
+	            )
+	          );
+  	          const userCache = new Map();
+  	          for (const uid of userIds) {
+  	            try {
+  	              const u = await sqliteService.getUser(uid);
+  	              if (u) userCache.set(uid, { display_name: u.display_name, avatar_url: u.avatar_url || null });
+  	            } catch {}
+  	          }
+
+  	          const mapped: Message[] = localOlder.map((msg: any) => ({
+  	            id: msg.id,
+  	            group_id: msg.group_id,
+  	            user_id: msg.user_id,
+  	            content: msg.content,
+  	            is_ghost: msg.is_ghost === 1,
+  	            message_type: msg.message_type,
+  	            category: msg.category,
+  	            parent_id: msg.parent_id,
+  	            image_url: msg.image_url,
+  	            created_at: new Date(msg.created_at).toISOString(),
+  	            author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+  	            reply_count: 0,
+  	            replies: [],
+  	            delivery_status: 'delivered',
+  	            reactions: [],
+  	          }));
+  	          combined = combined.concat(mapped);
+  	        }
+  	      } catch (e) {
+  	        console.warn('⚠️ loadOlderMessages: local fetch failed', e);
+  	      }
+  	    }
+
+  	    // If local fewer than pageSize, fetch remainder from remote
+  	    if (combined.length < pageSize) {
+  	      try {
+  	        const client = await supabasePipeline.getDirectClient();
+  	        const limit = pageSize - combined.length;
+  	        const { data, error } = await client
+  	          .from('messages')
+  	          .select(`*, users!messages_user_id_fkey(display_name, avatar_url, created_at)`)
+  	          .eq('group_id', groupId)
+  	          .lt('created_at', oldestIso)
+  	          .order('created_at', { ascending: false })
+  	          .limit(limit);
+  	        if (!error && data && data.length > 0) {
+  	          // Map remote rows to Message
+  	          const rows = data.slice().reverse();
+  	          const mapped: Message[] = rows.map((msg: any) => ({
+  	            ...msg,
+  	            author: msg.is_ghost ? undefined : msg.users,
+  	            reply_count: 0,
+  	            replies: [],
+  	            delivery_status: 'delivered' as const,
+  	          }));
+  	          combined = combined.concat(mapped);
+
+  	          // Persist to SQLite (best-effort)
+  	          if (isSqliteReady) {
+  	            try { await sqliteService.syncMessagesFromRemote(groupId, data); } catch (e) {}
+  	          }
+  	        }
+  	      } catch (e) {
+  	        console.warn('⚠️ loadOlderMessages: remote fetch failed', e);
+  	      }
+  	    }
+
+  	    if (combined.length === 0) {
+  	      set({ isLoadingOlder: false, hasMoreOlder: false });
+  	      return 0;
+  	    }
+
+  	    // Merge and dedupe, keep ascending chronological order
+  	    const existing: Message[] = get().messages || [];
+  	    const seen = new Set(existing.map(m => m.id));
+  	    const newOnes = combined.filter(m => !seen.has(m.id));
+  	    const merged = [...newOnes, ...existing];
+  	    merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  	    set({ messages: merged, isLoadingOlder: false, hasMoreOlder: newOnes.length >= pageSize });
+  	    return newOnes.length;
+  	  } catch (e) {
+  	    console.error('❌ loadOlderMessages failed:', e);
+  	    set({ isLoadingOlder: false });
+  	    return 0;
+  	  }
+  	},
+
+
 
   fetchMessageById: async (messageId: string) => {
     try {
