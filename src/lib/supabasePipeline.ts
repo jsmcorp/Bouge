@@ -1488,7 +1488,24 @@ class SupabasePipeline {
 
         const tokenSnap = this.getTokenSnapshot();
         const fastPathNoAuth = !!tokenSnap && tokenSnap === this.lastRealtimeAuthToken;
-        const client = fastPathNoAuth ? await this.getDirectClient() : await this.getClient();
+        this.log(`[${dbgLabel}] pre-network: acquiring ${fastPathNoAuth ? 'direct' : 'full'} client (≤5000ms)`);
+        let client: any;
+        try {
+          const clientPromise = fastPathNoAuth ? this.getDirectClient() : this.getClient();
+          const preNetworkTimeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Direct send timeout after 5000ms')), 5000));
+          client = await Promise.race([clientPromise, preNetworkTimeout]);
+        } catch (e: any) {
+          const emsg = String(e?.message || e || '');
+          if (emsg.includes('Direct send timeout after 5000ms')) {
+            this.log(`[${dbgLabel}] Direct send timeout after 5000ms → enqueued to outbox`);
+            await this.fallbackToOutbox(message);
+            const queuedError: any = new Error(`Message ${message.id} queued to outbox (pre-network timeout)`);
+            queuedError.code = 'QUEUED_OUTBOX';
+            queuedError.name = 'MessageQueuedError';
+            throw queuedError;
+          }
+          throw e;
+        }
         this.log(`[${dbgLabel}] using ${fastPathNoAuth ? 'direct' : 'full'} client`);
         this.log(`[${dbgLabel}] auth: using cached token snapshot=${!!tokenSnap}`);
         try {
@@ -2184,6 +2201,8 @@ class SupabasePipeline {
         this.log('⚠️ App resume: failed to apply token to realtime:', stringifyError(e));
       }
 
+      // Always nudge outbox on resume; it preflights and exits fast if empty
+      this.triggerOutboxProcessing('app-resume');
       this.log('✅ App resume completed using token recovery strategy');
     } catch (error) {
       this.log('❌ App resume failed:', stringifyError(error));
@@ -2205,6 +2224,8 @@ class SupabasePipeline {
     try {
       // Simple session refresh
       await this.recoverSession();
+      // Nudge outbox on network reconnect; preflight will skip if empty
+      this.triggerOutboxProcessing('network-reconnect');
       this.log('✅ Network reconnect session refresh completed');
     } catch (error) {
       this.log('❌ Network reconnect session refresh failed:', stringifyError(error));

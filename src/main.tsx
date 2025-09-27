@@ -85,7 +85,7 @@ createRoot(document.getElementById('root')!).render(
 	let lastResumeTime = 0;
 	let resumeTimeout: NodeJS.Timeout | null = null;
 
-	const handleAppResume = (source: string) => {
+	const handleAppResume = async (source: string) => {
 		const now = Date.now();
 		const timeSinceLastResume = now - lastResumeTime;
 
@@ -107,6 +107,15 @@ createRoot(document.getElementById('root')!).render(
 		}
 
 		lastResumeTime = now;
+
+		// Trigger outbox processing and light session recovery on app resume
+		try {
+			const { supabasePipeline } = await import('@/lib/supabasePipeline');
+			await supabasePipeline.onAppResume();
+			mobileLogger.log('info', 'general', 'Triggered outbox processing on app resume');
+		} catch (error) {
+			mobileLogger.log('error', 'general', 'Failed to trigger outbox on app resume', { error });
+		}
 
 		// The WhatsApp-style connection system will handle the reconnection
 		// We just need to mark activity and let the device lock detection handle it
