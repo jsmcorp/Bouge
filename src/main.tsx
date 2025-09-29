@@ -144,14 +144,27 @@ createRoot(document.getElementById('root')!).render(
 			chatStore.setOnlineStatus?.(status.connected);
 
 			if (status.connected) {
-				// Handle network coming online with single reconnection manager
-				const { reconnectionManager } = await import('@/lib/reconnectionManager');
+				// Network came online: mirror "reopen chat" behavior in a safe, idempotent way
 				mobileLogger.log('info', 'network', 'Network reconnected');
-
-				reconnectionManager.reconnect('network-online').catch(error => {
-					mobileLogger.log('error', 'network', 'Network reconnection failed', { error });
-					whatsappConnection.setConnectionState('disconnected', 'Connection failed');
-				});
+				try {
+					// Use store's unified handler to notify pipeline, trigger outbox, and kick reconnection
+					chatStore.onNetworkOnline?.();
+				} catch (err) {
+					mobileLogger.log('warn', 'network', 'onNetworkOnline handler failed', { err });
+				}
+				// After a short delay, fast-path resubscribe and refetch messages for the active chat (like re-entering screen)
+				setTimeout(() => {
+					try {
+						const st = useChatStore.getState();
+						const gid = st?.activeGroup?.id;
+						if (gid) {
+							st.ensureSubscribedFastPath?.(gid);
+							st.fetchMessages?.(gid);
+						}
+					} catch (e) {
+						mobileLogger.log('warn', 'network', 'Post-reconnect fast-path failed', { e });
+					}
+				}, 600);
 			} else {
 				// Handle network going offline
 				mobileLogger.log('warn', 'network', 'Network disconnected');
