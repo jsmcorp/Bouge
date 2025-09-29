@@ -198,6 +198,22 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       }
       lastFetchStartAt[groupId] = now;
 
+      // Create a fetch token to ignore stale async updates if user switches groups mid-flight
+      const localToken = `${groupId}:${now}:${Math.random().toString(36).slice(2)}`;
+      set({ fetchToken: localToken, currentFetchGroupId: groupId });
+
+      const stillCurrent = () => {
+        const st = get();
+        return st.activeGroup?.id === groupId && st.fetchToken === localToken;
+      };
+      const setSafely = (partial: any) => {
+        if (stillCurrent()) {
+          set(partial);
+        } else {
+          console.log(`⏭️ Skipping stale set for group ${groupId}`);
+        }
+      };
+
       // Check if we're on a native platform with SQLite available
       const isNative = Capacitor.isNativePlatform();
       const isSqliteReady = isNative && await sqliteService.isReady();
@@ -272,7 +288,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         });
 
         // Update UI instantly with cached data, preserving any pending optimistic messages
-        set({
+        setSafely({
           messages: mergeWithPending(mergePendingReplies(structuredMessages)),
           polls: polls,
           userVotes: userVotesMap
@@ -433,7 +449,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             // Update UI with local data (only if we didn't already show cached data)
             if (!cachedMessages) {
-              set({
+              setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
@@ -441,7 +457,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
             } else {
               // Silently update the UI with fresh data from SQLite
-              set({
+              setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
@@ -573,7 +589,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   messageCache.setCachedMessages(groupId, allMessages);
 
                   // Update with all messages silently, preserving any pending optimistic messages
-                  set({
+                  setSafely({
                     messages: mergeWithPending(mergePendingReplies(allStructuredMessages)),
                     polls: allPolls,
                     userVotes: allUserVotesMap
@@ -592,7 +608,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // If we've already loaded data from cache or local storage, don't show loading indicator
       if (!cachedMessages && !localDataLoaded) {
-        set({ isLoading: true });
+        setSafely({ isLoading: true });
       }
 
       // Check network status
@@ -603,7 +619,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (!isOnline) {
         console.log('📵 Offline and no local data available');
         if (!cachedMessages && !localDataLoaded) {
-          set({ messages: [], isLoading: false });
+          setSafely({ messages: [], isLoading: false });
         }
         return;
       }
@@ -767,11 +783,11 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // Only update UI with Supabase data if we didn't already load from cache or local storage
       if (!cachedMessages && !localDataLoaded) {
-        set({ messages: structuredMessages, isLoading: false });
+        setSafely({ messages: structuredMessages, isLoading: false });
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
-      set({ isLoading: false });
+      { const st = get(); if (st.activeGroup?.id === groupId && st.currentFetchGroupId === groupId && st.fetchToken) { set({ isLoading: false }); } }
     }
   },
 

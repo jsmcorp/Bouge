@@ -138,4 +138,7 @@ export interface ChatState {
   writesBlocked?: boolean;
   realtimeDegraded?: boolean;
   pollFallbackTimer?: NodeJS.Timeout | null;
+  // Fetch coordination to prevent cross-group contamination
+  fetchToken?: string | null;
+  currentFetchGroupId?: string | null;
 }

@@ -1845,6 +1845,72 @@ class SupabasePipeline {
             }
           }
 
+          // Legacy ghost items may miss requires_pseudonym; perform pseudonym upsert for any ghost
+          else if (!!messageData?.is_ghost) {
+            this.log(`[#${outboxItem.id}] ghost message without requires_pseudonym flag – attempting pseudonym upsert`);
+            const doPseudonym = async () => {
+              const mod = await import('./pseudonymService');
+              const svc: any = (mod as any).pseudonymService || mod;
+              for (let attempt = 1; attempt <= 2; attempt++) {
+                const jitter = 400 + Math.floor(Math.random() * 800);
+                const res = await Promise.race<unknown | '__timeout__'>([
+                  svc.getPseudonym(outboxItem.group_id, outboxItem.user_id),
+                  new Promise<'__timeout__'>(resolve => setTimeout(() => resolve('__timeout__'), 3000))
+                ]);
+                if (res && res !== '__timeout__') return true;
+                await new Promise(r => setTimeout(r, jitter));
+              }
+              return false;
+            };
+            const okGhost = await doPseudonym().catch(() => false);
+            if (!okGhost) {
+              const backoffMs = 1000 + Math.floor(Math.random() * 2000);
+              if (outboxItem.id !== undefined) {
+                await sqliteService.updateOutboxRetry(outboxItem.id, (outboxItem.retry_count || 0) + 1, Date.now() + backoffMs);
+                this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_BACKOFF_SCHEDULED<${(outboxItem.retry_count||0)+1}>` as any);
+              }
+              this.log(`[#${outboxItem.id}] ghost pseudonym upsert failed; backoff ${backoffMs}ms`);
+              continue;
+            }
+          }
+
+          // Prepare parent_id resolution and avoid sending local (non-UUID) IDs to backend
+          let resolvedParentId: string | null = messageData.parent_id ?? null;
+          const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (resolvedParentId && !uuidRegex.test(resolvedParentId)) {
+            try {
+              const parentDedupe = `d:${outboxItem.user_id}:${outboxItem.group_id}:${resolvedParentId}`;
+              this.log(`[#${outboxItem.id}] parent_id appears local; resolving via dedupe ${parentDedupe}`);
+              const { data: parentRow, error: parentErr } = await client
+                .from('messages')
+                .select('id')
+                .eq('dedupe_key', parentDedupe)
+                .maybeSingle();
+              if (parentErr) this.log(`[#${outboxItem.id}] parent lookup error: ${stringifyError(parentErr)}`);
+              if (parentRow?.id && uuidRegex.test(parentRow.id)) {
+                resolvedParentId = parentRow.id;
+                this.log(`[#${outboxItem.id}] parent resolved -> ${resolvedParentId}`);
+              } else {
+                const backoffMs = 800 + Math.floor(Math.random() * 1200);
+                if (outboxItem.id !== undefined) {
+                  await sqliteService.updateOutboxRetry(outboxItem.id, (outboxItem.retry_count || 0) + 1, Date.now() + backoffMs);
+                  this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_PARENT_PENDING<${(outboxItem.retry_count||0)+1}>` as any);
+                }
+                this.log(`[#${outboxItem.id}] parent unresolved; backoff ${backoffMs}ms`);
+                continue;
+              }
+            } catch (e) {
+              const backoffMs = 800 + Math.floor(Math.random() * 1200);
+              if (outboxItem.id !== undefined) {
+                await sqliteService.updateOutboxRetry(outboxItem.id, (outboxItem.retry_count || 0) + 1, Date.now() + backoffMs);
+                this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_PARENT_LOOKUP_ERR<${(outboxItem.retry_count||0)+1}>` as any);
+              }
+              this.log(`[#${outboxItem.id}] parent lookup threw; backoff ${backoffMs}ms`);
+              continue;
+            }
+          }
+
+
           // Stale-while-refresh: prefer cached token and never block on auth here
           const tokenSnap = this.getTokenSnapshot();
           try { if (tokenSnap && (client as any)?.rest?.auth) { (client as any).rest.auth(tokenSnap); this.log(`[outbox] using cached token snapshot for item ${outboxItem.id}`); } } catch {}
@@ -1860,7 +1926,7 @@ class SupabasePipeline {
             is_ghost: !!messageData.is_ghost,
             message_type: messageData.message_type,
             category: messageData.category ?? null,
-            parent_id: messageData.parent_id ?? null,
+            parent_id: resolvedParentId,
             image_url: messageData.image_url ?? null,
             dedupe_key: dk,
           };

@@ -95,6 +95,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
     writesBlocked: false,
     realtimeDegraded: false,
     pollFallbackTimer: null,
+    fetchToken: null,
+    currentFetchGroupId: null,
 
     // Combine all actions
     ...stateActions,
