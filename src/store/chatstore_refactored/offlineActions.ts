@@ -9,12 +9,8 @@ import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
 // UNIFIED OUTBOX PROCESSING TRIGGER SYSTEM
 // ============================================================================
 
-// Processing state
-let isProcessingOutbox = false;
-let pendingRerunCount = 0; // Count instead of boolean to handle multiple rapid triggers
-let processingWatchdog: NodeJS.Timeout | null = null;
+// Processing state (managed in pipeline now)
 let triggerTimeout: NodeJS.Timeout | null = null;
-// (watchdog removed) // Throttle removed: we no longer track last empty time to avoid suppressing future work
 
 // Simple per-group refresh throttling (WhatsApp-style: avoid frequent back-to-back refresh)
 const groupRefreshThrottleMs = 2000;
@@ -23,29 +19,17 @@ const lastGroupRefreshAt: Record<string, number> = {};
 // Reset processing state (called from realtime cleanup/reconnect)
 export const resetOutboxProcessingState = () => {
   console.log('[outbox-unified] Resetting outbox processing state');
-  isProcessingOutbox = false;
-  pendingRerunCount = 0;
-  if (processingWatchdog) {
-    clearTimeout(processingWatchdog);
-    processingWatchdog = null;
-  }
   if (triggerTimeout) {
     clearTimeout(triggerTimeout);
     triggerTimeout = null;
   }
-  // No global watchdog anymore; per-item timeouts handled in pipeline
+  // Processing lock lives in pipeline now; nothing else to reset here
 };
 
-// Unified trigger system - this is the ONLY way to trigger outbox processing
+// Unified trigger system - thin wrapper that delegates to pipeline (single-flight inside pipeline)
 export const triggerOutboxProcessing = (context: string, priority: 'immediate' | 'high' | 'normal' | 'low' = 'normal') => {
   console.log(`[outbox-unified] Trigger requested from: ${context} (priority: ${priority})`);
-  
-  if (isProcessingOutbox) {
-    pendingRerunCount++;
-    console.log(`[outbox-unified] Processing active, queued rerun #${pendingRerunCount} from: ${context}`);
-    return;
-  }
-  
+
   // Clear any existing trigger timeout (coalesce; trailing-edge true)
   if (triggerTimeout) {
     console.log(`[outbox-unified] Coalescing trigger (debounced) from: ${context}`);
@@ -53,28 +37,14 @@ export const triggerOutboxProcessing = (context: string, priority: 'immediate' |
     triggerTimeout = null;
   }
 
-  // Simplified debouncing with shorter delays for better responsiveness
-  const delays = {
-    immediate: 0,       // For critical situations (resets, errors)
-    high: 50,          // For important events (network reconnect, auth refresh)
-    normal: 75,        // For normal operations (user sends message)
-    low: 100          // For background operations (no more periodic)
-  };
-  
+  const delays = { immediate: 0, high: 50, normal: 75, low: 100 } as const;
   const delay = delays[priority];
   console.log(`[outbox-unified] Scheduling processing in ${delay}ms for: ${context}`);
-  
+
   triggerTimeout = setTimeout(async () => {
     triggerTimeout = null;
     try {
-      // Get the latest store state and call processOutbox
-      const { useChatStore } = await import('../chatstore_refactored');
-      const processOutbox = useChatStore.getState().processOutbox;
-      if (typeof processOutbox === 'function') {
-        await processOutbox();
-      } else {
-        console.warn('[outbox-unified] processOutbox function not available');
-      }
+      await supabasePipeline.processOutbox();
     } catch (error) {
       console.error(`[outbox-unified] Error processing outbox from ${context}:`, error);
     }
@@ -199,39 +169,10 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
     }
   },
   processOutbox: async () => {
-    // Prevent overlapping outbox processing
-    if (isProcessingOutbox) {
-      pendingRerunCount++;
-      console.log(`[outbox-unified] Queued follow-up outbox run (coalesced). Count=${pendingRerunCount}`);
-      return;
-    }
-    
-    isProcessingOutbox = true;
     const sessionId = `outbox-${Date.now()}`;
-    console.log(`[outbox-unified] Starting processing session ${sessionId}`);
-    
+    console.log(`[outbox-unified] Starting processing session ${sessionId} (delegated to pipeline)`);
+
     try {
-      // Gate on sqlite readiness with a short loop; do not abort
-      const t0 = Date.now();
-      while (!(await checkSqliteReady())) {
-        await new Promise(r => setTimeout(r, 200));
-      }
-      console.log(`[outbox-unified] ${sessionId} - sqliteReady waited ${Date.now() - t0}ms`);
-
-      // Preflight: if outbox is empty, exit immediately and do not schedule more runs
-      try {
-        const pending = await sqliteService.getOutboxMessages();
-        if (!pending || pending.length === 0) {
-          console.log(`[outbox-unified] ${sessionId} - preflight-empty: skip`);
-          return;
-        } else {
-          console.log(`[outbox-unified] ${sessionId} - non-empty: start (items=${pending.length})`);
-        }
-      } catch (e) {
-        console.warn(`[outbox-unified] ${sessionId} - Preflight outbox check failed (continuing):`, e);
-      }
-
-      // Run the pipeline to drain the queue; no early aborts once work is detected
       await supabasePipeline.processOutbox();
       const stats = supabasePipeline.getLastOutboxStats();
 
@@ -280,22 +221,10 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
       } else {
         console.log(`[outbox-unified] ${sessionId} - No deliveries; skipping refresh`);
       }
-      
     } catch (error) {
       console.error(`[outbox-unified] ${sessionId} - Pipeline processing failed:`, error);
     } finally {
-      isProcessingOutbox = false;
       console.log(`[outbox-unified] ${sessionId} - Processing session completed`);
-
-      // Handle pending reruns if any were queued during processing
-      if (pendingRerunCount > 0) {
-        const queuedRuns = pendingRerunCount;
-        pendingRerunCount = 0; // Reset count atomically
-        console.log(`[outbox-unified] ${sessionId} - Executing ${queuedRuns} queued rerun(s) immediately`);
-
-        // Use immediate priority for queued reruns to prevent further delays
-        triggerOutboxProcessing('pending-rerun', 'immediate');
-      }
     }
   },
 

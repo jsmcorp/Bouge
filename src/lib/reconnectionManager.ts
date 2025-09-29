@@ -98,8 +98,27 @@ class ReconnectionManager {
         }
       } catch {}
       this.log('Token applied; channel healthy, no reconnect');
-      this.log('Reconnection decision: fast-path (no reconnect).');
-      this.log('Channel already subscribed (fast path)');
+      // Ensure channel is actually subscribed/joined for the active group
+      try {
+        const mod = await import('@/store/chatstore_refactored');
+        const useChatStore = (mod as any).useChatStore;
+        const state = useChatStore?.getState?.();
+        const activeGroupId: string | undefined = state?.activeGroup?.id;
+        const channel: any = state?.realtimeChannel;
+        const joined = channel && (channel.state === 'joined' || channel.state === 'SUBSCRIBED');
+        if (activeGroupId && !joined) {
+          this.log('Fast path: channel not joined; ensuring subscription');
+          if (typeof state?.ensureSubscribedFastPath === 'function') {
+            await state.ensureSubscribedFastPath(activeGroupId);
+          } else if (typeof state?.setupRealtimeSubscription === 'function') {
+            await state.setupRealtimeSubscription(activeGroupId);
+          }
+        } else {
+          this.log('Channel already subscribed (fast path)');
+        }
+      } catch (e) { this.log(`⚠️ Fast path ensure subscribe error: ${e}`); }
+      // Always nudge outbox so offline-queued messages drain
+      try { await supabasePipeline.onNetworkReconnect(); this.log('✅ Fast-path: outbox nudged via onNetworkReconnect'); } catch (e) { this.log(`⚠️ Fast-path outbox nudge failed (non-fatal): ${e}`); }
       return;
     }
 
@@ -139,6 +158,7 @@ class ReconnectionManager {
     if (!(await this.shouldWaitForSubscription())) {
       this.log('🟡 No active group/channel – skipping SUBSCRIBED wait');
       // Do not reset outbox here; pipeline will decide when to process via HTTP fallback if needed
+      try { await supabasePipeline.onNetworkReconnect(); this.log('📦 No active group: nudged outbox via onNetworkReconnect'); } catch (e) { this.log(`⚠️ No active group: outbox nudge failed (non-fatal): ${e}`); }
       this.log(`✅ Reconnection sequence completed (no active group) - reason: ${reason}`);
       return;
     }

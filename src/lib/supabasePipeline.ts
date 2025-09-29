@@ -1522,9 +1522,9 @@ class SupabasePipeline {
         } catch (e) {
           this.log(`[${dbgLabel}] failed to set postgrest Authorization: ${stringifyError(e)}`);
         }
-        // If SDK cannot set PostgREST Authorization synchronously, bypass it for the first attempt
-        if (tokenSnap && !(client as any)?.rest?.auth && attempt === 1) {
-          this.log(`[${dbgLabel}] fast-path: no rest.auth - using direct REST upsert (snapshot token)`);
+        // Prefer the fast-path REST upsert whenever we have a token snapshot to avoid SDK preflights
+        if (tokenSnap) {
+          this.log(`[${dbgLabel}] fast-path: using direct REST upsert (snapshot token)`);
           this.log(`[${dbgLabel}] stage: network attempt started (path=rest)`);
           this.log(`[${dbgLabel}] POST /messages (fast-path)`);
           await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
@@ -2053,13 +2053,12 @@ class SupabasePipeline {
     this.lastOutboxTriggerAt = now;
     this.log(`📦 Triggering outbox processing from: ${context}`);
 
-    // Use dynamic import to avoid circular dependencies
-    import('../store/chatstore_refactored/offlineActions').then(({ triggerOutboxProcessing }) => {
-      this.log('📦 triggerOutboxProcessing(): dynamic import succeeded');
-      triggerOutboxProcessing(context, 'high');
-    }).catch(error => {
-      this.log(`❌ Failed to trigger outbox processing:`, stringifyError(error));
-    });
+    // Delegate directly to pipeline's single-flight processor to avoid cross-layer state desync
+    setTimeout(() => {
+      this.processOutbox().catch(err => {
+        try { this.log(`❌ processOutbox() error (triggered by ${context}): ${stringifyError(err)}`); } catch {}
+      });
+    }, 0);
   }
 
   /**

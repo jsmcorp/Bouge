@@ -613,7 +613,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
             if (status === 'SUBSCRIBED') {
               // Connection established successfully
-              resetOutboxProcessingState(); // Reset outbox state on successful connection
+              // Removed: resetting outbox state here could interrupt an in-flight drain and cause concurrency
+              // resetOutboxProcessingState();
               isConnecting = false; // Clear the guard
               set({
                 connectionStatus: 'connected',
@@ -797,7 +798,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       // Clear typing users and keep connection status based on actual socket/token health
       const hasToken = !!(supabasePipeline as any).getCachedAccessToken?.() || !!(await supabasePipeline.getWorkingSession())?.access_token;
       set({
-        connectionStatus: hasToken ? 'connected' : 'disconnected',
+        connectionStatus: 'disconnected',
         typingUsers: [],
         typingTimeout: null,
         subscribedAt: null,
@@ -807,11 +808,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       // Update WhatsApp-style connection status
       try {
         const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
-        if (hasToken) {
-          whatsappConnection.setConnectionState('connected', 'Connected');
-        } else {
-          whatsappConnection.setConnectionState('disconnected', 'Disconnected');
-        }
+        whatsappConnection.setConnectionState('disconnected', hasToken ? 'Disconnected (auth ok)' : 'Disconnected');
       } catch {}
     },
 
