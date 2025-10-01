@@ -285,6 +285,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       const existsById = state.messages.some((m: Message) => m.id === message.id);
       let messagesAfter: Message[] = state.messages;
       let action = '';
+      let oldMessageId: string | null = null;
 
       if (existsById) {
         action = 'updated-existing';
@@ -297,6 +298,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           : -1;
         if (idxByDedupe !== -1) {
           action = 'replaced-by-dedupe';
+          // Capture the old message ID before replacing
+          oldMessageId = state.messages[idxByDedupe].id;
           messagesAfter = state.messages.map((m: Message, idx: number) => (
             idx === idxByDedupe ? { ...message } : m
           ));
@@ -306,7 +309,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }
       }
 
-      console.log(`📨 attachMessageToState: action=${action}, id=${message.id}, before=${state.messages.length}, after=${messagesAfter.length}`);
+      console.log(`📨 attachMessageToState: action=${action}, id=${message.id}, oldId=${oldMessageId}, before=${state.messages.length}, after=${messagesAfter.length}`);
 
       set({ messages: messagesAfter });
       try {
@@ -314,6 +317,26 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert (${messagesAfter.length} messages)`);
       } catch (err) {
         console.error('❌ Message cache update failed:', err);
+      }
+
+      // If we replaced a message by dedupe, delete the old optimistic message from SQLite
+      if (oldMessageId && action === 'replaced-by-dedupe') {
+        (async () => {
+          try {
+            const { Capacitor } = await import('@capacitor/core');
+            const isNative = Capacitor.isNativePlatform();
+            if (isNative) {
+              const { sqliteService } = await import('@/lib/sqliteService');
+              const ready = await sqliteService.isReady();
+              if (ready) {
+                await sqliteService.deleteMessage(oldMessageId);
+                console.log(`🗑️ Deleted old optimistic message from SQLite: ${oldMessageId} (replaced by server message: ${message.id})`);
+              }
+            }
+          } catch (err) {
+            console.warn(`⚠️ Failed to delete old optimistic message ${oldMessageId} from SQLite:`, err);
+          }
+        })();
       }
     }
   }
