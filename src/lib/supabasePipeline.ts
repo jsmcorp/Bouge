@@ -1723,6 +1723,26 @@ class SupabasePipeline {
         this.log(`[${dbgLabel}] fallbackToOutbox(): waited sqliteReady in ${Date.now()-t0}ms`);
       }
 
+      // Check if message already exists in outbox to prevent duplicates
+      const existingItems = await sqliteService.getOutboxMessages();
+      const alreadyExists = existingItems.some(item => {
+        try {
+          const content = JSON.parse(item.content);
+          // Check by message ID or dedupe_key
+          return (content?.id === message.id) ||
+                 (message.dedupe_key && content?.dedupe_key === message.dedupe_key);
+        } catch {
+          return false;
+        }
+      });
+
+      if (alreadyExists) {
+        this.log(`📦 Message ${message.id} already in outbox, skipping duplicate (dedupe_key=${message.dedupe_key || 'n/a'})`);
+        // Still trigger processing in case it's stuck
+        this.triggerOutboxProcessing('pipeline-fallback');
+        return;
+      }
+
       // Store message in outbox with all original data
       await sqliteService.addToOutbox({
         group_id: message.group_id,
