@@ -218,21 +218,50 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const isNative = Capacitor.isNativePlatform();
       const isSqliteReady = isNative && await sqliteService.isReady();
 
-      // Helper: merge fetched messages with any pending (optimistic) messages to avoid UI "disappearing" on refresh
+      // Helper: merge fetched messages with existing messages to preserve realtime updates
       const mergeWithPending = (incoming: Message[]): Message[] => {
         try {
           const existing = (get().messages || []) as Message[];
-          const pending = existing.filter(m => m.delivery_status !== 'delivered');
-          if (pending.length === 0) return incoming;
-          const seen = new Set(incoming.map(m => m.id));
-          const merged = [...incoming];
-          for (const p of pending) {
-            if (!seen.has(p.id)) merged.push(p);
-          }
+
+          // Create a map of incoming messages by ID for quick lookup
+          const incomingMap = new Map(incoming.map(m => [m.id, m]));
+
+          // Find messages in existing state that are NOT in incoming
+          // These could be:
+          // 1. Optimistic messages still sending (delivery_status !== 'delivered')
+          // 2. Realtime messages that arrived after the fetch started
+          const existingNotInIncoming = existing.filter(m => !incomingMap.has(m.id));
+
+          // Separate into two categories
+          const optimisticMessages = existingNotInIncoming.filter(m => m.delivery_status !== 'delivered');
+          const realtimeMessages = existingNotInIncoming.filter(m => m.delivery_status === 'delivered');
+
+          // For realtime messages, only keep those that are newer than the fetch
+          // We can determine this by checking if their created_at is more recent than any incoming message
+          const newestIncomingTime = incoming.length > 0
+            ? Math.max(...incoming.map(m => new Date(m.created_at).getTime()))
+            : 0;
+
+          const recentRealtimeMessages = realtimeMessages.filter(m => {
+            const msgTime = new Date(m.created_at).getTime();
+            return msgTime > newestIncomingTime;
+          });
+
+          // Merge: incoming + optimistic + recent realtime
+          const merged = [...incoming, ...optimisticMessages, ...recentRealtimeMessages];
+
+          // Deduplicate by ID (shouldn't be necessary but just in case)
+          const uniqueMap = new Map(merged.map(m => [m.id, m]));
+          const uniqueMessages = Array.from(uniqueMap.values());
+
           // Ensure chronological order by created_at
-          merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-          return merged;
-        } catch {
+          uniqueMessages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+          console.log(`🔄 mergeWithPending: incoming=${incoming.length}, existing=${existing.length}, optimistic=${optimisticMessages.length}, realtime=${recentRealtimeMessages.length}, final=${uniqueMessages.length}`);
+
+          return uniqueMessages;
+        } catch (err) {
+          console.error('❌ Error in mergeWithPending:', err);
           return incoming;
         }
       };

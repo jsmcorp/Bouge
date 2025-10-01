@@ -284,8 +284,10 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       // Root message: dedupe by id first, then by dedupe_key
       const existsById = state.messages.some((m: Message) => m.id === message.id);
       let messagesAfter: Message[] = state.messages;
+      let action = '';
 
       if (existsById) {
+        action = 'updated-existing';
         messagesAfter = state.messages.map((m: Message) => (
           m.id === message.id ? { ...m, delivery_status: 'delivered' } : m
         ));
@@ -294,18 +296,22 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           ? state.messages.findIndex((m: Message) => m.dedupe_key && m.dedupe_key === message.dedupe_key)
           : -1;
         if (idxByDedupe !== -1) {
+          action = 'replaced-by-dedupe';
           messagesAfter = state.messages.map((m: Message, idx: number) => (
             idx === idxByDedupe ? { ...message } : m
           ));
         } else {
+          action = 'added-new';
           messagesAfter = [...state.messages, message];
         }
       }
 
+      console.log(`📨 attachMessageToState: action=${action}, id=${message.id}, before=${state.messages.length}, after=${messagesAfter.length}`);
+
       set({ messages: messagesAfter });
       try {
         messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
-        console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert`);
+        console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert (${messagesAfter.length} messages)`);
       } catch (err) {
         console.error('❌ Message cache update failed:', err);
       }
@@ -512,12 +518,22 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}`,
         }, async (payload: any) => {
-          if (localToken !== connectionToken) return; // Ignore stale callbacks
+          if (localToken !== connectionToken) {
+            log(`⚠️ Ignoring stale realtime INSERT (token mismatch)`);
+            return;
+          }
           bumpActivity();
           const row = payload.new as DbMessageRow;
+
+          log(`📨 Realtime INSERT received: id=${row.id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
+
           try {
             const message = await buildMessageFromRow(row);
+            log(`📨 Built message from row: id=${message.id}, delivery_status=${message.delivery_status}`);
+
             attachMessageToState(message);
+            log(`📨 Message attached to state: id=${message.id}`);
+
             // Persist to local storage immediately to avoid disappearing on navigation
             try {
               const { Capacitor } = await import('@capacitor/core');
@@ -537,6 +553,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                     image_url: row.image_url || null,
                     created_at: new Date(row.created_at).getTime(),
                   });
+                  log(`📨 Message persisted to SQLite: id=${row.id}`);
                   try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}
                 }
               }
@@ -544,7 +561,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               console.warn('⚠️ Failed to persist realtime message locally:', persistErr);
             }
           } catch (e) {
-            log('Failed to process message insert: ' + e);
+            log('❌ Failed to process message insert: ' + e);
           }
         });
 
