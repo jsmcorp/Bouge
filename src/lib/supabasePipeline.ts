@@ -508,9 +508,25 @@ class SupabasePipeline {
           const nowSec = Math.floor(Date.now() / 1000);
           const expiresAt = this.cachedSession.session.expires_at;
           if (expiresAt > 0 && expiresAt - nowSec <= 60) {
-            this.log('🏥 Health check: cached session expires soon, needs refresh');
-            this.recordFailure();
-            return false; // Trigger refresh
+            this.log('🏥 Health check: cached session expires soon, attempting proactive refresh');
+
+            // CRITICAL FIX: Actually refresh the session instead of just returning false
+            try {
+              const refreshed = await this.refreshQuickBounded(2000); // 2-second timeout
+              if (refreshed) {
+                this.log('🏥 Health check: proactive refresh successful, client healthy');
+                this.recordSuccess();
+                return true;
+              } else {
+                this.log('🏥 Health check: proactive refresh failed, marking unhealthy');
+                this.recordFailure();
+                return false;
+              }
+            } catch (error) {
+              this.log('🏥 Health check: proactive refresh error:', stringifyError(error));
+              this.recordFailure();
+              return false;
+            }
           }
         }
 
@@ -922,7 +938,47 @@ class SupabasePipeline {
       session,
       timestamp: Date.now()
     };
-    this.log('🔐 Session cache updated');
+
+    // CRITICAL FIX: Also update cached tokens when session is refreshed
+    if (session?.access_token) {
+      this.lastKnownAccessToken = session.access_token;
+    }
+    if (session?.refresh_token) {
+      this.lastKnownRefreshToken = session.refresh_token;
+    }
+    if (session?.user?.id) {
+      this.lastKnownUserId = session.user.id;
+    }
+
+    // CRITICAL FIX: Apply new token to realtime connection to prevent zombie connections
+    // This ensures that when session is refreshed, the realtime WebSocket also gets the fresh token
+    if (session?.access_token) {
+      try {
+        // Invalidate old realtime token to force update
+        const oldToken = this.lastRealtimeAuthToken;
+        this.lastRealtimeAuthToken = null;
+
+        // Apply new token to realtime WebSocket connection (fire-and-forget)
+        // This prevents the "zombie connection" issue where realtime stays connected with expired token
+        this.setRealtimeAuth(session.access_token).then(({ changed }) => {
+          if (changed) {
+            this.log('🔐 Session cache updated: realtime token refreshed (zombie connection prevented)');
+          } else {
+            this.log('🔐 Session cache updated: realtime token unchanged');
+          }
+        }).catch(err => {
+          this.log('⚠️ Failed to update realtime token after session refresh:', stringifyError(err));
+          // Restore old token on failure
+          this.lastRealtimeAuthToken = oldToken;
+        });
+
+        this.log('🔐 Session cache updated (including cached tokens + realtime token update initiated)');
+      } catch (error) {
+        this.log('⚠️ Error updating realtime token:', stringifyError(error));
+      }
+    } else {
+      this.log('🔐 Session cache updated (including cached tokens)');
+    }
   }
 
   /**
@@ -2030,23 +2086,52 @@ class SupabasePipeline {
             this.log(`[#${outboxItem.id}] attempt timeout→backoff`);
           }
 
+          // CRITICAL FIX: Check for 401/JWT expired errors and attempt session refresh
+          let shouldRetryImmediately = false;
+          try {
+            const status = (error as any)?.status ?? (error as any)?.code;
+            const msg = String((error as any)?.message || '');
+            const is401 = status === 401 || status === '401' || /jwt|token|unauthoriz|PGRST301/i.test(msg);
+
+            if (is401) {
+              this.log(`[#${outboxItem.id}] 401/JWT expired detected in outbox processing, attempting session refresh`);
+              const refreshed = await this.refreshQuickBounded(2000); // 2-second timeout
+              if (refreshed) {
+                this.log(`[#${outboxItem.id}] Session refresh successful, will retry immediately`);
+                shouldRetryImmediately = true;
+                // Don't increment retry count for auth failures that we can recover from
+              } else {
+                this.log(`[#${outboxItem.id}] Session refresh failed, will use normal backoff`);
+              }
+            }
+          } catch (refreshError) {
+            this.log(`[#${outboxItem.id}] Session refresh error:`, stringifyError(refreshError));
+          }
+
           if (outboxItem.id !== undefined) {
-            // Update retry count and schedule next retry
-            const newRetryCount = (outboxItem.retry_count || 0) + 1;
-            const maxRetries = 5;
-
-            if (newRetryCount >= maxRetries) {
-              this.log(`🗑️ Outbox message ${outboxItem.id} exceeded max retries, removing`);
-              await sqliteService.removeFromOutbox(outboxItem.id);
-              failedCount++;
-            } else {
-              const backoffMs = 1000 + Math.floor(Math.random() * 2000); // 1–3s short backoff
-              const nextRetryAt = Date.now() + backoffMs;
-
-              await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
-              this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
-              try { this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_BACKOFF_SCHEDULED<${newRetryCount}>` as any); } catch {}
+            if (shouldRetryImmediately) {
+              // Schedule immediate retry (0ms backoff) without incrementing retry count
+              await sqliteService.updateOutboxRetry(outboxItem.id, outboxItem.retry_count || 0, Date.now());
+              this.log(`⚡ Outbox message ${outboxItem.id} scheduled for immediate retry after session refresh`);
               retriedCount++;
+            } else {
+              // Update retry count and schedule next retry
+              const newRetryCount = (outboxItem.retry_count || 0) + 1;
+              const maxRetries = 5;
+
+              if (newRetryCount >= maxRetries) {
+                this.log(`🗑️ Outbox message ${outboxItem.id} exceeded max retries, removing`);
+                await sqliteService.removeFromOutbox(outboxItem.id);
+                failedCount++;
+              } else {
+                const backoffMs = 1000 + Math.floor(Math.random() * 2000); // 1–3s short backoff
+                const nextRetryAt = Date.now() + backoffMs;
+
+                await sqliteService.updateOutboxRetry(outboxItem.id, newRetryCount, nextRetryAt);
+                this.log(`⏰ Outbox message ${outboxItem.id} scheduled for retry ${newRetryCount}/${maxRetries} in ${backoffMs}ms`);
+                try { this.resolveTerminal((JSON.parse(outboxItem.content)||{}).id || String(outboxItem.id), `OUTBOX_BACKOFF_SCHEDULED<${newRetryCount}>` as any); } catch {}
+                retriedCount++;
+              }
             }
           }
         }

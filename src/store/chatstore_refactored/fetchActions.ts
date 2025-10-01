@@ -371,12 +371,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             try {
               const userPromise = supabasePipeline.getUser();
               const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Auth timeout')), 3000)
+                setTimeout(() => reject(new Error('Auth timeout')), 10000) // Increased from 3s to 10s
               );
               const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
               user = data?.user || null;
             } catch (error) {
-              console.warn('⚠️ Could not get current user for poll data, continuing without user context:', error);
+              // Silently continue without user context - this is non-critical for displaying messages
               user = null;
             }
 
