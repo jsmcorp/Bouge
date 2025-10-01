@@ -34,9 +34,9 @@ export class MessageOperations {
     const db = this.dbManager.getConnection();
 
     const sql = `
-      SELECT * FROM messages 
-      WHERE group_id = ? 
-      ORDER BY created_at DESC 
+      SELECT * FROM messages
+      WHERE group_id = ?
+      ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `;
 
@@ -49,13 +49,29 @@ export class MessageOperations {
     const db = this.dbManager.getConnection();
 
     const sql = `
-      SELECT * FROM messages 
-      WHERE group_id = ? 
-      ORDER BY created_at DESC 
+      SELECT * FROM messages
+      WHERE group_id = ?
+      ORDER BY created_at DESC
       LIMIT ?
     `;
 
     const result = await db.query(sql, [groupId, limit]);
+    return result.values || [];
+  }
+
+  // New: efficient pagination by timestamp for lazy-loading older messages
+  public async getMessagesBefore(groupId: string, beforeTimestamp: number, limit = 30): Promise<LocalMessage[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `
+      SELECT * FROM messages
+      WHERE group_id = ? AND created_at < ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `;
+
+    const result = await db.query(sql, [groupId, beforeTimestamp, limit]);
     return result.values || [];
   }
 

@@ -7,9 +7,16 @@ import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
 import { structureMessagesWithReplies } from './utils';
 
+
+// Throttle duplicate fetches for the same group within a short window
+const FETCH_THROTTLE_WINDOW_MS = 800;
+const lastFetchStartAt: Record<string, number> = {};
+
 export interface FetchActions {
   fetchGroups: () => Promise<void>;
   fetchMessages: (groupId: string) => Promise<void>;
+  // New: lazy-load older messages when scrolling up
+  loadOlderMessages: (groupId: string, pageSize?: number) => Promise<number>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
   preloadTopGroupMessages: () => Promise<void>;
@@ -177,9 +184,35 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
     }
   },
 
+
   fetchMessages: async (groupId: string) => {
     try {
       console.log('🔄 Fetching messages for group:', groupId);
+
+      // Throttle duplicate fetches for the same group
+      const now = Date.now();
+      const lastStart = lastFetchStartAt[groupId] || 0;
+      if (now - lastStart < FETCH_THROTTLE_WINDOW_MS) {
+        console.log('⏭️ Skipping duplicate fetchMessages for group', groupId);
+        return;
+      }
+      lastFetchStartAt[groupId] = now;
+
+      // Create a fetch token to ignore stale async updates if user switches groups mid-flight
+      const localToken = `${groupId}:${now}:${Math.random().toString(36).slice(2)}`;
+      set({ fetchToken: localToken, currentFetchGroupId: groupId });
+
+      const stillCurrent = () => {
+        const st = get();
+        return st.activeGroup?.id === groupId && st.fetchToken === localToken;
+      };
+      const setSafely = (partial: any) => {
+        if (stillCurrent()) {
+          set(partial);
+        } else {
+          console.log(`⏭️ Skipping stale set for group ${groupId}`);
+        }
+      };
 
       // Check if we're on a native platform with SQLite available
       const isNative = Capacitor.isNativePlatform();
@@ -237,10 +270,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const cachedMessages = messageCache.getCachedMessages(groupId);
       if (cachedMessages && cachedMessages.length > 0) {
         console.log('⚡ INSTANT: Loading messages from in-memory cache');
-        
+
         // Structure messages with nested replies
         const structuredMessages = structureMessagesWithReplies(cachedMessages);
-        
+
         // Extract polls and user votes
         const polls = cachedMessages
           .filter(msg => msg.poll)
@@ -255,14 +288,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         });
 
         // Update UI instantly with cached data, preserving any pending optimistic messages
-        set({ 
-          messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+        setSafely({
+          messages: mergeWithPending(mergePendingReplies(structuredMessages)),
           polls: polls,
           userVotes: userVotesMap
         });
-        
+
         console.log(`⚡ INSTANT: Displayed ${structuredMessages.length} cached messages instantly`);
-        
+
         // Continue with background refresh to ensure data is up to date
         setTimeout(() => {
           console.log('🔄 Background: Refreshing messages from SQLite to ensure cache is current');
@@ -275,7 +308,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (isSqliteReady) {
         const loadingMessage = cachedMessages ? 'Background refresh from SQLite' : 'Loading from SQLite';
         console.log(`📱 ${loadingMessage}`);
-        
+
         try {
           // Load only 10 recent messages for instant UI
           const localMessages = await sqliteService.getRecentMessages(groupId, 10);
@@ -303,12 +336,12 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Get poll messages to fetch poll data
             const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
             const pollMessageIds = pollMessages.map(msg => msg.id);
-            
+
             // Get current user for vote checking (with timeout to prevent hanging)
             let user = null;
             try {
               const userPromise = supabasePipeline.getUser();
-              const timeoutPromise = new Promise((_, reject) => 
+              const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('Auth timeout')), 3000)
               );
               const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
@@ -317,7 +350,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               console.warn('⚠️ Could not get current user for poll data, continuing without user context:', error);
               user = null;
             }
-            
+
             // Fetch poll data for poll messages
             let pollsData: any[] = [];
             let pollVotesData: any[] = [];
@@ -339,7 +372,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
               const pollOptions = JSON.parse(poll.options);
               const voteCounts = new Array(pollOptions.length).fill(0);
-              
+
               pollVotes.forEach(vote => {
                 if (vote.option_index < voteCounts.length) {
                   voteCounts[vote.option_index]++;
@@ -413,19 +446,19 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             // Update cache with fresh SQLite data
             messageCache.setCachedMessages(groupId, messages);
-            
+
             // Update UI with local data (only if we didn't already show cached data)
             if (!cachedMessages) {
-              set({ 
-                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+              setSafely({
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
               });
               console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
             } else {
               // Silently update the UI with fresh data from SQLite
-              set({ 
-                messages: mergeWithPending(mergePendingReplies(structuredMessages)), 
+              setSafely({
+                messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap
               });
@@ -438,7 +471,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               try {
                 console.log('🔄 Loading remaining messages in background...');
                 const allLocalMessages = await sqliteService.getRecentMessages(groupId, 30);
-                
+
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
                   const userIds = [...new Set(allLocalMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
@@ -460,7 +493,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
                   const pollMessages = allLocalMessages.filter(msg => msg.message_type === 'poll');
                   const pollMessageIds = pollMessages.map(msg => msg.id);
-                  
+
                   let user = null;
                   try {
                     const { data } = await supabasePipeline.getUser();
@@ -469,7 +502,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     console.warn('⚠️ Could not get current user for poll data');
                     user = null;
                   }
-                  
+
                   let pollsData: any[] = [];
                   let pollVotesData: any[] = [];
                   if (pollMessageIds.length > 0) {
@@ -489,7 +522,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     const pollVotes = pollVotesData.filter(vote => vote.poll_id === poll.id);
                     const pollOptions = JSON.parse(poll.options);
                     const voteCounts = new Array(pollOptions.length).fill(0);
-                    
+
                     pollVotes.forEach(vote => {
                       if (vote.option_index < voteCounts.length) {
                         voteCounts[vote.option_index]++;
@@ -556,8 +589,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   messageCache.setCachedMessages(groupId, allMessages);
 
                   // Update with all messages silently, preserving any pending optimistic messages
-                  set({ 
-                    messages: mergeWithPending(mergePendingReplies(allStructuredMessages)), 
+                  setSafely({
+                    messages: mergeWithPending(mergePendingReplies(allStructuredMessages)),
                     polls: allPolls,
                     userVotes: allUserVotesMap
                   });
@@ -575,7 +608,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // If we've already loaded data from cache or local storage, don't show loading indicator
       if (!cachedMessages && !localDataLoaded) {
-        set({ isLoading: true });
+        setSafely({ isLoading: true });
       }
 
       // Check network status
@@ -586,7 +619,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (!isOnline) {
         console.log('📵 Offline and no local data available');
         if (!cachedMessages && !localDataLoaded) {
-          set({ messages: [], isLoading: false });
+          setSafely({ messages: [], isLoading: false });
         }
         return;
       }
@@ -750,13 +783,133 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       // Only update UI with Supabase data if we didn't already load from cache or local storage
       if (!cachedMessages && !localDataLoaded) {
-        set({ messages: structuredMessages, isLoading: false });
+        setSafely({ messages: structuredMessages, isLoading: false });
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
-      set({ isLoading: false });
+      { const st = get(); if (st.activeGroup?.id === groupId && st.currentFetchGroupId === groupId && st.fetchToken) { set({ isLoading: false }); } }
     }
   },
+
+  // Lazy-load older messages for infinite scroll
+  	loadOlderMessages: async (groupId: string, pageSize: number = 30) => {
+  	  try {
+  	    const state = get();
+  	    if (state.isLoadingOlder || !state.activeGroup || state.activeGroup.id !== groupId) {
+  	      return 0;
+  	    }
+  	    const current = state.messages || [];
+  	    if (current.length === 0) return 0;
+
+  	    set({ isLoadingOlder: true });
+
+  	    const oldestIso = current[0].created_at;
+  	    const oldestMs = new Date(oldestIso).getTime();
+
+  	    let combined: Message[] = [];
+
+  	    // Try local first (SQLite)
+  	    const isNative = Capacitor.isNativePlatform();
+  	    const isSqliteReady = isNative && await sqliteService.isReady();
+  	    if (isSqliteReady) {
+  	      try {
+  	        const localOlder = await (sqliteService as any).getMessagesBefore(groupId, oldestMs, pageSize);
+  	        if (localOlder && localOlder.length > 0) {
+  	          // Batch load authors
+  	          const userIds: string[] = Array.from(
+	            new Set<string>(
+	              localOlder
+	                .filter((m: any) => !m.is_ghost)
+	                .map((m: any) => String(m.user_id))
+	            )
+	          );
+  	          const userCache = new Map();
+  	          for (const uid of userIds) {
+  	            try {
+  	              const u = await sqliteService.getUser(uid);
+  	              if (u) userCache.set(uid, { display_name: u.display_name, avatar_url: u.avatar_url || null });
+  	            } catch {}
+  	          }
+
+  	          const mapped: Message[] = localOlder.map((msg: any) => ({
+  	            id: msg.id,
+  	            group_id: msg.group_id,
+  	            user_id: msg.user_id,
+  	            content: msg.content,
+  	            is_ghost: msg.is_ghost === 1,
+  	            message_type: msg.message_type,
+  	            category: msg.category,
+  	            parent_id: msg.parent_id,
+  	            image_url: msg.image_url,
+  	            created_at: new Date(msg.created_at).toISOString(),
+  	            author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+  	            reply_count: 0,
+  	            replies: [],
+  	            delivery_status: 'delivered',
+  	            reactions: [],
+  	          }));
+  	          combined = combined.concat(mapped);
+  	        }
+  	      } catch (e) {
+  	        console.warn('⚠️ loadOlderMessages: local fetch failed', e);
+  	      }
+  	    }
+
+  	    // If local fewer than pageSize, fetch remainder from remote
+  	    if (combined.length < pageSize) {
+  	      try {
+  	        const client = await supabasePipeline.getDirectClient();
+  	        const limit = pageSize - combined.length;
+  	        const { data, error } = await client
+  	          .from('messages')
+  	          .select(`*, users!messages_user_id_fkey(display_name, avatar_url, created_at)`)
+  	          .eq('group_id', groupId)
+  	          .lt('created_at', oldestIso)
+  	          .order('created_at', { ascending: false })
+  	          .limit(limit);
+  	        if (!error && data && data.length > 0) {
+  	          // Map remote rows to Message
+  	          const rows = data.slice().reverse();
+  	          const mapped: Message[] = rows.map((msg: any) => ({
+  	            ...msg,
+  	            author: msg.is_ghost ? undefined : msg.users,
+  	            reply_count: 0,
+  	            replies: [],
+  	            delivery_status: 'delivered' as const,
+  	          }));
+  	          combined = combined.concat(mapped);
+
+  	          // Persist to SQLite (best-effort)
+  	          if (isSqliteReady) {
+  	            try { await sqliteService.syncMessagesFromRemote(groupId, data); } catch (e) {}
+  	          }
+  	        }
+  	      } catch (e) {
+  	        console.warn('⚠️ loadOlderMessages: remote fetch failed', e);
+  	      }
+  	    }
+
+  	    if (combined.length === 0) {
+  	      set({ isLoadingOlder: false, hasMoreOlder: false });
+  	      return 0;
+  	    }
+
+  	    // Merge and dedupe, keep ascending chronological order
+  	    const existing: Message[] = get().messages || [];
+  	    const seen = new Set(existing.map(m => m.id));
+  	    const newOnes = combined.filter(m => !seen.has(m.id));
+  	    const merged = [...newOnes, ...existing];
+  	    merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  	    set({ messages: merged, isLoadingOlder: false, hasMoreOlder: newOnes.length >= pageSize });
+  	    return newOnes.length;
+  	  } catch (e) {
+  	    console.error('❌ loadOlderMessages failed:', e);
+  	    set({ isLoadingOlder: false });
+  	    return 0;
+  	  }
+  	},
+
+
 
   fetchMessageById: async (messageId: string) => {
     try {

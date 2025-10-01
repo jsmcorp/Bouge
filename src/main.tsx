@@ -10,7 +10,8 @@ import { useChatStore } from '@/store/chatstore_refactored';
 import { whatsappConnection } from '@/lib/whatsappStyleConnection';
 import { mobileLogger } from '@/lib/mobileLogger';
 // Import connectivity tester for debugging
-import '@/lib/connectivityTest';
+// Dev-only connectivity tester to avoid extra startup cost in production
+// Moved to dynamic import inside the async IIFE below
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -23,6 +24,12 @@ createRoot(document.getElementById('root')!).render(
 	try {
 		initPush();
 	} catch {}
+
+		// Dev-only: load connectivity tester
+		if (import.meta.env.DEV) {
+			try { await import('@/lib/connectivityTest'); } catch {}
+		}
+
 
 	// Initialize WhatsApp-style connection system
 	mobileLogger.log('info', 'general', 'Initializing WhatsApp-style connection system');
@@ -78,7 +85,7 @@ createRoot(document.getElementById('root')!).render(
 	let lastResumeTime = 0;
 	let resumeTimeout: NodeJS.Timeout | null = null;
 
-	const handleAppResume = (source: string) => {
+	const handleAppResume = async (source: string) => {
 		const now = Date.now();
 		const timeSinceLastResume = now - lastResumeTime;
 
@@ -100,6 +107,15 @@ createRoot(document.getElementById('root')!).render(
 		}
 
 		lastResumeTime = now;
+
+		// Trigger outbox processing and light session recovery on app resume
+		try {
+			const { supabasePipeline } = await import('@/lib/supabasePipeline');
+			await supabasePipeline.onAppResume();
+			mobileLogger.log('info', 'general', 'Triggered outbox processing on app resume');
+		} catch (error) {
+			mobileLogger.log('error', 'general', 'Failed to trigger outbox on app resume', { error });
+		}
 
 		// The WhatsApp-style connection system will handle the reconnection
 		// We just need to mark activity and let the device lock detection handle it

@@ -2,7 +2,7 @@ import { deviceLockDetection, UnlockEvent } from './deviceLockDetection';
 
 /**
  * WhatsApp-Style Connection Manager
- * Provides seamless reconnection experience with user-visible status indicators
+ * Provides seamless reconnection experience without any user-visible status indicators
  */
 
 export type ConnectionState = 
@@ -38,7 +38,7 @@ type ReconnectionCompleteCallback = (metrics: ReconnectionMetrics) => void;
 class WhatsAppStyleConnectionManager {
   private currentStatus: ConnectionStatus = {
     state: 'disconnected',
-    message: 'Initializing...',
+    message: '',
     timestamp: Date.now(),
     isUserVisible: false,
   };
@@ -159,29 +159,16 @@ class WhatsAppStyleConnectionManager {
   /**
    * Set connection state manually (for integration with existing systems)
    */
-  public setConnectionState(state: ConnectionState, message?: string): void {
+  public setConnectionState(state: ConnectionState, _message?: string): void {
     this.updateStatus({
       state,
-      message: message || this.getDefaultMessage(state),
+      message: '',
       timestamp: Date.now(),
-      isUserVisible: state !== 'connected',
+      isUserVisible: false,
     });
   }
 
-  /**
-   * Get default message for connection state
-   */
-  private getDefaultMessage(state: ConnectionState): string {
-    switch (state) {
-      case 'connected': return 'Connected';
-      case 'connecting': return 'Connecting...';
-      case 'reconnecting': return 'Reconnecting...';
-      case 'disconnected': return 'Disconnected';
-      case 'validating': return 'Validating...';
-      case 'syncing': return 'Syncing...';
-      default: return 'Unknown';
-    }
-  }
+
 
   /**
    * Cleanup resources

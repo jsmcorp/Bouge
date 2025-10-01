@@ -8,7 +8,7 @@ import { toast } from 'sonner';
 import { useAuthStore } from '@/store/authStore';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, fetchMessages } = useChatStore();
+  const { messages, typingUsers, activeGroup, fetchMessages, loadOlderMessages, isLoadingOlder, hasMoreOlder } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -18,12 +18,47 @@ export function MessageList() {
   const touchStartY = useRef(0);
   const scrollTop = useRef(0);
 
+  const loadingOlderRef = useRef(false);
+
+  // Attach scroll listener to the ScrollArea viewport for lazy loading older messages
+  useEffect(() => {
+    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+    if (!viewport) return;
+
+    const onScroll = async () => {
+      if (!activeGroup || loadingOlderRef.current) return;
+      // Near top threshold
+      if (viewport.scrollTop <= 64 && hasMoreOlder && !isLoadingOlder) {
+        loadingOlderRef.current = true;
+        const prevHeight = viewport.scrollHeight;
+        const prevTop = viewport.scrollTop;
+        try {
+          const loaded = await loadOlderMessages(activeGroup.id, 30);
+          if (loaded > 0) {
+            // Preserve scroll position to avoid jump after prepending
+            requestAnimationFrame(() => {
+              const newHeight = viewport.scrollHeight;
+              viewport.scrollTop = newHeight - prevHeight + prevTop;
+            });
+          }
+        } catch (e) {
+          console.warn('Lazy-load older messages failed', e);
+        } finally {
+          loadingOlderRef.current = false;
+        }
+      }
+    };
+
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    return () => viewport.removeEventListener('scroll', onScroll);
+  }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages]);
+
   // Auto-scroll to bottom when new messages arrive - instant scroll
   useEffect(() => {
     if (messagesEndRef.current && messages.length > 0) {
       // Use setTimeout to ensure DOM is updated
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ 
+        messagesEndRef.current?.scrollIntoView({
           behavior: 'instant',
           block: 'end'
         });
@@ -46,7 +81,7 @@ export function MessageList() {
     if (scrollTop.current === 0) {
       const touchY = e.touches[0].clientY;
       const distance = touchY - touchStartY.current;
-      
+
       if (distance > 5) {
         setIsPulling(true);
         setPullDistance(Math.min(distance * 0.5, 80)); // Limit max pull distance
@@ -60,7 +95,7 @@ export function MessageList() {
       // Trigger refresh
       setIsRefreshing(true);
       setPullDistance(60); // Keep showing the refresh indicator
-      
+
       try {
         await fetchMessages(activeGroup.id);
         toast.success('Messages refreshed');
@@ -98,8 +133,8 @@ export function MessageList() {
   }
 
   return (
-    <ScrollArea 
-      className="h-full overflow-x-hidden" 
+    <ScrollArea
+      className="h-full overflow-x-hidden"
       ref={scrollAreaRef}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
@@ -107,17 +142,17 @@ export function MessageList() {
     >
       {/* Pull-to-refresh indicator */}
       {(isPulling || isRefreshing) && (
-        <div 
+        <div
           className="flex items-center justify-center py-2 sm:py-4 transition-transform"
-          style={{ 
+          style={{
             transform: `translateY(${pullDistance}px)`,
             height: pullDistance > 0 ? `${pullDistance}px` : '0px'
           }}
         >
-          <RefreshCw 
-            className={`w-5 h-5 sm:w-6 sm:h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`} 
-            style={{ 
-              transform: `rotate(${pullDistance * 3}deg)` 
+          <RefreshCw
+            className={`w-5 h-5 sm:w-6 sm:h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`}
+            style={{
+              transform: `rotate(${pullDistance * 3}deg)`
             }}
           />
           <span className="ml-2 text-xs sm:text-sm font-medium">

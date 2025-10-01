@@ -105,6 +105,9 @@ export interface ChatState {
   mainChatGhostMode: boolean;
   threadGhostMode: boolean;
   isLoading: boolean;
+  // Lazy-load state
+  isLoadingOlder: boolean;
+  hasMoreOlder: boolean;
   replyingTo: Message | null;
   activeThread: Message | null;
   threadReplies: Message[];
@@ -135,4 +138,7 @@ export interface ChatState {
   writesBlocked?: boolean;
   realtimeDegraded?: boolean;
   pollFallbackTimer?: NodeJS.Timeout | null;
+  // Fetch coordination to prevent cross-group contamination
+  fetchToken?: string | null;
+  currentFetchGroupId?: string | null;
 }

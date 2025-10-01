@@ -65,7 +65,11 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       groupMedia: [],
       connectionStatus: 'disconnected',
       isReconnecting: false,
-      reconnectAttempt: 0
+      reconnectAttempt: 0,
+      // Invalidate any in-flight fetches for previous group
+      fetchToken: null,
+      currentFetchGroupId: null,
+      isLoading: false
     });
 
     // Setup new subscription and fetch polls

@@ -16,24 +16,67 @@ function truncateToken(token: string): string {
 	return token.length <= 8 ? token : `${token.slice(0, 6)}…`;
 }
 
+// Background upsert manager: serialize per-token, 5s per attempt, jittered backoff up to 60s
+const inflightUpserts = new Map<string, Promise<void>>();
+const successfulTokens = new Set<string>();
+const backoffByToken = new Map<string, number>();
+
+async function backgroundUpsertDeviceToken(token: string): Promise<void> {
+	if (!token) return;
+	if (successfulTokens.has(token)) return;
+	if (inflightUpserts.has(token)) return; // coalesce in-flight
+
+	const attempt = async (): Promise<void> => {
+		const startedAt = Date.now();
+		try {
+			const { user } = useAuthStore.getState();
+			if (!user) return;
+			const platform = Capacitor.getPlatform() === 'android' ? 'android' : (Capacitor.getPlatform() === 'ios' ? 'ios' : 'web');
+			const appVersion = (window as any).APP_VERSION || 'web';
+
+			// Per-attempt 5s timeout
+			const timeoutMs = 5000;
+			const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('device-token upsert timeout')), timeoutMs));
+			const exec = supabasePipeline.upsertDeviceToken({
+				user_id: user.id,
+				platform: platform === 'web' ? 'android' : platform,
+				token,
+				app_version: appVersion,
+				active: true,
+				last_seen_at: new Date().toISOString(),
+			});
+			await Promise.race([exec, timeout]);
+			console.log(`[push] ${new Date().toISOString()} token:registered ${platform} ${truncateToken(token)}`);
+			successfulTokens.add(token);
+		} catch (e:any) {
+			const elapsed = Date.now() - startedAt;
+			console.warn(`[push] ${new Date().toISOString()} upsert device token failed after ${elapsed}ms:`, e?.message || e);
+			// Schedule retry with jittered exponential backoff up to 60s
+			const prev = backoffByToken.get(token) || 2000;
+			const next = Math.min(prev * 2, 60000);
+			const jitter = Math.floor(Math.random() * 500);
+			backoffByToken.set(token, next);
+			setTimeout(() => {
+				inflightUpserts.delete(token);
+				backgroundUpsertDeviceToken(token).catch(() => {});
+			}, next + jitter);
+			return;
+		}
+		finally {
+			// If succeeded, clear inflight
+			if (successfulTokens.has(token)) {
+				inflightUpserts.delete(token);
+			}
+		}
+	};
+
+	const p = attempt();
+	inflightUpserts.set(token, p);
+}
+
+// Maintain public interface, but make it non-blocking
 async function upsertDeviceToken(token: string): Promise<void> {
-	try {
-		const { user } = useAuthStore.getState();
-		if (!user) return;
-		const platform = Capacitor.getPlatform() === 'android' ? 'android' : (Capacitor.getPlatform() === 'ios' ? 'ios' : 'web');
-		const appVersion = (window as any).APP_VERSION || 'web';
-		await supabasePipeline.upsertDeviceToken({
-			user_id: user.id,
-			platform: platform === 'web' ? 'android' : platform, // default to android for web dev
-			token,
-			app_version: appVersion,
-			active: true,
-			last_seen_at: new Date().toISOString(),
-		});
-		console.log(`[push] token:registered ${platform} ${truncateToken(token)}`);
-	} catch (e) {
-		console.warn('Push token upsert failed:', e);
-	}
+	try { backgroundUpsertDeviceToken(token); } catch {}
 }
 
 export async function initPush(): Promise<void> {
@@ -82,7 +125,8 @@ export async function initPush(): Promise<void> {
 						currentToken = (token as any)?.value || (token as any)?.token || '';
 						if (currentToken) {
 							console.log('[push] token received(core):', truncateToken(currentToken));
-							await upsertDeviceToken(currentToken);
+							// Fire-and-forget; do not block UI or send pipeline
+						backgroundUpsertDeviceToken(currentToken);
 						}
 					} catch (e) {
 						console.warn('[push] registration listener upsert failed', e);
@@ -102,7 +146,7 @@ export async function initPush(): Promise<void> {
 				currentToken = tokenResult.token;
 				console.log('[push] token received(firebase):', truncateToken(currentToken || ''));
 				if (typeof currentToken === 'string') {
-					await upsertDeviceToken(currentToken);
+					backgroundUpsertDeviceToken(currentToken);
 				}
 			} else {
 				console.log('[push] FirebaseMessaging.getToken returned empty');
@@ -114,9 +158,20 @@ export async function initPush(): Promise<void> {
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
 			currentToken = event.token;
 			if (typeof currentToken === 'string') {
-				await upsertDeviceToken(currentToken);
+				backgroundUpsertDeviceToken(currentToken);
 			}
 		});
+
+
+			// App resume should nudge outbox processing (non-blocking)
+			try {
+				App.addListener('resume', async () => {
+					try {
+						const { triggerOutboxProcessing } = await import('@/store/chatstore_refactored/offlineActions');
+						triggerOutboxProcessing('app-resume', 'high');
+					} catch {}
+				});
+			} catch {}
 
 		FirebaseMessaging.addListener('notificationReceived', async (event: any) => {
 			try {
@@ -168,7 +223,7 @@ export async function initPush(): Promise<void> {
  			 if (session?.user?.id && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION')) {
     		// If we already have a token, upsert it
    		 if (currentToken) {
- 		 await upsertDeviceToken(currentToken);
+ 		 backgroundUpsertDeviceToken(currentToken);
     	} else {
       // Try to fetch a new token now that we are authenticated
       	const tokenResult = await FirebaseMessaging.getToken();
@@ -176,7 +231,7 @@ export async function initPush(): Promise<void> {
         currentToken = tokenResult.token;
         if (currentToken) {
           console.log('[push] token received(after-auth):', truncateToken(currentToken));
-          await upsertDeviceToken(currentToken);
+          backgroundUpsertDeviceToken(currentToken);
         }
       }
     }

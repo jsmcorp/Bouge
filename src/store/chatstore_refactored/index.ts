@@ -65,6 +65,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     mainChatGhostMode: true,
     threadGhostMode: true,
     isLoading: false,
+    // Lazy-load
+    isLoadingOlder: false,
+    hasMoreOlder: true,
     replyingTo: null,
     activeThread: null,
     threadReplies: [],
@@ -92,7 +95,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     writesBlocked: false,
     realtimeDegraded: false,
     pollFallbackTimer: null,
-    
+    fetchToken: null,
+    currentFetchGroupId: null,
+
     // Combine all actions
     ...stateActions,
     ...fileActions,
