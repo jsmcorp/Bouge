@@ -1071,13 +1071,12 @@ class SupabasePipeline {
 
       if (groupError) return { data: null, error: groupError };
 
-      // Then add user as member
+      // Then add user as member (no role column in database)
       const { error: memberError } = await client
         .from('group_members')
         .insert({
           group_id: group.id,
-          user_id: userId,
-          role: 'participant'
+          user_id: userId
         });
 
       if (memberError) return { data: null, error: memberError };

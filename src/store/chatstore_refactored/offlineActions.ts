@@ -287,7 +287,7 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
           await sqliteService.saveGroupMember({
             group_id: groupId,
             user_id: member.user_id,
-            role: member.role || 'participant',
+            role: 'participant', // Default role for local storage (Supabase doesn't have role column)
             joined_at: new Date(member.joined_at).getTime()
           });
         }
