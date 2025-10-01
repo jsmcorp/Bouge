@@ -123,8 +123,8 @@ class SupabasePipeline {
   private failureCount = 0;
   private lastFailureAt = 0;
   private circuitBreakerOpen = false;
-  private readonly maxFailures = 5;
-  private readonly circuitBreakerResetMs = 60000; // 1 minute
+  private readonly maxFailures = 10; // Increased from 5 to reduce false positives
+  private readonly circuitBreakerResetMs = 30000; // 30 seconds (reduced from 60s)
 
   constructor() {
     this.log('🚀 Pipeline initialized');
@@ -374,28 +374,56 @@ class SupabasePipeline {
 
   /**
    * Get the current client instance, initializing if needed
+   * NON-BLOCKING: Returns client immediately, refreshes session in background
    */
   private async getClient(): Promise<any> {
     this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise}`);
     if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
-    // Less aggressive corruption check - only check every 30 seconds and require multiple failures
+
+    // NON-BLOCKING session refresh: Start in background, don't wait for it
+    // This prevents 10-second delays when session needs refreshing after idle
     try {
       const now = Date.now();
-      if (now - this.lastCorruptionCheckAt > 30000) { // Increased from 10s to 30s
+      if (now - this.lastCorruptionCheckAt > 30000) {
         this.lastCorruptionCheckAt = now;
-        const corrupted = await this.isClientCorrupted();
-        if (corrupted) {
-          // Only recreate if we've had multiple consecutive failures
-          if (this.failureCount >= 3) {
-            this.log('🧪 getClient(): corruption detected with multiple failures → hard recreate');
-            await this.ensureRecreated('getClient-autoheal');
-          } else {
-            this.log('🧪 getClient(): corruption detected but failure count low, continuing');
-          }
-        }
+        // Fire-and-forget: Start session refresh in background
+        this.refreshSessionInBackground().catch(err => {
+          this.log('🔄 Background session refresh failed:', err);
+        });
       }
     } catch {}
+
+    // Return client immediately without waiting for session refresh
     return this.client!;
+  }
+
+  /**
+   * Non-blocking session refresh - runs in background
+   */
+  private async refreshSessionInBackground(): Promise<void> {
+    try {
+      if (!this.client?.auth) return;
+
+      // If we have cached tokens, try to refresh with them
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔄 Starting background session refresh with cached tokens');
+        const { data, error } = await this.client.auth.setSession({
+          access_token: this.lastKnownAccessToken,
+          refresh_token: this.lastKnownRefreshToken
+        });
+
+        if (!error && data?.session) {
+          this.log('✅ Background session refresh successful');
+          // Update cached tokens
+          this.lastKnownAccessToken = data.session.access_token;
+          this.lastKnownRefreshToken = data.session.refresh_token;
+        } else {
+          this.log('⚠️ Background session refresh failed, will retry on next attempt');
+        }
+      }
+    } catch (error) {
+      this.log('❌ Background session refresh error:', error);
+    }
   }
 
 
@@ -1487,16 +1515,16 @@ class SupabasePipeline {
 
         const tokenSnap = this.getTokenSnapshot();
         const fastPathNoAuth = !!tokenSnap && tokenSnap === this.lastRealtimeAuthToken;
-        this.log(`[${dbgLabel}] pre-network: acquiring ${fastPathNoAuth ? 'direct' : 'full'} client (≤5000ms)`);
+        this.log(`[${dbgLabel}] pre-network: acquiring ${fastPathNoAuth ? 'direct' : 'full'} client (≤10000ms)`);
         let client: any;
         try {
           const clientPromise = fastPathNoAuth ? this.getDirectClient() : this.getClient();
-          const preNetworkTimeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Direct send timeout after 5000ms')), 5000));
+          const preNetworkTimeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Direct send timeout after 10000ms')), 10000));
           client = await Promise.race([clientPromise, preNetworkTimeout]);
         } catch (e: any) {
           const emsg = String(e?.message || e || '');
-          if (emsg.includes('Direct send timeout after 5000ms')) {
-            this.log(`[${dbgLabel}] Direct send timeout after 5000ms → enqueued to outbox`);
+          if (emsg.includes('Direct send timeout after 10000ms')) {
+            this.log(`[${dbgLabel}] Direct send timeout after 10000ms → enqueued to outbox`);
             await this.fallbackToOutbox(message);
             const queuedError: any = new Error(`Message ${message.id} queued to outbox (pre-network timeout)`);
             queuedError.code = 'QUEUED_OUTBOX';
@@ -1578,8 +1606,8 @@ class SupabasePipeline {
         lastError = error;
         const emsg = String((error as any)?.message || error || '');
         this.log(`❌ Direct send attempt ${attempt} failed - message ${message.id}:`, stringifyError(error));
-        if (emsg.includes('Direct send timeout after 5000ms')) {
-          this.log(`[${dbgLabel}] Direct send timeout after 5000ms → enqueued to outbox`);
+        if (emsg.includes('Direct send timeout after 10000ms')) {
+          this.log(`[${dbgLabel}] Direct send timeout after 10000ms → enqueued to outbox`);
         }
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
 
@@ -2223,6 +2251,13 @@ class SupabasePipeline {
    */
   public async onAppResume(): Promise<void> {
     this.log('📱 App resume detected - checking session state');
+
+    // Reset circuit breaker on app resume to allow fresh attempts
+    if (this.circuitBreakerOpen || this.failureCount > 0) {
+      this.log('🔄 Circuit breaker reset on app resume');
+      this.circuitBreakerOpen = false;
+      this.failureCount = 0;
+    }
 
     try {
       // Quick session recovery using cached tokens
