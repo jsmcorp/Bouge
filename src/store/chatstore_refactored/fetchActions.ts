@@ -339,8 +339,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         console.log(`📱 ${loadingMessage}`);
 
         try {
-          // Load only 10 recent messages for instant UI
-          const localMessages = await sqliteService.getRecentMessages(groupId, 10);
+          // Load 20 recent messages for instant UI (increased from 10 for better UX)
+          const localMessages = await sqliteService.getRecentMessages(groupId, 20);
 
           if (localMessages && localMessages.length > 0) {
             // Get all unique user IDs first to batch load users
@@ -481,7 +481,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
-                userVotes: userVotesMap
+                userVotes: userVotesMap,
+                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
               });
               console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
             } else {
@@ -489,17 +490,18 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
-                userVotes: userVotesMap
+                userVotes: userVotesMap,
+                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
               });
               console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite`);
             }
             localDataLoaded = true;
 
-            // Load remaining messages in background
+            // Load remaining messages in background (increased to 50 for better history)
             setTimeout(async () => {
               try {
                 console.log('🔄 Loading remaining messages in background...');
-                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 30);
+                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 50);
 
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
@@ -621,7 +623,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   setSafely({
                     messages: mergeWithPending(mergePendingReplies(allStructuredMessages)),
                     polls: allPolls,
-                    userVotes: allUserVotesMap
+                    userVotes: allUserVotesMap,
+                    hasMoreOlder: allMessages.length >= 50 // If we got 50 messages, there might be more
                   });
                   console.log(`🔄 Background loaded ${allStructuredMessages.length} total messages`);
                 }
@@ -644,16 +647,21 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
 
-      // If offline and we couldn't load from cache or local storage, show empty state
+      // If offline, check if we have local data
       if (!isOnline) {
-        console.log('📵 Offline and no local data available');
         if (!cachedMessages && !localDataLoaded) {
+          // No local data available and offline - show empty state
+          console.log('📵 Offline: No local data available for this group');
           setSafely({ messages: [], isLoading: false });
+        } else {
+          // We have local data - we're good to go
+          console.log('📵 Offline: Using local data only');
+          setSafely({ isLoading: false });
         }
         return;
       }
 
-      // If we're online, fetch from Supabase
+      // If we're online, fetch from Supabase (increased limit for better history)
       console.log('🌐 Fetching messages from Supabase...');
       const client = await supabasePipeline.getDirectClient();
       const { data, error } = await client
@@ -665,7 +673,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         `)
         .eq('group_id', groupId)
         .order('created_at', { ascending: false })
-        .limit(30);
+        .limit(50);
 
       if (error) throw error;
 
@@ -810,9 +818,24 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         messageCache.setCachedMessages(groupId, messages);
       }
 
-      // Only update UI with Supabase data if we didn't already load from cache or local storage
-      if (!cachedMessages && !localDataLoaded) {
-        setSafely({ messages: structuredMessages, isLoading: false });
+      // Update UI with Supabase data
+      // If we already loaded from cache/local, merge the Supabase data to ensure we have the latest
+      if (cachedMessages || localDataLoaded) {
+        // We already showed local data, now silently update with Supabase data if it's newer/different
+        console.log('🔄 Background: Updating UI with fresh Supabase data');
+        setSafely({
+          messages: mergeWithPending(mergePendingReplies(structuredMessages)),
+          isLoading: false,
+          hasMoreOlder: messages.length >= 50 // If we got 50 messages, there might be more
+        });
+      } else {
+        // First load from Supabase (no local data was available)
+        console.log('✅ Loaded messages from Supabase (no local data available)');
+        setSafely({
+          messages: structuredMessages,
+          isLoading: false,
+          hasMoreOlder: messages.length >= 50 // If we got 50 messages, there might be more
+        });
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
