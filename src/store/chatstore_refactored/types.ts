@@ -141,4 +141,7 @@ export interface ChatState {
   // Fetch coordination to prevent cross-group contamination
   fetchToken?: string | null;
   currentFetchGroupId?: string | null;
+  // Unread message tracking
+  firstUnreadMessageId?: string | null;
+  unreadCount?: number;
 }

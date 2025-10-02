@@ -214,6 +214,17 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
       // Resume connection
       get().onAppResumeSimplified();
+
+      // Fetch missed messages for all groups in background
+      try {
+        const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+        console.log('[realtime-v2] Fetching missed messages for all groups...');
+        const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
+        const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
+        console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
+      } catch (error) {
+        console.error('[realtime-v2] Error fetching missed messages:', error);
+      }
     } catch (e) {
       console.warn('[realtime-v2] onWake error:', e);
     }

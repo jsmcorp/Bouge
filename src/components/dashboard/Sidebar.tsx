@@ -28,6 +28,7 @@ import { useIsMobile } from '@/hooks/useMediaQuery';
 import { CreateGroupDialog } from '@/components/dashboard/CreateGroupDialog';
 import { JoinGroupDialog } from '@/components/dashboard/JoinGroupDialog';
 import { toast } from 'sonner';
+import { unreadTracker } from '@/lib/unreadTracker';
 
 export function Sidebar() {
   const navigate = useNavigate();
@@ -38,6 +39,7 @@ export function Sidebar() {
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showJoinGroup, setShowJoinGroup] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
 
   const filteredGroups = groups.filter(group =>
     group.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -46,7 +48,7 @@ export function Sidebar() {
   // Preload messages when user is on dashboard and groups are available
   useEffect(() => {
     const isDashboard = location.pathname === '/dashboard';
-    
+
     if (isDashboard && groups.length > 0) {
       // Delay preloading slightly to let the UI settle
       const preloadTimer = setTimeout(() => {
@@ -57,6 +59,28 @@ export function Sidebar() {
       return () => clearTimeout(preloadTimer);
     }
   }, [location.pathname, groups.length, preloadTopGroupMessages]);
+
+  // Fetch unread counts when groups change
+  useEffect(() => {
+    if (groups.length > 0) {
+      unreadTracker.getAllUnreadCounts().then(counts => {
+        setUnreadCounts(counts);
+      });
+    }
+  }, [groups]);
+
+  // Subscribe to unread count updates
+  useEffect(() => {
+    const unsubscribe = unreadTracker.onUnreadCountUpdate((groupId, count) => {
+      setUnreadCounts(prev => {
+        const newCounts = new Map(prev);
+        newCounts.set(groupId, count);
+        return newCounts;
+      });
+    });
+
+    return unsubscribe;
+  }, []);
 
   const handleLogout = async () => {
     try {
@@ -164,6 +188,12 @@ export function Sidebar() {
                       </p>
                     )}
                   </div>
+                  {/* Unread badge */}
+                  {unreadCounts.get(group.id) && unreadCounts.get(group.id)! > 0 && (
+                    <div className="flex-shrink-0 flex items-center justify-center min-w-[20px] h-5 px-1.5 bg-green-500 text-white text-xs font-semibold rounded-full">
+                      {unreadCounts.get(group.id)! > 99 ? '99+' : unreadCounts.get(group.id)}
+                    </div>
+                  )}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button

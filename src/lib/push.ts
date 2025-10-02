@@ -178,6 +178,21 @@ export async function initPush(): Promise<void> {
 				const data = event?.data || {};
 				const reason = data?.type === 'new_message' ? 'data' : 'other';
 				console.log(`[push] wake reason=${reason}`);
+
+				// NEW: Fetch and store message immediately when notification arrives
+				if (data.type === 'new_message' && data.message_id && data.group_id) {
+					console.log(`[push] Fetching message ${data.message_id} in background`);
+					try {
+						const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+						// Fire and forget - don't block notification handling
+						backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id).catch(err => {
+							console.error('[push] Background message fetch failed:', err);
+						});
+					} catch (importErr) {
+						console.error('[push] Failed to import backgroundMessageSync:', importErr);
+					}
+				}
+
 				// Dispatch directly if store is ready; also fire window event to decouple
 				try { useChatStore.getState().onWake?.(reason, data?.group_id); } catch {}
 				window.dispatchEvent(new CustomEvent('push:wakeup', { detail: data }));

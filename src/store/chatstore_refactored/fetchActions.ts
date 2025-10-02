@@ -2,6 +2,7 @@ import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
 import { preloadingService } from '@/lib/preloadingService';
+import { unreadTracker } from '@/lib/unreadTracker';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
@@ -836,6 +837,19 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           isLoading: false,
           hasMoreOlder: messages.length >= 50 // If we got 50 messages, there might be more
         });
+      }
+
+      // Fetch unread tracking data
+      try {
+        const firstUnreadId = await unreadTracker.getFirstUnreadMessageId(groupId);
+        const unreadCount = await unreadTracker.getUnreadCount(groupId);
+        setSafely({
+          firstUnreadMessageId: firstUnreadId,
+          unreadCount: unreadCount
+        });
+        console.log(`📊 Unread tracking: firstUnreadId=${firstUnreadId}, count=${unreadCount}`);
+      } catch (error) {
+        console.error('❌ Error fetching unread tracking data:', error);
       }
     } catch (error) {
       console.error('Error fetching messages:', error);

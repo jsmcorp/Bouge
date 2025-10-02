@@ -1,16 +1,19 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
+import { UnreadMessageSeparator } from '@/components/chat/UnreadMessageSeparator';
 import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder } = useChatStore();
+  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const unreadSeparatorRef = useRef<HTMLDivElement>(null);
+  const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
 
   const loadingOlderRef = useRef(false);
 
@@ -48,9 +51,28 @@ export function MessageList() {
     return () => viewport.removeEventListener('scroll', onScroll);
   }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages]);
 
-  // Auto-scroll to bottom when new messages arrive - instant scroll
+  // Auto-scroll to first unread message on initial load
   useEffect(() => {
-    if (messagesEndRef.current && messages.length > 0) {
+    if (firstUnreadMessageId && !hasScrolledToUnread && messages.length > 0 && unreadSeparatorRef.current) {
+      console.log(`📍 Auto-scrolling to first unread message: ${firstUnreadMessageId}`);
+      setTimeout(() => {
+        unreadSeparatorRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center'
+        });
+        setHasScrolledToUnread(true);
+      }, 300); // Small delay to ensure DOM is fully rendered
+    }
+  }, [firstUnreadMessageId, messages.length, hasScrolledToUnread]);
+
+  // Reset scroll flag when changing groups
+  useEffect(() => {
+    setHasScrolledToUnread(false);
+  }, [activeGroup?.id]);
+
+  // Auto-scroll to bottom when new messages arrive (only if no unread or already scrolled to unread)
+  useEffect(() => {
+    if (messagesEndRef.current && messages.length > 0 && (!firstUnreadMessageId || hasScrolledToUnread)) {
       // Use setTimeout to ensure DOM is updated
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({
@@ -59,7 +81,7 @@ export function MessageList() {
         });
       }, 0);
     }
-  }, [messages, typingUsers]);
+  }, [messages, typingUsers, firstUnreadMessageId, hasScrolledToUnread]);
 
   if (messages.length === 0 && typingUsers.length === 0) {
     return (
@@ -88,11 +110,22 @@ export function MessageList() {
           </div>
         )}
 
-        {messages.map((message) => (
-          <div key={message.id}>
-            <MessageBubble message={message} />
-          </div>
-        ))}
+        {messages.map((message) => {
+          // Check if this is the first unread message
+          const isFirstUnread = message.id === firstUnreadMessageId;
+
+          return (
+            <div key={message.id}>
+              {/* Show unread separator before first unread message */}
+              {isFirstUnread && (
+                <div ref={unreadSeparatorRef}>
+                  <UnreadMessageSeparator />
+                </div>
+              )}
+              <MessageBubble message={message} />
+            </div>
+          );
+        })}
 
         {/* Typing Indicator (hide self) */}
         {typingUsers.filter(u => u.user_id !== user?.id).length > 0 && (

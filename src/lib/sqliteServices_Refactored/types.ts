@@ -83,6 +83,8 @@ export interface LocalGroupMember {
   user_id: string;
   role: 'admin' | 'participant';
   joined_at: number;
+  last_read_at?: number;
+  last_read_message_id?: string | null;
 }
 
 export interface LocalUserPseudonym {
