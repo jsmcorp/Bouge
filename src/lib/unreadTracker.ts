@@ -226,27 +226,58 @@ class UnreadTrackerService {
   }
 
   /**
+   * Manually trigger callbacks for a group
+   * Used when FCM notification arrives and message is stored locally
+   * This updates dashboard badges in real-time
+   */
+  public async triggerCallbacks(groupId: string): Promise<void> {
+    try {
+      // Clear cache to force fresh count
+      this.clearCache(groupId);
+
+      // Get fresh unread count
+      const count = await this.getUnreadCount(groupId);
+
+      // Notify all listeners
+      this.notifyUpdate(groupId, count);
+
+      console.log(`[unread] Triggered callbacks for group ${groupId}, count=${count}`);
+    } catch (error) {
+      console.error('[unread] Error triggering callbacks:', error);
+    }
+  }
+
+  /**
    * Get local unread count from SQLite
    */
   private async getLocalUnreadCount(groupId: string): Promise<number> {
     try {
       const db = sqliteService['dbManager'].getConnection();
       const { data: { user } } = await (await supabasePipeline.getDirectClient()).auth.getUser();
-      
+
       if (!user) return 0;
 
       // Get last_read_at for this user in this group
       const memberResult = await db.query(
-        'SELECT last_read_at FROM group_members WHERE group_id = ? AND user_id = ?',
+        'SELECT last_read_at, joined_at FROM group_members WHERE group_id = ? AND user_id = ?',
         [groupId, user.id]
       );
 
-      const lastReadAt = memberResult.values?.[0]?.last_read_at || 0;
+      if (!memberResult.values || memberResult.values.length === 0) {
+        return 0; // User not a member
+      }
 
-      // Count messages created after last_read_at, excluding user's own messages
+      const lastReadAt = memberResult.values[0].last_read_at || 0;
+      const joinedAt = memberResult.values[0].joined_at || 0;
+
+      // If last_read_at is 0 (never read), use joined_at as the baseline
+      // This ensures only messages AFTER joining are counted as unread
+      const baselineTime = lastReadAt > 0 ? lastReadAt : joinedAt;
+
+      // Count messages created after baseline, excluding user's own messages
       const countResult = await db.query(
         'SELECT COUNT(*) as count FROM messages WHERE group_id = ? AND user_id != ? AND created_at > ?',
-        [groupId, user.id, lastReadAt]
+        [groupId, user.id, baselineTime]
       );
 
       return countResult.values?.[0]?.count || 0;
@@ -263,21 +294,29 @@ class UnreadTrackerService {
     try {
       const db = sqliteService['dbManager'].getConnection();
       const { data: { user } } = await (await supabasePipeline.getDirectClient()).auth.getUser();
-      
+
       if (!user) return null;
 
-      // Get last_read_at
+      // Get last_read_at and joined_at
       const memberResult = await db.query(
-        'SELECT last_read_at FROM group_members WHERE group_id = ? AND user_id = ?',
+        'SELECT last_read_at, joined_at FROM group_members WHERE group_id = ? AND user_id = ?',
         [groupId, user.id]
       );
 
-      const lastReadAt = memberResult.values?.[0]?.last_read_at || 0;
+      if (!memberResult.values || memberResult.values.length === 0) {
+        return null; // User not a member
+      }
 
-      // Get first message after last_read_at
+      const lastReadAt = memberResult.values[0].last_read_at || 0;
+      const joinedAt = memberResult.values[0].joined_at || 0;
+
+      // If last_read_at is 0 (never read), use joined_at as the baseline
+      const baselineTime = lastReadAt > 0 ? lastReadAt : joinedAt;
+
+      // Get first message after baseline, excluding user's own messages
       const messageResult = await db.query(
-        'SELECT id FROM messages WHERE group_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 1',
-        [groupId, lastReadAt]
+        'SELECT id FROM messages WHERE group_id = ? AND user_id != ? AND created_at > ? ORDER BY created_at ASC LIMIT 1',
+        [groupId, user.id, baselineTime]
       );
 
       return messageResult.values?.[0]?.id || null;

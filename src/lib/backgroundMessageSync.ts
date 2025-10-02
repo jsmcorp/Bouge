@@ -17,32 +17,33 @@ class BackgroundMessageSyncService {
   /**
    * Fetch a single message by ID and store it in SQLite
    * Called when FCM notification arrives with message_id
+   * @returns true if message was successfully fetched and stored, false otherwise
    */
-  public async fetchAndStoreMessage(messageId: string, groupId: string): Promise<void> {
+  public async fetchAndStoreMessage(messageId: string, groupId: string): Promise<boolean> {
     // Prevent duplicate fetches
     const key = `${groupId}:${messageId}`;
     if (this.syncInProgress.has(key)) {
       console.log(`[bg-sync] Already fetching message ${messageId}, skipping duplicate`);
-      return;
+      return false;
     }
 
     this.syncInProgress.add(key);
-    
+
     try {
       console.log(`[bg-sync] Fetching message ${messageId} for group ${groupId}`);
-      
+
       // Check if we're on native platform and SQLite is ready
       const isNative = Capacitor.isNativePlatform();
       if (!isNative) {
         console.log('[bg-sync] Not on native platform, skipping SQLite storage');
-        return;
+        return false;
       }
 
       const isSqliteReady = await sqliteService.isReady();
       if (!isSqliteReady) {
         console.warn('[bg-sync] SQLite not ready, queueing message for later');
         this.queueMessage(messageId, groupId);
-        return;
+        return false;
       }
 
       // Fetch message from Supabase
@@ -59,25 +60,36 @@ class BackgroundMessageSyncService {
 
       if (error) {
         console.error(`[bg-sync] Error fetching message ${messageId}:`, error);
-        return;
+        return false;
       }
 
       if (!data) {
         console.warn(`[bg-sync] Message ${messageId} not found`);
-        return;
+        return false;
       }
 
       // Store message in SQLite
       await this.storeMessageInSQLite(data);
-      
+
       // Store reactions if any
       if (data.reactions && Array.isArray(data.reactions)) {
         await this.storeReactions(data.reactions);
       }
 
       console.log(`[bg-sync] ✅ Message ${messageId} stored successfully`);
+
+      // Trigger unread tracker callbacks to update dashboard badges
+      try {
+        const { unreadTracker } = await import('./unreadTracker');
+        await unreadTracker.triggerCallbacks(groupId);
+      } catch (error) {
+        console.warn('[bg-sync] Failed to trigger unread tracker callbacks:', error);
+      }
+
+      return true;
     } catch (error) {
       console.error(`[bg-sync] Failed to fetch and store message ${messageId}:`, error);
+      return false;
     } finally {
       this.syncInProgress.delete(key);
     }

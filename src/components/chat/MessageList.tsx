@@ -8,12 +8,17 @@ import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId } = useChatStore();
+  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId, unreadCount } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+
+  // Debug logging for unread tracking
+  useEffect(() => {
+    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}`);
+  }, [firstUnreadMessageId, unreadCount, messages.length]);
 
   const loadingOlderRef = useRef(false);
 

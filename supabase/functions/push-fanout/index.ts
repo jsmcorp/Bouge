@@ -125,20 +125,23 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 	console.log(JSON.stringify({ tag: 'push-fcm-v1:request', projectId: FCM_PROJECT_ID, endpoint: url, tokenCount: tokens.length, reqId }));
 	const invalid: string[] = [];
 	for (const token of tokens) {
+		// DATA-ONLY payload for foreground notifications
+		// No notification block = Android routes to PushNotifications.pushNotificationReceived
 		const body = {
 			message: {
 				token,
 				data,
-				notification: {
-					title: 'New message',
-					body: 'You have a new message',
-				},
 				android: {
 					priority: 'HIGH',
 				},
 				apns: {
 					headers: { 'apns-priority': '10' },
-					payload: { aps: { sound: 'default' } },
+					payload: {
+						aps: {
+							'content-available': 1,
+							sound: 'default'
+						}
+					},
 				},
 			}
 		};
@@ -163,16 +166,22 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
+	// DATA-ONLY payload for foreground notifications
+	// No notification block = Android routes to PushNotifications.pushNotificationReceived
 	const payload = {
 		registration_ids: tokens,
 		priority: 'high',
 		data,
-		notification: {
-			title: 'New message',
-			body: 'You have a new message',
-		},
 		android: { priority: 'high' },
-		apns: { headers: { 'apns-priority': '10' }, payload: { aps: { sound: 'default' } } },
+		apns: {
+			headers: { 'apns-priority': '10' },
+			payload: {
+				aps: {
+					'content-available': 1,
+					sound: 'default'
+				}
+			}
+		},
 	};
 	const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `key=${FCM_SERVER_KEY}` }, body: JSON.stringify(payload) });
 	if (!res.ok) {

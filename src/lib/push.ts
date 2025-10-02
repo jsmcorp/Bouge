@@ -79,19 +79,77 @@ async function upsertDeviceToken(token: string): Promise<void> {
 	try { backgroundUpsertDeviceToken(token); } catch {}
 }
 
+/**
+ * Shared handler for notification received events
+ * Handles FCM notifications when app is in foreground
+ */
+async function handleNotificationReceived(data: any): Promise<void> {
+	try {
+		const reason = data?.type === 'new_message' ? 'data' : 'other';
+		console.log(`[push] Notification received, reason=${reason}, data:`, data);
+
+		// Fetch and store message immediately when notification arrives
+		if (data.type === 'new_message' && data.message_id && data.group_id) {
+			console.log(`[push] Fetching message ${data.message_id} in background`);
+			try {
+				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+				const success = await backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);
+
+				if (success) {
+					// Update unread count
+					const { unreadTracker } = await import('@/lib/unreadTracker');
+					await unreadTracker.triggerCallbacks(data.group_id);
+
+					// Show in-app notification if not in active chat
+					const activeGroupId = useChatStore.getState().activeGroup?.id;
+					if (activeGroupId !== data.group_id) {
+						// Show toast notification
+						const { toast } = await import('sonner');
+						toast.info(data.group_name || 'New message', {
+							description: data.message_preview || 'Tap to view',
+							duration: 5000,
+							action: {
+								label: 'View',
+								onClick: () => {
+									// Navigate to group
+									window.location.hash = `#/chat/${data.group_id}`;
+								}
+							}
+						});
+					}
+				}
+			} catch (importErr) {
+				console.error('[push] Failed to handle notification:', importErr);
+			}
+		}
+
+		// Dispatch events for backward compatibility
+		try { useChatStore.getState().onWake?.(reason, data?.group_id); } catch {}
+		window.dispatchEvent(new CustomEvent('push:wakeup', { detail: data }));
+	} catch (error) {
+		console.error('[push] Error in handleNotificationReceived:', error);
+	}
+}
+
 export async function initPush(): Promise<void> {
+	console.log('[push] 🚀 initPush() called');
+
 	if (!FEATURES_PUSH.enabled || FEATURES_PUSH.killSwitch) {
-		console.log('Push/resync feature disabled by flag');
+		console.log('[push] ❌ Push/resync feature disabled by flag');
 		return;
 	}
 	if (!Capacitor.isNativePlatform()) {
-		console.log('Push init: non-native platform, skipping FCM/APNs registration');
+		console.log('[push] ❌ Push init: non-native platform, skipping FCM/APNs registration');
 		return;
 	}
 
+	console.log('[push] ✅ Starting push initialization...');
+
 	try {
 		// Dynamic import that Vite can transform to a chunk
+		console.log('[push] 📦 Importing @capacitor-firebase/messaging...');
 		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+		console.log('[push] ✅ FirebaseMessaging imported successfully');
 
 		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
 		// Prefer FirebaseMessaging permission API; if not granted, fallback to Capacitor PushNotifications to prompt/register.
@@ -139,6 +197,33 @@ export async function initPush(): Promise<void> {
 				console.warn('[push] PushNotifications fallback failed', e);
 			}
 		}
+
+		// Register PushNotifications listener as PRIMARY foreground handler
+		// This is the ONLY listener that actually works for FCM foreground notifications on Android
+		try {
+			const { PushNotifications } = await import('@capacitor/push-notifications');
+			console.log('[push] 🎯 Registering PushNotifications.pushNotificationReceived listener (PRIMARY)');
+			(PushNotifications as any).addListener('pushNotificationReceived', async (notification: any) => {
+				console.log('[push] 🔔 PushNotifications.pushNotificationReceived fired!', notification);
+				console.log('[push] 🔔 Raw notification object:', JSON.stringify(notification));
+				try {
+					// Data is in notification.data, NOT notification.notification.data
+					const data = notification?.data || {};
+					console.log('[push] 🔔 Extracted data:', JSON.stringify(data));
+
+					if (!data.type && !data.message_id) {
+						console.warn('[push] ⚠️ Notification missing required fields (type/message_id), treating as generic wake');
+					}
+
+					await handleNotificationReceived(data);
+				} catch (error) {
+					console.error('[push] ❌ Error handling PushNotifications notification:', error);
+				}
+			});
+			console.log('[push] ✅ PushNotifications.pushNotificationReceived listener registered successfully');
+		} catch (e) {
+			console.error('[push] ❌ CRITICAL: Failed to register PushNotifications listener:', e);
+		}
 		// Try to get FCM token via FirebaseMessaging as primary path regardless of permission outcome
 		try {
 			const tokenResult = await FirebaseMessaging.getToken();
@@ -152,9 +237,11 @@ export async function initPush(): Promise<void> {
 				console.log('[push] FirebaseMessaging.getToken returned empty');
 			}
 		} catch (e) {
-			console.warn('[push] FirebaseMessaging.getToken failed', e);
+			console.warn('[push] ⚠️ FirebaseMessaging.getToken failed', e);
 		}
 
+		// Register FirebaseMessaging listeners (FALLBACK - may not work on all Android versions)
+		console.log('[push] 📝 Registering FirebaseMessaging.tokenReceived listener');
 		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
 			currentToken = event.token;
 			if (typeof currentToken === 'string') {
@@ -162,42 +249,28 @@ export async function initPush(): Promise<void> {
 			}
 		});
 
-
-			// App resume should nudge outbox processing (non-blocking)
-			try {
-				App.addListener('resume', async () => {
-					try {
-						const { triggerOutboxProcessing } = await import('@/store/chatstore_refactored/offlineActions');
-						triggerOutboxProcessing('app-resume', 'high');
-					} catch {}
-				});
-			} catch {}
-
+		console.log('[push] 📝 Registering FirebaseMessaging.notificationReceived listener (FALLBACK)');
 		FirebaseMessaging.addListener('notificationReceived', async (event: any) => {
+			console.log('[push] 🔔 FirebaseMessaging.notificationReceived event fired! (FALLBACK)', event);
 			try {
 				const data = event?.data || {};
-				const reason = data?.type === 'new_message' ? 'data' : 'other';
-				console.log(`[push] wake reason=${reason}`);
-
-				// NEW: Fetch and store message immediately when notification arrives
-				if (data.type === 'new_message' && data.message_id && data.group_id) {
-					console.log(`[push] Fetching message ${data.message_id} in background`);
-					try {
-						const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-						// Fire and forget - don't block notification handling
-						backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id).catch(err => {
-							console.error('[push] Background message fetch failed:', err);
-						});
-					} catch (importErr) {
-						console.error('[push] Failed to import backgroundMessageSync:', importErr);
-					}
-				}
-
-				// Dispatch directly if store is ready; also fire window event to decouple
-				try { useChatStore.getState().onWake?.(reason, data?.group_id); } catch {}
-				window.dispatchEvent(new CustomEvent('push:wakeup', { detail: data }));
-			} catch {}
+				console.log('[push] 🔔 FirebaseMessaging extracted data:', JSON.stringify(data));
+				await handleNotificationReceived(data);
+			} catch (error) {
+				console.error('[push] ❌ Error handling FirebaseMessaging notification:', error);
+			}
 		});
+		console.log('[push] ✅ FirebaseMessaging.notificationReceived listener registered (may not fire on Android)');
+
+		// App resume should nudge outbox processing (non-blocking)
+		try {
+			App.addListener('resume', async () => {
+				try {
+					const { triggerOutboxProcessing } = await import('@/store/chatstore_refactored/offlineActions');
+					triggerOutboxProcessing('app-resume', 'high');
+				} catch {}
+			});
+		} catch {}
 
 		// Notification tap (explicit listener provided by plugin)
 		try {
@@ -254,8 +327,10 @@ export async function initPush(): Promise<void> {
 })).data.subscription;
 
 		} catch {}
+		console.log('[push] ✅ Push initialization completed successfully');
 	} catch (e) {
-		console.warn('Push init skipped (plugin missing or error):', e);
+		console.error('[push] ❌ Push init failed (plugin missing or error):', e);
+		console.error('[push] ❌ Error details:', JSON.stringify(e, null, 2));
 	}
 }
 

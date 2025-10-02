@@ -8,6 +8,7 @@ import { resetOutboxProcessingState } from './offlineActions';
 import { Message, Poll, TypingUser } from './types';
 import { webViewLifecycle } from '@/lib/webViewLifecycle';
 import { mobileLogger } from '@/lib/mobileLogger';
+import { unreadTracker } from '@/lib/unreadTracker';
 
 type Author = { display_name: string; avatar_url: string | null };
 
@@ -582,6 +583,21 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               }
             } catch (persistErr) {
               console.warn('⚠️ Failed to persist realtime message locally:', persistErr);
+            }
+
+            // ✅ Update unread count if message is from another user and user is not in this group's chat
+            try {
+              const currentState = get();
+              const isInActiveChat = currentState.activeGroup?.id === row.group_id;
+              const isOwnMessage = row.user_id === user.id;
+
+              if (!isOwnMessage && !isInActiveChat) {
+                // User is not viewing this group, so increment unread count
+                const newCount = await unreadTracker.getUnreadCount(row.group_id);
+                log(`📊 Unread count updated for group ${row.group_id}: ${newCount}`);
+              }
+            } catch (unreadErr) {
+              console.warn('⚠️ Failed to update unread count:', unreadErr);
             }
           } catch (e) {
             log('❌ Failed to process message insert: ' + e);

@@ -31,25 +31,31 @@ CREATE OR REPLACE FUNCTION get_unread_count(
 ) RETURNS integer AS $$
 DECLARE
   v_last_read_at timestamptz;
+  v_joined_at timestamptz;
+  v_baseline_time timestamptz;
   v_unread_count integer;
 BEGIN
-  -- Get the last read timestamp for this user in this group
-  SELECT last_read_at INTO v_last_read_at
+  -- Get the last read timestamp and joined timestamp for this user in this group
+  SELECT last_read_at, joined_at INTO v_last_read_at, v_joined_at
   FROM group_members
   WHERE group_id = p_group_id AND user_id = p_user_id;
-  
+
   -- If no record found, return 0
-  IF v_last_read_at IS NULL THEN
+  IF v_joined_at IS NULL THEN
     RETURN 0;
   END IF;
-  
-  -- Count messages created after last_read_at, excluding user's own messages
+
+  -- If last_read_at is NULL (never read), use joined_at as baseline
+  -- This ensures only messages AFTER joining are counted as unread
+  v_baseline_time := COALESCE(v_last_read_at, v_joined_at);
+
+  -- Count messages created after baseline, excluding user's own messages
   SELECT COUNT(*)::integer INTO v_unread_count
   FROM messages
   WHERE group_id = p_group_id
     AND user_id != p_user_id
-    AND created_at > v_last_read_at;
-  
+    AND created_at > v_baseline_time;
+
   RETURN COALESCE(v_unread_count, 0);
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
@@ -97,26 +103,32 @@ CREATE OR REPLACE FUNCTION get_first_unread_message_id(
 ) RETURNS uuid AS $$
 DECLARE
   v_last_read_at timestamptz;
+  v_joined_at timestamptz;
+  v_baseline_time timestamptz;
   v_first_unread_id uuid;
 BEGIN
-  -- Get the last read timestamp
-  SELECT last_read_at INTO v_last_read_at
+  -- Get the last read timestamp and joined timestamp
+  SELECT last_read_at, joined_at INTO v_last_read_at, v_joined_at
   FROM group_members
   WHERE group_id = p_group_id AND user_id = p_user_id;
-  
+
   -- If no record found, return NULL
-  IF v_last_read_at IS NULL THEN
+  IF v_joined_at IS NULL THEN
     RETURN NULL;
   END IF;
-  
-  -- Get the first message created after last_read_at
+
+  -- If last_read_at is NULL (never read), use joined_at as baseline
+  v_baseline_time := COALESCE(v_last_read_at, v_joined_at);
+
+  -- Get the first message created after baseline, excluding user's own messages
   SELECT id INTO v_first_unread_id
   FROM messages
   WHERE group_id = p_group_id
-    AND created_at > v_last_read_at
+    AND user_id != p_user_id
+    AND created_at > v_baseline_time
   ORDER BY created_at ASC
   LIMIT 1;
-  
+
   RETURN v_first_unread_id;
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;

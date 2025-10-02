@@ -29,6 +29,9 @@ const config: CapacitorConfig = {
     Haptics: {
       /* Optional extra config */
     },
+    PushNotifications: {
+      presentationOptions: ['badge', 'sound', 'alert']
+    },
     CapacitorSQLite: {
       iosDatabaseLocation: 'Library/CapacitorDatabase',
       iosIsEncryption: true,
