@@ -186,28 +186,52 @@ async function upsertDeviceToken(token: string): Promise<void> {
 /**
  * Shared handler for notification received events
  * Handles FCM notifications when app is in foreground
+ *
+ * CRITICAL: This function MUST be bulletproof - any failure should not prevent
+ * the fallback mechanism (onWake) from running. We use multiple try-catch blocks
+ * to ensure onWake() is ALWAYS called, even if direct fetch fails.
  */
 async function handleNotificationReceived(data: any): Promise<void> {
-	try {
-		const reason = data?.type === 'new_message' ? 'data' : 'other';
-		console.log(`[push] Notification received, reason=${reason}, data:`, data);
+	const reason = data?.type === 'new_message' ? 'data' : 'other';
+	console.log(`[push] 🔔 Notification received, reason=${reason}, data:`, data);
 
-		// Fetch and store message immediately when notification arrives
-		if (data.type === 'new_message' && data.message_id && data.group_id) {
-			console.log(`[push] Fetching message ${data.message_id} in background`);
-			try {
-				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-				const success = await backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);
+	// Track if we successfully handled the message
+	let messageHandled = false;
 
-				if (success) {
-					// Update unread count
+	// STEP 1: Try direct fetch with timeout (fast path)
+	if (data.type === 'new_message' && data.message_id && data.group_id) {
+		console.log(`[push] 📥 Attempting direct fetch for message ${data.message_id}`);
+
+		try {
+			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+
+			// Add 15-second timeout to prevent hanging
+			// CRITICAL: Must account for token recovery (3s) + fetch (8s) + buffer (4s) = 15s
+			const timeoutPromise = new Promise<boolean>((_, reject) =>
+				setTimeout(() => reject(new Error('Direct fetch timeout after 15s')), 15000)
+			);
+
+			const fetchPromise = backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);
+
+			const success = await Promise.race([fetchPromise, timeoutPromise]);
+
+			if (success) {
+				console.log(`[push] ✅ Direct fetch succeeded for message ${data.message_id}`);
+				messageHandled = true;
+
+				// Update unread count
+				try {
 					const { unreadTracker } = await import('@/lib/unreadTracker');
 					await unreadTracker.triggerCallbacks(data.group_id);
+					console.log(`[push] 📊 Unread count updated for group ${data.group_id}`);
+				} catch (unreadErr) {
+					console.error('[push] ⚠️ Failed to update unread count (non-fatal):', unreadErr);
+				}
 
-					// Show in-app notification if not in active chat
+				// Show in-app notification if not in active chat
+				try {
 					const activeGroupId = useChatStore.getState().activeGroup?.id;
 					if (activeGroupId !== data.group_id) {
-						// Show toast notification
 						const { toast } = await import('sonner');
 						toast.info(data.group_name || 'New message', {
 							description: data.message_preview || 'Tap to view',
@@ -215,24 +239,54 @@ async function handleNotificationReceived(data: any): Promise<void> {
 							action: {
 								label: 'View',
 								onClick: () => {
-									// Navigate to group
 									window.location.hash = `#/chat/${data.group_id}`;
 								}
 							}
 						});
+						console.log(`[push] 🔔 Toast notification shown for group ${data.group_id}`);
 					}
+				} catch (toastErr) {
+					console.error('[push] ⚠️ Failed to show toast (non-fatal):', toastErr);
 				}
-			} catch (importErr) {
-				console.error('[push] Failed to handle notification:', importErr);
+			} else {
+				console.warn(`[push] ⚠️ Direct fetch returned false for message ${data.message_id}`);
 			}
+		} catch (fetchErr: any) {
+			console.error(`[push] ❌ Direct fetch failed for message ${data.message_id}:`, fetchErr?.message || fetchErr);
 		}
-
-		// Dispatch events for backward compatibility
-		try { useChatStore.getState().onWake?.(reason, data?.group_id); } catch {}
-		window.dispatchEvent(new CustomEvent('push:wakeup', { detail: data }));
-	} catch (error) {
-		console.error('[push] Error in handleNotificationReceived:', error);
 	}
+
+	// STEP 2: ALWAYS trigger fallback mechanism (onWake) - this is CRITICAL
+	// Even if direct fetch succeeded, onWake() provides additional sync and connection management
+	// This ensures messages are NEVER lost, even if direct fetch fails or times out
+	try {
+		console.log(`[push] 🔄 Triggering fallback sync via onWake (messageHandled=${messageHandled})`);
+		await useChatStore.getState().onWake?.(reason, data?.group_id);
+		console.log(`[push] ✅ Fallback sync completed via onWake`);
+	} catch (wakeErr) {
+		console.error('[push] ❌ CRITICAL: onWake failed (this should never happen):', wakeErr);
+
+		// Last resort: Try direct fallback call
+		try {
+			console.log('[push] 🆘 Attempting emergency fallback sync...');
+			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+			if (data.group_id) {
+				await backgroundMessageSync.fetchMissedMessages(data.group_id);
+				console.log('[push] ✅ Emergency fallback sync completed');
+			}
+		} catch (emergencyErr) {
+			console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
+		}
+	}
+
+	// STEP 3: Dispatch custom event for any other listeners
+	try {
+		window.dispatchEvent(new CustomEvent('push:wakeup', { detail: data }));
+	} catch (eventErr) {
+		console.error('[push] ⚠️ Failed to dispatch push:wakeup event (non-fatal):', eventErr);
+	}
+
+	console.log(`[push] 🏁 Notification handling complete for message ${data.message_id || 'unknown'}`);
 }
 
 export async function initPush(): Promise<void> {

@@ -17,6 +17,10 @@ class BackgroundMessageSyncService {
   /**
    * Fetch a single message by ID and store it in SQLite
    * Called when FCM notification arrives with message_id
+   *
+   * CRITICAL: This function has a 8-second timeout to prevent hanging.
+   * If it fails or times out, the caller should trigger fallback sync.
+   *
    * @returns true if message was successfully fetched and stored, false otherwise
    */
   public async fetchAndStoreMessage(messageId: string, groupId: string): Promise<boolean> {
@@ -30,7 +34,8 @@ class BackgroundMessageSyncService {
     this.syncInProgress.add(key);
 
     try {
-      console.log(`[bg-sync] Fetching message ${messageId} for group ${groupId}`);
+      console.log(`[bg-sync] 🚀 Starting fetch for message ${messageId} in group ${groupId}`);
+      const startTime = Date.now();
 
       // Check if we're on native platform and SQLite is ready
       const isNative = Capacitor.isNativePlatform();
@@ -46,9 +51,18 @@ class BackgroundMessageSyncService {
         return false;
       }
 
-      // Fetch message from Supabase
-      const client = await supabasePipeline.getDirectClient();
-      const { data, error } = await client
+      // Fetch message from Supabase with timeout
+      // CRITICAL: Use getClientWithValidToken() to ensure auth token is valid
+      // getDirectClient() skips auth recovery and can return expired tokens
+      const client = await supabasePipeline.getClientWithValidToken();
+
+      // Create timeout promise (8 seconds)
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Fetch timeout after 8s')), 8000)
+      );
+
+      // Create fetch promise
+      const fetchPromise = client
         .from('messages')
         .select(`
           *,
@@ -58,13 +72,88 @@ class BackgroundMessageSyncService {
         .eq('id', messageId)
         .single();
 
+      // Race between fetch and timeout
+      const { data, error } = await Promise.race([fetchPromise, timeoutPromise]) as any;
+
       if (error) {
-        console.error(`[bg-sync] Error fetching message ${messageId}:`, error);
+        const elapsed = Date.now() - startTime;
+        console.error(`[bg-sync] ❌ Error fetching message ${messageId} after ${elapsed}ms:`, {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          hint: error.hint
+        });
+
+        // If message doesn't exist yet (timing issue), retry after delay
+        if (error.code === 'PGRST116' || error.message?.includes('no rows')) {
+          console.log(`[bg-sync] ⏳ Message ${messageId} not found, retrying in 2s...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // Retry once with timeout
+          const retryTimeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Retry timeout after 5s')), 5000)
+          );
+
+          const retryFetchPromise = client
+            .from('messages')
+            .select(`
+              *,
+              reactions(*),
+              users!messages_user_id_fkey(display_name, avatar_url, created_at)
+            `)
+            .eq('id', messageId)
+            .single();
+
+          const { data: retryData, error: retryError } = await Promise.race([
+            retryFetchPromise,
+            retryTimeoutPromise
+          ]) as any;
+
+          if (retryError) {
+            const totalElapsed = Date.now() - startTime;
+            console.error(`[bg-sync] ❌ Retry failed after ${totalElapsed}ms:`, {
+              message: retryError.message,
+              code: retryError.code
+            });
+            return false;
+          }
+
+          if (!retryData) {
+            console.warn(`[bg-sync] ⚠️ Message ${messageId} still not found after retry`);
+            return false;
+          }
+
+          // Use retry data
+          console.log(`[bg-sync] ✅ Message ${messageId} found on retry`);
+
+          // Store message in SQLite
+          await this.storeMessageInSQLite(retryData);
+
+          // Store reactions if any
+          if (retryData.reactions && Array.isArray(retryData.reactions)) {
+            await this.storeReactions(retryData.reactions);
+          }
+
+          const totalElapsed = Date.now() - startTime;
+          console.log(`[bg-sync] ✅ Message ${messageId} stored successfully after ${totalElapsed}ms (with retry)`);
+
+          // Trigger unread tracker callbacks
+          try {
+            const { unreadTracker } = await import('./unreadTracker');
+            await unreadTracker.triggerCallbacks(groupId);
+            console.log(`[bg-sync] 📊 Unread count updated for group ${groupId}`);
+          } catch (error) {
+            console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
+          }
+
+          return true;
+        }
+
         return false;
       }
 
       if (!data) {
-        console.warn(`[bg-sync] Message ${messageId} not found`);
+        console.warn(`[bg-sync] ⚠️ Message ${messageId} not found (no data returned)`);
         return false;
       }
 
@@ -76,19 +165,21 @@ class BackgroundMessageSyncService {
         await this.storeReactions(data.reactions);
       }
 
-      console.log(`[bg-sync] ✅ Message ${messageId} stored successfully`);
+      const elapsed = Date.now() - startTime;
+      console.log(`[bg-sync] ✅ Message ${messageId} stored successfully in ${elapsed}ms`);
 
       // Trigger unread tracker callbacks to update dashboard badges
       try {
         const { unreadTracker } = await import('./unreadTracker');
         await unreadTracker.triggerCallbacks(groupId);
+        console.log(`[bg-sync] 📊 Unread count updated for group ${groupId}`);
       } catch (error) {
-        console.warn('[bg-sync] Failed to trigger unread tracker callbacks:', error);
+        console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
       }
 
       return true;
-    } catch (error) {
-      console.error(`[bg-sync] Failed to fetch and store message ${messageId}:`, error);
+    } catch (error: any) {
+      console.error(`[bg-sync] ❌ Exception in fetchAndStoreMessage for ${messageId}:`, error?.message || error);
       return false;
     } finally {
       this.syncInProgress.delete(key);

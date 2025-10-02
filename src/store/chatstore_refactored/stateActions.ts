@@ -202,14 +202,12 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     try {
       console.log(`[realtime-v2] Wake event: ${reason || 'unknown'}`);
 
-      // If a specific group is mentioned, switch to it
+      // DON'T auto-navigate to group - let user stay on dashboard
+      // Only navigate if user explicitly taps notification (handled by notificationActionPerformed)
+      // This allows dashboard badges to update without disrupting user
       if (groupIdOverride) {
-        const groups = (get() as any).groups || [];
-        const targetGroup = groups.find((g: any) => g.id === groupIdOverride);
-        if (targetGroup) {
-          console.log(`[realtime-v2] Switching to group from wake: ${targetGroup.name}`);
-          (get() as any).setActiveGroup?.(targetGroup);
-        }
+        console.log(`[realtime-v2] 📬 New message in group ${groupIdOverride} - staying on current screen`);
+        // Store the group ID for potential future use, but don't navigate
       }
 
       // Resume connection
@@ -222,6 +220,21 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
         const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
         console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
+
+        // Update unread counts for all groups that received messages
+        if (totalMissed > 0) {
+          try {
+            const { unreadTracker } = await import('@/lib/unreadTracker');
+            for (const [gId, count] of Object.entries(results)) {
+              if (count > 0) {
+                await unreadTracker.triggerCallbacks(gId);
+                console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
+              }
+            }
+          } catch (error) {
+            console.warn('[realtime-v2] Failed to update unread counts:', error);
+          }
+        }
       } catch (error) {
         console.error('[realtime-v2] Error fetching missed messages:', error);
       }
