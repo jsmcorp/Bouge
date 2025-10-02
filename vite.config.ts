@@ -7,8 +7,9 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      // Stub Firebase messaging plugin on web builds to avoid bundling web adapter
-      ...(process.env.BUILD_TARGET === 'web' || !process.env.CAPACITOR_PLATFORM ? {
+      // ONLY use web shim for actual web builds (dev server)
+      // For native builds (npm run build), DO NOT alias - use the real native plugin
+      ...(process.env.NODE_ENV === 'development' && !process.env.CAPACITOR_PLATFORM ? {
         '@capacitor-firebase/messaging': path.resolve(__dirname, './src/shims/capacitor-firebase-messaging.ts'),
       } : {}),
     },

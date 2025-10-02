@@ -125,21 +125,50 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 	console.log(JSON.stringify({ tag: 'push-fcm-v1:request', projectId: FCM_PROJECT_ID, endpoint: url, tokenCount: tokens.length, reqId }));
 	const invalid: string[] = [];
 	for (const token of tokens) {
-		// DATA-ONLY payload for foreground notifications
-		// No notification block = Android routes to PushNotifications.pushNotificationReceived
+		// HYBRID payload: notification + data blocks
+		// - notification block: Wakes device, shows in tray, works in background/killed
+		// - data block: Available for custom handling in foreground
+		//
+		// Trade-off: notificationReceived listener won't fire in background on Android
+		// (Android system handles it via notification tray instead)
+		// But this ensures reliable delivery and user sees notifications!
+		//
+		// All data values MUST be strings (FCM requirement)
 		const body = {
 			message: {
 				token,
-				data,
+				// Notification block for system tray and device wake
+				notification: {
+					title: 'New message',
+					body: 'You have a new message in Confessr'
+				},
+				// Data block for custom handling (all values must be strings!)
+				data: {
+					...data,
+					// Ensure all values are strings
+					type: String(data.type || 'new_message'),
+					group_id: String(data.group_id || ''),
+					message_id: String(data.message_id || ''),
+					created_at: String(data.created_at || '')
+				},
 				android: {
 					priority: 'HIGH',
+					// Android-specific notification config
+					notification: {
+						sound: 'default',
+						click_action: 'FLUTTER_NOTIFICATION_CLICK'
+					}
 				},
 				apns: {
 					headers: { 'apns-priority': '10' },
 					payload: {
 						aps: {
-							'content-available': 1,
-							sound: 'default'
+							alert: {
+								title: 'New message',
+								body: 'You have a new message in Confessr'
+							},
+							sound: 'default',
+							badge: 1
 						}
 					},
 				},
@@ -166,19 +195,40 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
-	// DATA-ONLY payload for foreground notifications
-	// No notification block = Android routes to PushNotifications.pushNotificationReceived
+	// HYBRID payload: notification + data blocks (same as v1)
+	// Ensures reliable delivery and user sees notifications
+	// All data values MUST be strings (FCM requirement)
 	const payload = {
 		registration_ids: tokens,
 		priority: 'high',
-		data,
-		android: { priority: 'high' },
+		// Notification block for system tray
+		notification: {
+			title: 'New message',
+			body: 'You have a new message in Confessr',
+			sound: 'default',
+			click_action: 'FLUTTER_NOTIFICATION_CLICK'
+		},
+		// Data block for custom handling (all values must be strings!)
+		data: {
+			...data,
+			type: String(data.type || 'new_message'),
+			group_id: String(data.group_id || ''),
+			message_id: String(data.message_id || ''),
+			created_at: String(data.created_at || '')
+		},
+		android: {
+			priority: 'high',
+		},
 		apns: {
 			headers: { 'apns-priority': '10' },
 			payload: {
 				aps: {
-					'content-available': 1,
-					sound: 'default'
+					alert: {
+						title: 'New message',
+						body: 'You have a new message in Confessr'
+					},
+					sound: 'default',
+					badge: 1
 				}
 			}
 		},

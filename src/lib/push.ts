@@ -11,6 +11,110 @@ import { useChatStore } from '@/store/chatstore_refactored';
 
 let currentToken: string | null = null;
 
+// CRITICAL: Store listener handles to prevent garbage collection
+// If these are garbage collected, the listeners are removed!
+const listenerHandles: any[] = [];
+
+// ============================================================================
+// CRITICAL FIX: Single shared Promise for FirebaseMessaging import
+// This ensures we only import once and all code waits for the same Promise
+// ============================================================================
+let firebaseMessagingPromise: Promise<any> | null = null;
+let listenersRegistered = false;
+
+function getFirebaseMessaging(): Promise<any> {
+	if (!firebaseMessagingPromise) {
+		console.log('[push] 🚀 FIRST IMPORT: Starting @capacitor-firebase/messaging import');
+		firebaseMessagingPromise = import('@capacitor-firebase/messaging')
+			.then((module) => {
+				console.log('[push] ✅ FirebaseMessaging module imported successfully');
+				return module;
+			})
+			.catch((err) => {
+				console.error('[push] ❌ CRITICAL: Failed to import @capacitor-firebase/messaging:', err);
+				throw err;
+			});
+	}
+	return firebaseMessagingPromise;
+}
+
+// ============================================================================
+// CRITICAL: Register listeners at MODULE LOAD TIME (EARLIEST POSSIBLE POINT)
+// This ensures listeners are active BEFORE any async operations
+// ============================================================================
+if (Capacitor.isNativePlatform()) {
+	console.log('[push] 🚀 CRITICAL: Module load - starting listener registration');
+
+	// Start import and listener registration immediately
+	getFirebaseMessaging().then(({ FirebaseMessaging }) => {
+		console.log('[push] 🎯 CRITICAL: Registering all listeners NOW');
+
+		// Register notificationReceived listener
+		FirebaseMessaging.addListener('notificationReceived', async (notification: any) => {
+			console.log('[push] 🔔 CRITICAL: FirebaseMessaging.notificationReceived FIRED!', notification);
+			console.log('[push] 🔔 Raw notification object:', JSON.stringify(notification));
+
+			try {
+				// Data is in notification.data for FirebaseMessaging plugin
+				const data = notification?.data || notification?.notification?.data || {};
+				console.log('[push] 🔔 Extracted data:', JSON.stringify(data));
+
+				if (!data.type && !data.message_id) {
+					console.warn('[push] ⚠️ Notification missing required fields (type/message_id), treating as generic wake');
+				}
+
+				// Call handler (defined below)
+				await handleNotificationReceived(data);
+			} catch (error) {
+				console.error('[push] ❌ Error handling FirebaseMessaging notification:', error);
+			}
+		}).then((handle: any) => {
+			listenerHandles.push(handle);
+			console.log('[push] ✅ CRITICAL: notificationReceived listener registered and handle stored!');
+		}).catch((err: any) => {
+			console.error('[push] ❌ CRITICAL: Failed to register notificationReceived listener:', err);
+		});
+
+		// Register tokenReceived listener
+		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
+			currentToken = event.token;
+			console.log('[push] 🔔 FirebaseMessaging.tokenReceived fired:', truncateToken(currentToken || ''));
+			if (typeof currentToken === 'string') {
+				backgroundUpsertDeviceToken(currentToken);
+			}
+		}).then((handle: any) => {
+			listenerHandles.push(handle);
+			console.log('[push] ✅ tokenReceived listener registered and handle stored!');
+		}).catch((err: any) => {
+			console.error('[push] ❌ Failed to register tokenReceived listener:', err);
+		});
+
+		// Register notificationActionPerformed listener
+		FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
+			try {
+				const data = event?.notification?.data || {};
+				const groupId = data?.group_id;
+				if (groupId) {
+					console.log('[push] wake reason=notification_tap');
+					window.dispatchEvent(new CustomEvent('push:wakeup', { detail: { type: 'tap', group_id: groupId } }));
+				}
+			} catch {}
+		}).then((handle: any) => {
+			listenerHandles.push(handle);
+			console.log('[push] ✅ notificationActionPerformed listener registered and handle stored!');
+
+			// Mark listeners as registered
+			listenersRegistered = true;
+			console.log('[push] ✅✅✅ ALL LISTENERS REGISTERED SUCCESSFULLY ✅✅✅');
+		}).catch((err: any) => {
+			console.error('[push] ❌ Failed to register notificationActionPerformed listener:', err);
+		});
+	}).catch((err: any) => {
+		console.error('[push] ❌ CRITICAL: Failed to import FirebaseMessaging for listener registration:', err);
+	});
+}
+// ============================================================================
+
 function truncateToken(token: string): string {
 	if (!token) return '';
 	return token.length <= 8 ? token : `${token.slice(0, 6)}…`;
@@ -146,13 +250,32 @@ export async function initPush(): Promise<void> {
 	console.log('[push] ✅ Starting push initialization...');
 
 	try {
-		// Dynamic import that Vite can transform to a chunk
-		console.log('[push] 📦 Importing @capacitor-firebase/messaging...');
-		const { FirebaseMessaging } = await import('@capacitor-firebase/messaging');
+		// CRITICAL: Wait for the SAME FirebaseMessaging import that's registering listeners
+		// This ensures we don't race with listener registration
+		console.log('[push] 📦 Waiting for FirebaseMessaging import (shared with listener registration)...');
+		const { FirebaseMessaging } = await getFirebaseMessaging();
 		console.log('[push] ✅ FirebaseMessaging imported successfully');
 
+		// CRITICAL: Wait for listeners to be registered before proceeding
+		// This ensures listeners are ready before we request permissions or get token
+		if (!listenersRegistered) {
+			console.log('[push] ⏳ Waiting for listeners to be registered...');
+			// Poll until listeners are registered (with timeout)
+			const startTime = Date.now();
+			while (!listenersRegistered && (Date.now() - startTime) < 5000) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+			if (listenersRegistered) {
+				console.log('[push] ✅ Listeners confirmed registered, proceeding with initialization');
+			} else {
+				console.warn('[push] ⚠️ Timeout waiting for listeners, proceeding anyway');
+			}
+		} else {
+			console.log('[push] ✅ Listeners already registered, proceeding with initialization');
+		}
+
 		// Android 13+ requires runtime POST_NOTIFICATIONS permission.
-		// Prefer FirebaseMessaging permission API; if not granted, fallback to Capacitor PushNotifications to prompt/register.
+		// Request permissions via FirebaseMessaging only (no PushNotifications fallback)
 		let permBefore: any = null;
 		let permAfter: any = null;
 		try { permBefore = await (FirebaseMessaging as any).checkPermissions?.(); } catch {}
@@ -164,66 +287,13 @@ export async function initPush(): Promise<void> {
 				console.log('[push] permission after(FirebaseMessaging):', permAfter?.receive || 'unknown');
 				granted = permAfter?.receive === 'granted';
 			} catch (e) {
-				console.warn('[push] FirebaseMessaging.requestPermissions threw; will try PushNotifications fallback', e);
+				console.warn('[push] FirebaseMessaging.requestPermissions failed', e);
 			}
 		}
 		if (!granted) {
-			try {
-				const { PushNotifications } = await import('@capacitor/push-notifications');
-				const capPermBefore = await PushNotifications.checkPermissions();
-				console.log('[push] permission before(PushNotifications):', capPermBefore.receive);
-				if (capPermBefore.receive !== 'granted') {
-					const capPermAfter = await PushNotifications.requestPermissions();
-					console.log('[push] permission after(PushNotifications):', capPermAfter.receive);
-					granted = capPermAfter.receive === 'granted';
-				}
-				await PushNotifications.register();
-				PushNotifications.addListener('registration', async (token: any) => {
-					try {
-						currentToken = (token as any)?.value || (token as any)?.token || '';
-						if (currentToken) {
-							console.log('[push] token received(core):', truncateToken(currentToken));
-							// Fire-and-forget; do not block UI or send pipeline
-						backgroundUpsertDeviceToken(currentToken);
-						}
-					} catch (e) {
-						console.warn('[push] registration listener upsert failed', e);
-					}
-				});
-				(PushNotifications as any).addListener('registrationError', (e: any) => {
-					console.warn('[push] PushNotifications registrationError', e);
-				});
-			} catch (e) {
-				console.warn('[push] PushNotifications fallback failed', e);
-			}
+			console.warn('[push] ⚠️ Notification permissions not granted. Push notifications may not work.');
 		}
 
-		// Register PushNotifications listener as PRIMARY foreground handler
-		// This is the ONLY listener that actually works for FCM foreground notifications on Android
-		try {
-			const { PushNotifications } = await import('@capacitor/push-notifications');
-			console.log('[push] 🎯 Registering PushNotifications.pushNotificationReceived listener (PRIMARY)');
-			(PushNotifications as any).addListener('pushNotificationReceived', async (notification: any) => {
-				console.log('[push] 🔔 PushNotifications.pushNotificationReceived fired!', notification);
-				console.log('[push] 🔔 Raw notification object:', JSON.stringify(notification));
-				try {
-					// Data is in notification.data, NOT notification.notification.data
-					const data = notification?.data || {};
-					console.log('[push] 🔔 Extracted data:', JSON.stringify(data));
-
-					if (!data.type && !data.message_id) {
-						console.warn('[push] ⚠️ Notification missing required fields (type/message_id), treating as generic wake');
-					}
-
-					await handleNotificationReceived(data);
-				} catch (error) {
-					console.error('[push] ❌ Error handling PushNotifications notification:', error);
-				}
-			});
-			console.log('[push] ✅ PushNotifications.pushNotificationReceived listener registered successfully');
-		} catch (e) {
-			console.error('[push] ❌ CRITICAL: Failed to register PushNotifications listener:', e);
-		}
 		// Try to get FCM token via FirebaseMessaging as primary path regardless of permission outcome
 		try {
 			const tokenResult = await FirebaseMessaging.getToken();
@@ -240,27 +310,7 @@ export async function initPush(): Promise<void> {
 			console.warn('[push] ⚠️ FirebaseMessaging.getToken failed', e);
 		}
 
-		// Register FirebaseMessaging listeners (FALLBACK - may not work on all Android versions)
-		console.log('[push] 📝 Registering FirebaseMessaging.tokenReceived listener');
-		FirebaseMessaging.addListener('tokenReceived', async (event: any) => {
-			currentToken = event.token;
-			if (typeof currentToken === 'string') {
-				backgroundUpsertDeviceToken(currentToken);
-			}
-		});
-
-		console.log('[push] 📝 Registering FirebaseMessaging.notificationReceived listener (FALLBACK)');
-		FirebaseMessaging.addListener('notificationReceived', async (event: any) => {
-			console.log('[push] 🔔 FirebaseMessaging.notificationReceived event fired! (FALLBACK)', event);
-			try {
-				const data = event?.data || {};
-				console.log('[push] 🔔 FirebaseMessaging extracted data:', JSON.stringify(data));
-				await handleNotificationReceived(data);
-			} catch (error) {
-				console.error('[push] ❌ Error handling FirebaseMessaging notification:', error);
-			}
-		});
-		console.log('[push] ✅ FirebaseMessaging.notificationReceived listener registered (may not fire on Android)');
+		console.log('[push] ✅ Push initialization complete');
 
 		// App resume should nudge outbox processing (non-blocking)
 		try {
@@ -268,20 +318,6 @@ export async function initPush(): Promise<void> {
 				try {
 					const { triggerOutboxProcessing } = await import('@/store/chatstore_refactored/offlineActions');
 					triggerOutboxProcessing('app-resume', 'high');
-				} catch {}
-			});
-		} catch {}
-
-		// Notification tap (explicit listener provided by plugin)
-		try {
-			FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
-				try {
-					const data = event?.notification?.data || {};
-					const groupId = data?.group_id;
-					if (groupId) {
-						console.log('[push] wake reason=notification_tap');
-						window.dispatchEvent(new CustomEvent('push:wakeup', { detail: { type: 'tap', group_id: groupId } }));
-					}
 				} catch {}
 			});
 		} catch {}
