@@ -119,6 +119,10 @@ class SupabasePipeline {
   private supabaseUrl: string = '';
   private supabaseAnonKey: string = '';
 
+  // Track consecutive refresh failures to detect stuck client
+  private consecutiveRefreshFailures: number = 0;
+  private readonly MAX_CONSECUTIVE_REFRESH_FAILURES = 3;
+
   // Circuit breaker for repeated failures
   private failureCount = 0;
   private lastFailureAt = 0;
@@ -616,12 +620,49 @@ class SupabasePipeline {
 
   /**
    * Direct session refresh without pre-checks
+   * CRITICAL FIX: Try setSession() with cached tokens first, then fall back to refreshSession()
+   * This prevents hanging when refreshSession() is stuck (e.g., after long backgrounding)
    */
   public async refreshSessionDirect(): Promise<boolean> {
     this.log('🔄 Direct session refresh...');
     try {
       const client = await this.getClient();
-      // Direct refresh without pre-checks
+
+      // CRITICAL FIX: Try setSession() with cached tokens first (more reliable)
+      // refreshSession() often hangs after app is backgrounded for long periods
+      if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('🔄 Attempting setSession() with cached tokens (more reliable than refreshSession)');
+        try {
+          const setSessionPromise = client.auth.setSession({
+            access_token: this.lastKnownAccessToken,
+            refresh_token: this.lastKnownRefreshToken,
+          });
+          const setSessionTimeout = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('setSession timeout')), 3000);
+          });
+
+          const setSessionResult: any = await Promise.race([setSessionPromise, setSessionTimeout]);
+
+          if (setSessionResult?.data?.session?.access_token && !setSessionResult?.error) {
+            this.log('🔄 Direct session refresh: success via setSession()');
+            this.updateSessionCache(setSessionResult.data.session);
+            // Reset failure counter on success
+            this.consecutiveRefreshFailures = 0;
+            return true;
+          } else {
+            this.log('🔄 setSession() failed, will try refreshSession():', setSessionResult?.error?.message || 'unknown error');
+          }
+        } catch (setSessionError: any) {
+          if (setSessionError?.message === 'setSession timeout') {
+            this.log('🔄 setSession() timed out, will try refreshSession()');
+          } else {
+            this.log('🔄 setSession() error, will try refreshSession():', stringifyError(setSessionError));
+          }
+        }
+      }
+
+      // Fall back to refreshSession() if setSession() failed or no cached tokens
+      this.log('🔄 Attempting refreshSession() as fallback');
       const refreshPromise = client.auth.refreshSession();
       const refreshTimeout = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
@@ -632,23 +673,43 @@ class SupabasePipeline {
         result = await Promise.race([refreshPromise, refreshTimeout]);
       } catch (err: any) {
         if (err && err.message === 'refreshSession timeout') {
-          this.log('🔄 Direct session refresh: timeout');
+          this.log('🔄 Direct session refresh: timeout (refreshSession hung)');
+          // Track consecutive failures
+          this.consecutiveRefreshFailures++;
+          this.log(`⚠️ Consecutive refresh failures: ${this.consecutiveRefreshFailures}/${this.MAX_CONSECUTIVE_REFRESH_FAILURES}`);
+
+          // If we've had too many consecutive failures, trigger client recreation
+          if (this.consecutiveRefreshFailures >= this.MAX_CONSECUTIVE_REFRESH_FAILURES) {
+            this.log('🔴 Too many consecutive refresh failures, client may be stuck - will recreate on next operation');
+            // Don't recreate immediately to avoid blocking, just mark for recreation
+            this.failureCount = this.maxFailures; // Trigger circuit breaker
+          }
+
           return false;
         }
         throw err;
       }
 
       const success = !!result?.data?.session?.access_token && !result?.error;
-      this.log(`🔄 Direct session refresh: ${success ? 'success' : 'failed'}`);
+      this.log(`🔄 Direct session refresh: ${success ? 'success' : 'failed'} via refreshSession()`);
 
       // Update session cache if successful
       if (success && result?.data?.session) {
         this.updateSessionCache(result.data.session);
+        // Reset failure counter on success
+        this.consecutiveRefreshFailures = 0;
+      } else {
+        // Track consecutive failures
+        this.consecutiveRefreshFailures++;
+        this.log(`⚠️ Consecutive refresh failures: ${this.consecutiveRefreshFailures}/${this.MAX_CONSECUTIVE_REFRESH_FAILURES}`);
       }
 
       return success;
     } catch (error) {
       this.log('🔄 Session refresh failed:', stringifyError(error));
+      // Track consecutive failures
+      this.consecutiveRefreshFailures++;
+      this.log(`⚠️ Consecutive refresh failures: ${this.consecutiveRefreshFailures}/${this.MAX_CONSECUTIVE_REFRESH_FAILURES}`);
       return false;
     }
   }
