@@ -90,15 +90,33 @@ if (Capacitor.isNativePlatform()) {
 		});
 
 		// Register notificationActionPerformed listener
+		// CRITICAL FIX: Added navigation to group when notification is tapped
 		FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
 			try {
 				const data = event?.notification?.data || {};
 				const groupId = data?.group_id;
 				if (groupId) {
-					console.log('[push] wake reason=notification_tap');
+					console.log('[push] 🔔 Notification tapped! Navigating to group:', groupId);
+
+					// Dispatch wake event for background sync
 					window.dispatchEvent(new CustomEvent('push:wakeup', { detail: { type: 'tap', group_id: groupId } }));
+
+					// Navigate to the group
+					// Use setTimeout to ensure app is fully resumed before navigation
+					setTimeout(() => {
+						try {
+							// Use window.location for reliable navigation on mobile
+							const targetUrl = `/dashboard?group=${groupId}`;
+							console.log('[push] 📍 Navigating to:', targetUrl);
+							window.location.href = targetUrl;
+						} catch (navError) {
+							console.error('[push] ❌ Navigation error:', navError);
+						}
+					}, 300);
 				}
-			} catch {}
+			} catch (error) {
+				console.error('[push] ❌ Error handling notification tap:', error);
+			}
 		}).then((handle: any) => {
 			listenerHandles.push(handle);
 			console.log('[push] ✅ notificationActionPerformed listener registered and handle stored!');
@@ -205,8 +223,9 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		try {
 			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
 
-			// Add 15-second timeout to prevent hanging
-			// CRITICAL: Must account for token recovery (3s) + fetch (8s) + buffer (4s) = 15s
+			// CRITICAL FIX: 15-second timeout for direct fetch
+			// This is sufficient now that we fixed the SQLite hang issue (LOG46)
+			// Timeout accounts for: SQLite existence check (2s max) + fetch (10s) + buffer (3s) = 15s
 			const timeoutPromise = new Promise<boolean>((_, reject) =>
 				setTimeout(() => reject(new Error('Direct fetch timeout after 15s')), 15000)
 			);
@@ -256,27 +275,31 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		}
 	}
 
-	// STEP 2: ALWAYS trigger fallback mechanism (onWake) - this is CRITICAL
-	// Even if direct fetch succeeded, onWake() provides additional sync and connection management
-	// This ensures messages are NEVER lost, even if direct fetch fails or times out
-	try {
-		console.log(`[push] 🔄 Triggering fallback sync via onWake (messageHandled=${messageHandled})`);
-		await useChatStore.getState().onWake?.(reason, data?.group_id);
-		console.log(`[push] ✅ Fallback sync completed via onWake`);
-	} catch (wakeErr) {
-		console.error('[push] ❌ CRITICAL: onWake failed (this should never happen):', wakeErr);
-
-		// Last resort: Try direct fallback call
+	// STEP 2: Trigger fallback mechanism (onWake) ONLY if direct fetch failed
+	// CRITICAL FIX: Skip fallback if message was already handled (exists in SQLite)
+	// This prevents redundant sync operations when realtime already delivered the message
+	if (!messageHandled) {
 		try {
-			console.log('[push] 🆘 Attempting emergency fallback sync...');
-			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-			if (data.group_id) {
-				await backgroundMessageSync.fetchMissedMessages(data.group_id);
-				console.log('[push] ✅ Emergency fallback sync completed');
+			console.log(`[push] 🔄 Direct fetch failed, triggering fallback sync via onWake`);
+			await useChatStore.getState().onWake?.(reason, data?.group_id);
+			console.log(`[push] ✅ Fallback sync completed via onWake`);
+		} catch (wakeErr) {
+			console.error('[push] ❌ CRITICAL: onWake failed (this should never happen):', wakeErr);
+
+			// Last resort: Try direct fallback call
+			try {
+				console.log('[push] 🆘 Attempting emergency fallback sync...');
+				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+				if (data.group_id) {
+					await backgroundMessageSync.fetchMissedMessages(data.group_id);
+					console.log('[push] ✅ Emergency fallback sync completed');
+				}
+			} catch (emergencyErr) {
+				console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
 			}
-		} catch (emergencyErr) {
-			console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
 		}
+	} else {
+		console.log(`[push] ⏭️ Skipping fallback sync - message already handled (messageHandled=${messageHandled})`);
 	}
 
 	// STEP 3: Dispatch custom event for any other listeners

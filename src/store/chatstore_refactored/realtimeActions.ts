@@ -59,8 +59,197 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let lastForceReconnectAt = 0; // Debounce force reconnects
   let cleanupTimer: NodeJS.Timeout | null = null; // Fix #5: 5s delay before cleanup
 
+  // CRITICAL FIX: Exponential backoff and circuit breaker for realtime reconnection
+  let retryCount = 0;
+  const maxRetries = 5;
+  let circuitBreakerOpen = false;
+  let circuitBreakerTimer: NodeJS.Timeout | null = null;
+
+  // CRITICAL FIX (LOG46 Phase 3): Heartbeat mechanism to detect realtime death
+  let lastRealtimeEventAt = Date.now();
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatCheckTimer: NodeJS.Timeout | null = null;
+  const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30 seconds
+  const HEARTBEAT_TIMEOUT_MS = 60000; // Consider dead if no events for 60 seconds
+
+  // CRITICAL FIX (LOG47): Track realtime death time to fetch missed messages
+  let realtimeDeathAt: number | null = null;
+
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
+
+  // CRITICAL FIX (LOG46 Phase 3): Heartbeat functions to detect and recover from realtime death
+  const updateLastEventTime = () => {
+    lastRealtimeEventAt = Date.now();
+  };
+
+  const startHeartbeat = (channel: any, groupId: string) => {
+    log('💓 Starting heartbeat mechanism');
+
+    // Clear any existing timers
+    stopHeartbeat();
+
+    // Send heartbeat every 30 seconds
+    heartbeatTimer = setInterval(() => {
+      const { connectionStatus } = get();
+      if (connectionStatus === 'connected' && channel) {
+        try {
+          channel.send({
+            type: 'broadcast',
+            event: 'heartbeat',
+            payload: { timestamp: Date.now() }
+          });
+          log('💓 Heartbeat sent');
+        } catch (error) {
+          log(`💓 Heartbeat send failed: ${error}`);
+        }
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    // Check for realtime death every 10 seconds
+    heartbeatCheckTimer = setInterval(() => {
+      const { connectionStatus } = get();
+      const timeSinceLastEvent = Date.now() - lastRealtimeEventAt;
+
+      if (connectionStatus === 'connected' && timeSinceLastEvent > HEARTBEAT_TIMEOUT_MS) {
+        log(`⚠️ Realtime appears DEAD (no events for ${Math.round(timeSinceLastEvent / 1000)}s)`);
+        log('🔄 Forcing reconnection due to realtime death');
+
+        // Stop heartbeat before reconnecting
+        stopHeartbeat();
+
+        // Force reconnection
+        forceRealtimeRecovery(groupId);
+      }
+    }, 10000); // Check every 10 seconds
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+      log('💓 Heartbeat stopped');
+    }
+    if (heartbeatCheckTimer) {
+      clearInterval(heartbeatCheckTimer);
+      heartbeatCheckTimer = null;
+      log('💓 Heartbeat check stopped');
+    }
+  };
+
+  const forceRealtimeRecovery = async (groupId: string) => {
+    log('🔧 CRITICAL: Forcing realtime recovery');
+
+    // CRITICAL FIX (LOG47): Track when realtime died to fetch missed messages later
+    realtimeDeathAt = Date.now();
+    log(`🔧 Realtime died at: ${new Date(realtimeDeathAt).toISOString()}`);
+
+    // Step 1: Cleanup current subscription
+    const { realtimeChannel } = get();
+    if (realtimeChannel) {
+      try {
+        const client = await supabasePipeline.getDirectClient();
+        await client.removeChannel(realtimeChannel);
+        log('🔧 Removed dead channel');
+      } catch (error) {
+        log(`🔧 Error removing dead channel: ${error}`);
+      }
+      set({ realtimeChannel: null });
+    }
+
+    // Step 2: Force session refresh
+    log('🔧 Forcing session refresh');
+    try {
+      await supabasePipeline.refreshSessionDirect();
+      log('🔧 Session refreshed successfully');
+    } catch (error) {
+      log(`🔧 Session refresh failed: ${error}`);
+    }
+
+    // Step 3: Recreate subscription with exponential backoff
+    log('🔧 Recreating subscription');
+    set({ connectionStatus: 'reconnecting' });
+
+    // Use handleChannelError for exponential backoff logic
+    handleChannelError(groupId);
+  };
+
+  // CRITICAL FIX (LOG47): Fetch missed messages after realtime reconnection
+  const fetchMissedMessagesSinceRealtimeDeath = async (groupIds: string[], deathTimestamp: number) => {
+    const deathTime = new Date(deathTimestamp).toISOString();
+    log(`🔄 Fetching missed messages since realtime death: ${deathTime}`);
+
+    try {
+      const client = await supabasePipeline.getDirectClient();
+
+      // Fetch all messages sent after realtime died
+      const { data: missedMessages, error } = await client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          author:users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .in('group_id', groupIds)
+        .gte('created_at', deathTime)
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        log(`❌ Error fetching missed messages: ${error.message}`);
+        return;
+      }
+
+      if (!missedMessages || missedMessages.length === 0) {
+        log('✅ No missed messages found');
+        return;
+      }
+
+      log(`📥 Found ${missedMessages.length} missed messages, saving to SQLite...`);
+
+      // Save each message to SQLite
+      for (const msg of missedMessages) {
+        try {
+          const { Capacitor } = await import('@capacitor/core');
+          const isNative = Capacitor.isNativePlatform();
+          if (isNative) {
+            const ready = await sqliteService.isReady();
+            if (ready) {
+              await sqliteService.saveMessage({
+                id: msg.id,
+                group_id: msg.group_id,
+                user_id: msg.user_id,
+                content: msg.content,
+                is_ghost: msg.is_ghost ? 1 : 0,
+                message_type: msg.message_type,
+                category: msg.category || null,
+                parent_id: msg.parent_id || null,
+                image_url: msg.image_url || null,
+                created_at: new Date(msg.created_at).getTime(),
+              });
+              log(`✅ Saved missed message to SQLite: ${msg.id}`);
+            }
+          }
+        } catch (error) {
+          log(`❌ Error saving missed message ${msg.id}: ${error}`);
+        }
+      }
+
+      // If any messages are for the active group, refresh the message list
+      const { activeGroup } = get();
+      const hasActiveGroupMessages = missedMessages.some((m: { group_id: string }) => m.group_id === activeGroup?.id);
+
+      if (hasActiveGroupMessages && typeof get().fetchMessages === 'function') {
+        const activeGroupMsgCount = missedMessages.filter((m: { group_id: string }) => m.group_id === activeGroup?.id).length;
+        log(`🔄 Refreshing message list for active group (found ${activeGroupMsgCount} missed messages)`);
+        setTimeout(() => get().fetchMessages(activeGroup.id), 500);
+      }
+
+      log('✅ Missed message fetch complete');
+
+    } catch (error) {
+      log(`❌ Exception in fetchMissedMessagesSinceRealtimeDeath: ${error}`);
+    }
+  };
 
   // Simplified connection monitoring - rely on Supabase's built-in reconnection with Web Worker heartbeats
 
@@ -103,7 +292,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     }
   }
 
-  // Simplified reconnection - let Supabase handle the timing
+  // CRITICAL FIX: Simplified reconnection with exponential backoff and circuit breaker
   const handleChannelError = (groupId: string) => {
     log('Channel error detected, cleaning up and attempting reconnection');
 
@@ -120,6 +309,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       set({ realtimeChannel: null });
     }
 
+    // Check if circuit breaker is open
+    if (circuitBreakerOpen) {
+      log('⚠️ Circuit breaker is open, skipping reconnection attempt');
+      set({ connectionStatus: 'disconnected' });
+      return;
+    }
+
     // Check if we should attempt reconnection
     const { online } = get();
     if (!online) {
@@ -127,6 +323,49 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       set({ connectionStatus: 'disconnected' });
       return;
     }
+
+    // Increment retry count
+    retryCount++;
+    log(`Reconnection attempt ${retryCount}/${maxRetries}`);
+
+    // Check if we've exceeded max retries
+    if (retryCount >= maxRetries) {
+      log(`❌ Max retries (${maxRetries}) exceeded, opening circuit breaker for 5 minutes`);
+      circuitBreakerOpen = true;
+      set({ connectionStatus: 'disconnected' });
+
+      // Close circuit breaker after 5 minutes
+      circuitBreakerTimer = setTimeout(() => {
+        log('✅ Circuit breaker closed, allowing reconnection attempts');
+        circuitBreakerOpen = false;
+        retryCount = 0;
+        circuitBreakerTimer = null;
+
+        // Attempt reconnection after circuit breaker closes
+        const { activeGroup } = get();
+        if (activeGroup?.id) {
+          log('🔄 Circuit breaker closed, attempting reconnection');
+          handleChannelError(activeGroup.id);
+        }
+      }, 5 * 60 * 1000); // 5 minutes
+
+      return;
+    }
+
+    // Calculate exponential backoff delay
+    const delay = Math.min(1000 * Math.pow(2, retryCount - 1), 30000); // Max 30 seconds
+    log(`⏳ Retrying reconnection in ${delay}ms (exponential backoff)`);
+
+    // Schedule reconnection with exponential backoff
+    setTimeout(() => {
+      log(`🔄 Executing scheduled reconnection (attempt ${retryCount}/${maxRetries})`);
+      const { activeGroup } = get();
+      if (activeGroup?.id === groupId) {
+        (get() as any).setupSimplifiedRealtimeSubscription(groupId);
+      } else {
+        log('⚠️ Active group changed, skipping reconnection');
+      }
+    }, delay);
 
     // Simple reconnection attempt after a brief delay
     set({ connectionStatus: 'reconnecting' });
@@ -492,16 +731,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         return;
       }
 
-      // Check if we already have a healthy connection for this group
+      // CRITICAL FIX: Check if we already have a healthy connection for ALL groups
+      // Don't recreate subscription if we're already connected
       const { connectionStatus, realtimeChannel } = get();
       if (connectionStatus === 'connected' && realtimeChannel) {
-        log('Already connected to realtime, skipping setup');
+        log('Already connected to realtime (multi-group subscription), skipping setup');
         return;
       }
 
       isConnecting = true;
-      log(`Setting up simplified realtime subscription for group: ${groupId}`);
-      mobileLogger.startTiming('realtime-setup', 'connection', { groupId });
+
+      // CRITICAL FIX: Get ALL user's groups for multi-group subscription
+      const { groups } = get();
+      const allGroupIds = groups.map((g: any) => g.id);
+
+      if (allGroupIds.length === 0) {
+        log('No groups found, skipping realtime setup');
+        isConnecting = false;
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      log(`Setting up multi-group realtime subscription for ${allGroupIds.length} groups (active: ${groupId})`);
+      mobileLogger.startTiming('realtime-setup', 'connection', { groupId, totalGroups: allGroupIds.length });
 
       try {
         log('Skipping blocking auth check; proceeding with local auth state');
@@ -534,9 +786,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           whatsappConnection.setConnectionState('connecting', 'Connecting...');
         } catch {}
 
-        // Create channel with simple config and unique name
-        const channelName = `group-${groupId}-${localToken}`;
-        log(`Creating channel: ${channelName}`);
+        // CRITICAL FIX: Create multi-group channel with ALL user's groups
+        const channelName = `multi-group-${user.id}-${localToken}`;
+        log(`Creating multi-group channel: ${channelName} (${allGroupIds.length} groups)`);
 
         const client = await supabasePipeline.getDirectClient();
         const channel = client.channel(channelName, {
@@ -546,25 +798,45 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           },
         });
 
-        // Message inserts
+        // CRITICAL FIX: Subscribe to messages for ALL user's groups
+        // This ensures messages are received even when user is in a different group
+        const groupFilter = allGroupIds.length === 1
+          ? `group_id=eq.${allGroupIds[0]}`
+          : `group_id=in.(${allGroupIds.join(',')})`;
+
+        log(`📡 Subscribing to messages with filter: ${groupFilter}`);
+
         channel.on('postgres_changes', {
-          event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}`,
+          event: 'INSERT', schema: 'public', table: 'messages', filter: groupFilter,
         }, async (payload: any) => {
-          if (localToken !== connectionToken) {
-            log(`⚠️ Ignoring stale realtime INSERT (token mismatch)`);
-            return;
-          }
+          // CRITICAL FIX: Removed token mismatch check to prevent message loss
+          // The check was too aggressive and caused legitimate messages to be discarded
+          // Duplicate detection is handled by:
+          // 1. dedupe_key in message data
+          // 2. attachMessageToState() logic (lines 354-363)
+          // 3. SQLite INSERT OR REPLACE
+
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const row = payload.new as DbMessageRow;
 
-          log(`📨 Realtime INSERT received: id=${row.id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
+          log(`📨 Realtime INSERT received: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
 
           try {
             const message = await buildMessageFromRow(row);
-            log(`📨 Built message from row: id=${message.id}, delivery_status=${message.delivery_status}`);
+            log(`📨 Built message from row: id=${message.id}, group=${message.group_id}, delivery_status=${message.delivery_status}`);
 
-            attachMessageToState(message);
-            log(`📨 Message attached to state: id=${message.id}`);
+            // CRITICAL FIX: Only attach message to state if it's for the active group
+            // Messages for other groups are still saved to SQLite but not added to React state
+            const currentState = get();
+            const isForActiveGroup = currentState.activeGroup?.id === row.group_id;
+
+            if (isForActiveGroup) {
+              attachMessageToState(message);
+              log(`📨 Message attached to state: id=${message.id} (active group)`);
+            } else {
+              log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
+            }
 
             // Persist to local storage immediately to avoid disappearing on navigation
             try {
@@ -618,6 +890,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const pollRow = payload.new as DbPollRow;
           await handlePollInsert(pollRow, user.id, groupId);
         });
@@ -628,6 +901,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
           if (vote.user_id === user.id) return; // Skip own votes
 
@@ -654,16 +928,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           .on('presence', { event: 'sync' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .on('presence', { event: 'join' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .on('presence', { event: 'leave' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .subscribe(async (status: any) => {
@@ -680,6 +957,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Removed: resetting outbox state here could interrupt an in-flight drain and cause concurrency
               // resetOutboxProcessingState();
               isConnecting = false; // Clear the guard
+
+              // CRITICAL FIX: Reset retry count and circuit breaker on successful connection
+              retryCount = 0;
+              if (circuitBreakerTimer) {
+                clearTimeout(circuitBreakerTimer);
+                circuitBreakerTimer = null;
+              }
+              circuitBreakerOpen = false;
+
               set({
                 connectionStatus: 'connected',
                 realtimeChannel: channel,
@@ -697,7 +983,26 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Stop degraded poll fallback when connected
               try { (get() as any).stopPollFallback?.(); } catch {}
 
-              // No custom heartbeat needed - Supabase Web Worker handles this
+              // CRITICAL FIX (LOG46 Phase 3): Start heartbeat mechanism to detect realtime death
+              startHeartbeat(channel, groupId);
+              updateLastEventTime(); // Initialize timestamp
+
+              // CRITICAL FIX (LOG47): Fetch missed messages after realtime reconnection
+              if (realtimeDeathAt) {
+                log('🔄 Realtime reconnected after death, fetching missed messages...');
+                const { groups } = get();
+                const allGroupIds = groups.map((g: any) => g.id);
+                const deathTime = realtimeDeathAt; // Capture the timestamp
+
+                // CRITICAL: Clear immediately to prevent duplicate fetches during flapping
+                realtimeDeathAt = null;
+                log('🔧 Cleared realtimeDeathAt to prevent duplicate fetches');
+
+                // Fetch missed messages in background (don't block reconnection)
+                setTimeout(() => {
+                  fetchMissedMessagesSinceRealtimeDeath(allGroupIds, deathTime);
+                }, 1000);
+              }
 
               // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
               try {
@@ -720,6 +1025,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Connection failed - let Supabase handle reconnection
               log(`❌ Connection failed with status: ${status}`);
               isConnecting = false; // Clear the guard
+
+              // CRITICAL FIX (LOG46 Phase 3): Stop heartbeat when connection fails
+              stopHeartbeat();
 
               // Enhanced handling for CHANNEL_ERROR - try session refresh first, avoid excessive rebuilds
               if (status === 'CHANNEL_ERROR') {
@@ -873,6 +1181,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Do NOT reset outbox state on routine navigation
 
         if (typingTimeout) clearTimeout(typingTimeout);
+
+        // CRITICAL FIX (LOG46 Phase 3): Stop heartbeat before cleanup
+        stopHeartbeat();
 
         if (realtimeChannel) {
           try {
