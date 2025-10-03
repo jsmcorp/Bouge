@@ -852,16 +852,23 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
       // Schedule cleanup after 5 seconds
       cleanupTimer = setTimeout(async () => {
-        const { realtimeChannel, typingTimeout, connectionStatus } = get();
+        const { realtimeChannel, typingTimeout } = get();
 
-        // CRITICAL FIX: Don't cleanup if connection is still active/connected
-        if (connectionStatus === 'connected' && realtimeChannel) {
-          log('⏭️ Skipping cleanup - connection still active and healthy');
-          cleanupTimer = null;
-          return;
+        // CRITICAL FIX: Don't cleanup if channel is still subscribed/joined
+        // Check the actual channel state, not just the connectionStatus variable
+        // because connectionStatus might be 'disconnected' when on dashboard
+        // but the channel is still healthy and subscribed
+        if (realtimeChannel) {
+          const channelState = (realtimeChannel as any).state;
+          if (channelState === 'joined' || channelState === 'joining') {
+            log(`⏭️ Skipping cleanup - channel still active (state: ${channelState})`);
+            cleanupTimer = null;
+            return;
+          }
+          log(`Executing delayed cleanup (5s passed) - channel state: ${channelState}`);
+        } else {
+          log('Executing delayed cleanup (5s passed) - no channel');
         }
-
-        log('Executing delayed cleanup (5s passed) - keeping root socket alive');
         isConnecting = false; // Clear connection guard
         // Do NOT reset outbox state on routine navigation
 
