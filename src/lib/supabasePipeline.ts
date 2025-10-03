@@ -1725,6 +1725,17 @@ class SupabasePipeline {
         // Extract server-generated message ID from response
         const serverMessageId = data?.id || message.id;
         this.log(`[${dbgLabel}] stage: response received`);
+
+        // CRITICAL: Log if we're falling back to optimistic ID (indicates server didn't return ID)
+        if (!data?.id) {
+          this.log(`[${dbgLabel}] ⚠️ WARNING: Server response missing ID, using optimistic ID (FCM may fail!)`);
+          this.log(`[${dbgLabel}] ⚠️ Response data: ${JSON.stringify(data).substring(0, 200)}`);
+        } else if (data.id !== message.id) {
+          this.log(`[${dbgLabel}] ✅ Server generated new UUID: ${data.id} (optimistic was: ${message.id})`);
+        } else {
+          this.log(`[${dbgLabel}] ℹ️ Server ID matches optimistic ID: ${data.id}`);
+        }
+
         this.log(`✅ Direct send successful - message ${message.id} (server ID: ${serverMessageId})`);
         this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
@@ -1856,11 +1867,49 @@ class SupabasePipeline {
 
       // Parse response to get server-generated message ID
       const responseData = await res.json();
-      const serverMessageId = Array.isArray(responseData) && responseData[0]?.id
-        ? responseData[0].id
-        : message.id;  // Fallback to optimistic ID if parsing fails
 
-      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful (server ID: ${serverMessageId})`);
+      // CRITICAL FIX: Better response parsing with diagnostic logging
+      // PostgREST can return either an array or a single object depending on the query
+      this.log(`[${dbgLabel}] fast-path: response type=${typeof responseData}, isArray=${Array.isArray(responseData)}`);
+
+      let serverMessageId: string;
+      if (Array.isArray(responseData) && responseData.length > 0 && responseData[0]?.id) {
+        // Response is array with data (typical for upsert with .select())
+        serverMessageId = responseData[0].id;
+        this.log(`[${dbgLabel}] fast-path: extracted server ID from array[0]: ${serverMessageId}`);
+      } else if (responseData && typeof responseData === 'object' && responseData.id) {
+        // Response is single object (can happen with .single())
+        serverMessageId = responseData.id;
+        this.log(`[${dbgLabel}] fast-path: extracted server ID from object: ${serverMessageId}`);
+      } else {
+        // CRITICAL: Response missing ID - query by dedupe_key to get server ID
+        this.log(`[${dbgLabel}] ⚠️ Response missing ID! Raw response: ${JSON.stringify(responseData).substring(0, 200)}`);
+        this.log(`[${dbgLabel}] ⚠️ Attempting dedupe_key lookup: ${message.dedupe_key}`);
+
+        try {
+          const client = await this.getDirectClient();
+          const { data: lookupData, error: lookupError } = await client
+            .from('messages')
+            .select('id')
+            .eq('dedupe_key', message.dedupe_key)
+            .single();
+
+          if (lookupError || !lookupData?.id) {
+            this.log(`[${dbgLabel}] ❌ Dedupe lookup failed: ${stringifyError(lookupError)}`);
+            this.log(`[${dbgLabel}] ❌ CRITICAL: Using optimistic ID as last resort (FCM will fail!)`);
+            serverMessageId = message.id;  // Last resort fallback
+          } else {
+            serverMessageId = lookupData.id;
+            this.log(`[${dbgLabel}] ✅ Retrieved server ID via dedupe_key lookup: ${serverMessageId}`);
+          }
+        } catch (lookupErr) {
+          this.log(`[${dbgLabel}] ❌ Dedupe lookup exception: ${stringifyError(lookupErr)}`);
+          this.log(`[${dbgLabel}] ❌ CRITICAL: Using optimistic ID as last resort (FCM will fail!)`);
+          serverMessageId = message.id;  // Last resort fallback
+        }
+      }
+
+      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful (server ID: ${serverMessageId}, optimistic was: ${message.id})`);
       return serverMessageId;
     } finally {
       clearTimeout(to);
