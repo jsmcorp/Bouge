@@ -640,11 +640,12 @@ class SupabasePipeline {
             access_token: this.lastKnownAccessToken,
             refresh_token: this.lastKnownRefreshToken,
           });
-          // CRITICAL FIX: Reduced timeout from 10s to 3s for faster failure detection
-          // FCM-triggered fetches should use getDirectClient() instead (no token validation)
-          // This timeout only affects operations that explicitly need validated tokens
+          // CRITICAL FIX: Increased timeout from 3s to 10s (LOG46 Phase 2)
+          // Root cause: 3s timeout was too aggressive and caused realtime death
+          // When token recovery times out, realtime subscription loses auth and dies
+          // 10s gives enough time for setSession() to complete without hanging forever
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('setSession timeout')), 3000)
+            setTimeout(() => reject(new Error('setSession timeout')), 10000)
           );
           let data: any;
           try {
@@ -656,7 +657,7 @@ class SupabasePipeline {
             }
           } catch (e: any) {
             if (e && e.message === 'setSession timeout') {
-              this.log('🔄 Token recovery timed out after 3s');
+              this.log('🔄 Token recovery timed out after 10s');
               return false;
             }
             throw e;
@@ -706,7 +707,7 @@ class SupabasePipeline {
             refresh_token: this.lastKnownRefreshToken,
           });
           const setSessionTimeout = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('setSession timeout')), 3000);
+            setTimeout(() => reject(new Error('setSession timeout')), 10000);
           });
 
           const setSessionResult: any = await Promise.race([setSessionPromise, setSessionTimeout]);

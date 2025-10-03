@@ -47,12 +47,12 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   setGroups: (groups) => set({ groups }),
   
   setActiveGroup: (group) => {
-    const currentGroup = get().activeGroup;
-
-    // Cleanup previous subscription
-    if (currentGroup && currentGroup.id !== group?.id) {
-      get().cleanupRealtimeSubscription();
-    }
+    // CRITICAL FIX: DON'T cleanup subscription when switching groups
+    // Multi-group subscription stays alive for all groups
+    // Only cleanup when user logs out or app closes
+    // if (currentGroup && currentGroup.id !== group?.id) {
+    //   get().cleanupRealtimeSubscription();
+    // }
 
     set({
       activeGroup: group,
@@ -63,7 +63,8 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       showGroupDetailsPanel: false,
       groupMembers: [],
       groupMedia: [],
-      connectionStatus: 'disconnected',
+      // CRITICAL FIX: Keep connection status - don't reset to 'disconnected'
+      // connectionStatus: 'disconnected',
       isReconnecting: false,
       reconnectAttempt: 0,
       // Invalidate any in-flight fetches for previous group
@@ -72,11 +73,15 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       isLoading: false
     });
 
-    // Setup new subscription and fetch polls
+    // Setup subscription if not already connected, and fetch polls
     if (group) {
       // Small delay to ensure state is clean
       setTimeout(() => {
-        get().setupRealtimeSubscription(group.id);
+        // Only setup subscription if not already connected
+        const { connectionStatus } = get();
+        if (connectionStatus !== 'connected') {
+          get().setupRealtimeSubscription(group.id);
+        }
         get().fetchPollsForGroup(group.id);
       }, 100);
     }

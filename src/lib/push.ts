@@ -223,11 +223,11 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		try {
 			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
 
-			// Add 10-second timeout to prevent hanging
-			// CRITICAL: backgroundMessageSync uses getDirectClient() (no token validation)
-			// Timeout accounts for: message existence check (50ms) + fetch (8s) + buffer (2s) = 10s
+			// CRITICAL FIX: 15-second timeout for direct fetch
+			// This is sufficient now that we fixed the SQLite hang issue (LOG46)
+			// Timeout accounts for: SQLite existence check (2s max) + fetch (10s) + buffer (3s) = 15s
 			const timeoutPromise = new Promise<boolean>((_, reject) =>
-				setTimeout(() => reject(new Error('Direct fetch timeout after 10s')), 10000)
+				setTimeout(() => reject(new Error('Direct fetch timeout after 15s')), 15000)
 			);
 
 			const fetchPromise = backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);

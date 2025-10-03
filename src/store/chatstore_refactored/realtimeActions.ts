@@ -548,16 +548,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         return;
       }
 
-      // Check if we already have a healthy connection for this group
+      // CRITICAL FIX: Check if we already have a healthy connection for ALL groups
+      // Don't recreate subscription if we're already connected
       const { connectionStatus, realtimeChannel } = get();
       if (connectionStatus === 'connected' && realtimeChannel) {
-        log('Already connected to realtime, skipping setup');
+        log('Already connected to realtime (multi-group subscription), skipping setup');
         return;
       }
 
       isConnecting = true;
-      log(`Setting up simplified realtime subscription for group: ${groupId}`);
-      mobileLogger.startTiming('realtime-setup', 'connection', { groupId });
+
+      // CRITICAL FIX: Get ALL user's groups for multi-group subscription
+      const { groups } = get();
+      const allGroupIds = groups.map((g: any) => g.id);
+
+      if (allGroupIds.length === 0) {
+        log('No groups found, skipping realtime setup');
+        isConnecting = false;
+        set({ connectionStatus: 'disconnected' });
+        return;
+      }
+
+      log(`Setting up multi-group realtime subscription for ${allGroupIds.length} groups (active: ${groupId})`);
+      mobileLogger.startTiming('realtime-setup', 'connection', { groupId, totalGroups: allGroupIds.length });
 
       try {
         log('Skipping blocking auth check; proceeding with local auth state');
@@ -590,9 +603,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           whatsappConnection.setConnectionState('connecting', 'Connecting...');
         } catch {}
 
-        // Create channel with simple config and unique name
-        const channelName = `group-${groupId}-${localToken}`;
-        log(`Creating channel: ${channelName}`);
+        // CRITICAL FIX: Create multi-group channel with ALL user's groups
+        const channelName = `multi-group-${user.id}-${localToken}`;
+        log(`Creating multi-group channel: ${channelName} (${allGroupIds.length} groups)`);
 
         const client = await supabasePipeline.getDirectClient();
         const channel = client.channel(channelName, {
@@ -602,25 +615,44 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           },
         });
 
-        // Message inserts
+        // CRITICAL FIX: Subscribe to messages for ALL user's groups
+        // This ensures messages are received even when user is in a different group
+        const groupFilter = allGroupIds.length === 1
+          ? `group_id=eq.${allGroupIds[0]}`
+          : `group_id=in.(${allGroupIds.join(',')})`;
+
+        log(`📡 Subscribing to messages with filter: ${groupFilter}`);
+
         channel.on('postgres_changes', {
-          event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}`,
+          event: 'INSERT', schema: 'public', table: 'messages', filter: groupFilter,
         }, async (payload: any) => {
-          if (localToken !== connectionToken) {
-            log(`⚠️ Ignoring stale realtime INSERT (token mismatch)`);
-            return;
-          }
+          // CRITICAL FIX: Removed token mismatch check to prevent message loss
+          // The check was too aggressive and caused legitimate messages to be discarded
+          // Duplicate detection is handled by:
+          // 1. dedupe_key in message data
+          // 2. attachMessageToState() logic (lines 354-363)
+          // 3. SQLite INSERT OR REPLACE
+
           bumpActivity();
           const row = payload.new as DbMessageRow;
 
-          log(`📨 Realtime INSERT received: id=${row.id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
+          log(`📨 Realtime INSERT received: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
 
           try {
             const message = await buildMessageFromRow(row);
-            log(`📨 Built message from row: id=${message.id}, delivery_status=${message.delivery_status}`);
+            log(`📨 Built message from row: id=${message.id}, group=${message.group_id}, delivery_status=${message.delivery_status}`);
 
-            attachMessageToState(message);
-            log(`📨 Message attached to state: id=${message.id}`);
+            // CRITICAL FIX: Only attach message to state if it's for the active group
+            // Messages for other groups are still saved to SQLite but not added to React state
+            const currentState = get();
+            const isForActiveGroup = currentState.activeGroup?.id === row.group_id;
+
+            if (isForActiveGroup) {
+              attachMessageToState(message);
+              log(`📨 Message attached to state: id=${message.id} (active group)`);
+            } else {
+              log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
+            }
 
             // Persist to local storage immediately to avoid disappearing on navigation
             try {
