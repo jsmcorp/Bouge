@@ -72,6 +72,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30 seconds
   const HEARTBEAT_TIMEOUT_MS = 60000; // Consider dead if no events for 60 seconds
 
+  // CRITICAL FIX (LOG47): Track realtime death time to fetch missed messages
+  let realtimeDeathAt: number | null = null;
+
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
@@ -137,6 +140,10 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   const forceRealtimeRecovery = async (groupId: string) => {
     log('🔧 CRITICAL: Forcing realtime recovery');
 
+    // CRITICAL FIX (LOG47): Track when realtime died to fetch missed messages later
+    realtimeDeathAt = Date.now();
+    log(`🔧 Realtime died at: ${new Date(realtimeDeathAt).toISOString()}`);
+
     // Step 1: Cleanup current subscription
     const { realtimeChannel } = get();
     if (realtimeChannel) {
@@ -165,6 +172,83 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
     // Use handleChannelError for exponential backoff logic
     handleChannelError(groupId);
+  };
+
+  // CRITICAL FIX (LOG47): Fetch missed messages after realtime reconnection
+  const fetchMissedMessagesSinceRealtimeDeath = async (groupIds: string[], deathTimestamp: number) => {
+    const deathTime = new Date(deathTimestamp).toISOString();
+    log(`🔄 Fetching missed messages since realtime death: ${deathTime}`);
+
+    try {
+      const client = await supabasePipeline.getDirectClient();
+
+      // Fetch all messages sent after realtime died
+      const { data: missedMessages, error } = await client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          author:users!messages_user_id_fkey(display_name, avatar_url)
+        `)
+        .in('group_id', groupIds)
+        .gte('created_at', deathTime)
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        log(`❌ Error fetching missed messages: ${error.message}`);
+        return;
+      }
+
+      if (!missedMessages || missedMessages.length === 0) {
+        log('✅ No missed messages found');
+        return;
+      }
+
+      log(`📥 Found ${missedMessages.length} missed messages, saving to SQLite...`);
+
+      // Save each message to SQLite
+      for (const msg of missedMessages) {
+        try {
+          const { Capacitor } = await import('@capacitor/core');
+          const isNative = Capacitor.isNativePlatform();
+          if (isNative) {
+            const ready = await sqliteService.isReady();
+            if (ready) {
+              await sqliteService.saveMessage({
+                id: msg.id,
+                group_id: msg.group_id,
+                user_id: msg.user_id,
+                content: msg.content,
+                is_ghost: msg.is_ghost ? 1 : 0,
+                message_type: msg.message_type,
+                category: msg.category || null,
+                parent_id: msg.parent_id || null,
+                image_url: msg.image_url || null,
+                created_at: new Date(msg.created_at).getTime(),
+              });
+              log(`✅ Saved missed message to SQLite: ${msg.id}`);
+            }
+          }
+        } catch (error) {
+          log(`❌ Error saving missed message ${msg.id}: ${error}`);
+        }
+      }
+
+      // If any messages are for the active group, refresh the message list
+      const { activeGroup } = get();
+      const hasActiveGroupMessages = missedMessages.some((m: { group_id: string }) => m.group_id === activeGroup?.id);
+
+      if (hasActiveGroupMessages && typeof get().fetchMessages === 'function') {
+        const activeGroupMsgCount = missedMessages.filter((m: { group_id: string }) => m.group_id === activeGroup?.id).length;
+        log(`🔄 Refreshing message list for active group (found ${activeGroupMsgCount} missed messages)`);
+        setTimeout(() => get().fetchMessages(activeGroup.id), 500);
+      }
+
+      log('✅ Missed message fetch complete');
+
+    } catch (error) {
+      log(`❌ Exception in fetchMissedMessagesSinceRealtimeDeath: ${error}`);
+    }
   };
 
   // Simplified connection monitoring - rely on Supabase's built-in reconnection with Web Worker heartbeats
@@ -902,6 +986,23 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // CRITICAL FIX (LOG46 Phase 3): Start heartbeat mechanism to detect realtime death
               startHeartbeat(channel, groupId);
               updateLastEventTime(); // Initialize timestamp
+
+              // CRITICAL FIX (LOG47): Fetch missed messages after realtime reconnection
+              if (realtimeDeathAt) {
+                log('🔄 Realtime reconnected after death, fetching missed messages...');
+                const { groups } = get();
+                const allGroupIds = groups.map((g: any) => g.id);
+                const deathTime = realtimeDeathAt; // Capture the timestamp
+
+                // CRITICAL: Clear immediately to prevent duplicate fetches during flapping
+                realtimeDeathAt = null;
+                log('🔧 Cleared realtimeDeathAt to prevent duplicate fetches');
+
+                // Fetch missed messages in background (don't block reconnection)
+                setTimeout(() => {
+                  fetchMissedMessagesSinceRealtimeDeath(allGroupIds, deathTime);
+                }, 1000);
+              }
 
               // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
               try {
