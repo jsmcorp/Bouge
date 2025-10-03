@@ -20,10 +20,17 @@ createRoot(document.getElementById('root')!).render(
 );
 
 // Initialize push and listeners (non-blocking)
+console.log('[main] 🚀 IIFE starting - about to initialize push notifications');
 (async () => {
+	console.log('[main] 🔥 Inside async IIFE - before try block');
 	try {
-		initPush();
-	} catch {}
+		console.log('[main] 📱 Initializing push notifications...');
+		await initPush();
+		console.log('[main] ✅ Push notifications initialized');
+	} catch (error) {
+		console.error('[main] ❌ Failed to initialize push notifications:', error);
+		console.error('[main] ❌ Error stack:', error);
+	}
 
 		// Dev-only: load connectivity tester
 		if (import.meta.env.DEV) {

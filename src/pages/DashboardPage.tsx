@@ -5,11 +5,10 @@ import { useIsMobile } from '@/hooks/useMediaQuery';
 import { Sidebar } from '@/components/dashboard/Sidebar';
 import { ChatArea } from '@/components/dashboard/ChatArea';
 import { WelcomeScreen } from '@/components/dashboard/WelcomeScreen';
-import { preloadingService } from '@/lib/preloadingService';
 
 export default function DashboardPage() {
   const { user } = useAuthStore();
-  const { activeGroup, fetchGroups, preloadTopGroupMessages } = useChatStore();
+  const { activeGroup, fetchGroups } = useChatStore();
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -17,26 +16,6 @@ export default function DashboardPage() {
       fetchGroups();
     }
   }, [user?.id, fetchGroups]);
-
-  // Trigger preloading when dashboard loads and groups are available
-  useEffect(() => {
-    if (user?.id) {
-      // Small delay to let groups load first
-      const preloadTimer = setTimeout(() => {
-        console.log('🚀 Dashboard: Triggering preload after groups loaded');
-        preloadTopGroupMessages();
-      }, 1000);
-
-      return () => clearTimeout(preloadTimer);
-    }
-  }, [user?.id, preloadTopGroupMessages]);
-
-  // Ensure we stop background preloading when leaving the dashboard
-  useEffect(() => {
-    return () => {
-      preloadingService.clearPreloadQueue();
-    };
-  }, []);
 
   // On mobile, show full-screen sidebar when no group is selected
   if (isMobile && !activeGroup) {

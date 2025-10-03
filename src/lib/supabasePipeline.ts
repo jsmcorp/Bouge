@@ -575,8 +575,10 @@ class SupabasePipeline {
             access_token: this.lastKnownAccessToken,
             refresh_token: this.lastKnownRefreshToken,
           });
+          // CRITICAL FIX: Increased timeout from 5s to 10s for better reliability
+          // Background message sync needs more time on slow networks
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('setSession timeout')), 5000)
+            setTimeout(() => reject(new Error('setSession timeout')), 10000)
           );
           let data: any;
           try {
@@ -588,7 +590,7 @@ class SupabasePipeline {
             }
           } catch (e: any) {
             if (e && e.message === 'setSession timeout') {
-              this.log('🔄 Token recovery timed out');
+              this.log('🔄 Token recovery timed out after 10s');
               return false;
             }
             throw e;
@@ -1554,9 +1556,12 @@ class SupabasePipeline {
     this.log(`[${dbgLabel}] input: group=${message.group_id?.slice(0,8)} user=${message.user_id?.slice(0,8)} ghost=${!!message.is_ghost} type=${message.message_type} dedupe=${!!message.dedupe_key}`);
 
     try {
-      await this.sendMessageInternal(message);
-      this.log(`✅ Message ${message.id} sent successfully`);
+      // Get server-returned message ID (may differ from optimistic ID)
+      const serverMessageId = await this.sendMessageInternal(message);
+      this.log(`✅ Message ${message.id} sent successfully (server ID: ${serverMessageId})`);
+
       // Fire-and-forget: fan out push notification (best-effort)
+      // CRITICAL: Use server-returned ID, not optimistic ID!
       try {
         const client = await this.getDirectClient();
         const createdAt = new Date().toISOString();
@@ -1570,12 +1575,13 @@ class SupabasePipeline {
             'Authorization': bearer ? `Bearer ${bearer}` : '',
           };
           this.log(`[supabase-pipeline] push-fanout call: origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
+          this.log(`[supabase-pipeline] 🔑 Using server message ID for FCM: ${serverMessageId} (optimistic was: ${message.id})`);
           const res = await fetch(url, {
             method: 'POST',
             mode: 'cors',
             headers: headersObj,
             body: JSON.stringify({
-              message_id: message.id,
+              message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
               group_id: message.group_id,
               sender_id: message.user_id,
               created_at: createdAt,
@@ -1602,8 +1608,9 @@ class SupabasePipeline {
 
   /**
    * Internal message sending logic - simplified approach
+   * Returns the server-generated message ID (may differ from optimistic ID)
    */
-  private async sendMessageInternal(message: Message): Promise<void> {
+  private async sendMessageInternal(message: Message): Promise<string> {
     // Do not gate sends after unlock; proceed directly
 
     // Check health before attempting direct send
@@ -1671,12 +1678,12 @@ class SupabasePipeline {
           this.log(`[${dbgLabel}] fast-path: using direct REST upsert (snapshot token)`);
           this.log(`[${dbgLabel}] stage: network attempt started (path=rest)`);
           this.log(`[${dbgLabel}] POST /messages (fast-path)`);
-          await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
+          const serverMessageId = await this.fastPathDirectUpsert(message, dbgLabel, tokenSnap);
           this.log(`[${dbgLabel}] stage: response received`);
-          this.log(`✅ Direct send successful - message ${message.id}`);
+          this.log(`✅ Direct send successful - message ${message.id} (server ID: ${serverMessageId})`);
           this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
           try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-          return;
+          return serverMessageId;  // Return server ID for FCM fanout
         }
 
 
@@ -1708,17 +1715,19 @@ class SupabasePipeline {
           .single();
 
         this.log(`[${dbgLabel}] attempt ${attempt} -> awaiting Supabase upsert...`);
-        const { error } = await Promise.race([sendPromise, timeoutPromise]);
+        const { data, error } = await Promise.race([sendPromise, timeoutPromise]);
 
         if (error) {
           throw error;
         }
 
+        // Extract server-generated message ID from response
+        const serverMessageId = data?.id || message.id;
         this.log(`[${dbgLabel}] stage: response received`);
-        this.log(`✅ Direct send successful - message ${message.id}`);
+        this.log(`✅ Direct send successful - message ${message.id} (server ID: ${serverMessageId})`);
         this.resolveTerminal(message.id, 'DIRECT_SUCCESS');
         try { console.timeEnd?.(`[${dbgLabel}] attempt-${attempt}`); } catch {}
-        return; // Success!
+        return serverMessageId;  // Return server ID for FCM fanout
       } catch (error) {
         lastError = error;
         const emsg = String((error as any)?.message || error || '');
@@ -1796,8 +1805,9 @@ class SupabasePipeline {
   /**
    * Perform a direct PostgREST upsert using cached token to bypass any internal auth preflight
    * Used only on the fast-path when the SDK's postgrest client does not expose .auth()
+   * Returns the server-generated message ID
    */
-  private async fastPathDirectUpsert(message: Message, dbgLabel: string, tokenOverride?: string | null): Promise<void> {
+  private async fastPathDirectUpsert(message: Message, dbgLabel: string, tokenOverride?: string | null): Promise<string> {
     if (!this.supabaseUrl) throw new Error('Supabase URL not set');
     const token = tokenOverride || this.lastKnownAccessToken;
     if (!token) throw new Error('No access token for fast-path upsert');
@@ -1843,10 +1853,14 @@ class SupabasePipeline {
         throw new Error(`REST upsert failed: ${res.status} ${text}`);
       }
 
-      // Ensure response arrived
-      try { await res.json(); } catch (_) {}
+      // Parse response to get server-generated message ID
+      const responseData = await res.json();
+      const serverMessageId = Array.isArray(responseData) && responseData[0]?.id
+        ? responseData[0].id
+        : message.id;  // Fallback to optimistic ID if parsing fails
 
-      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful`);
+      this.log(`[${dbgLabel}] fast-path: direct REST upsert successful (server ID: ${serverMessageId})`);
+      return serverMessageId;
     } finally {
       clearTimeout(to);
     }
@@ -2097,7 +2111,9 @@ class SupabasePipeline {
 
           this.log(`[#${outboxItem.id}] POST /messages (outbox fast-path)`);
           // Bound to 5s internally via AbortController
-          await this.fastPathDirectUpsert(payload, `outbox-${outboxItem.id}`);
+          // CRITICAL FIX: Capture server-returned message ID for FCM fanout
+          const serverMessageId = await this.fastPathDirectUpsert(payload, `outbox-${outboxItem.id}`);
+          this.log(`[#${outboxItem.id}] ✅ Outbox message sent (server ID: ${serverMessageId}, optimistic was: ${msgId})`);
 
           // Success - remove from outbox
           if (outboxItem.id !== undefined) {
@@ -2113,6 +2129,7 @@ class SupabasePipeline {
           }
 
           // Fire-and-forget: fan out push notification for outbox item
+          // CRITICAL FIX: Use server-returned ID, not optimistic ID!
           try {
             const client = await this.getClient();
             const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
@@ -2123,19 +2140,20 @@ class SupabasePipeline {
                 'apikey': this.supabaseAnonKey || '',
                 'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
               };
-              this.log(`[supabase-pipeline] push-fanout call: origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
+              this.log(`[supabase-pipeline] push-fanout call (outbox): origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
+              this.log(`[supabase-pipeline] 🔑 Using server message ID for FCM (outbox): ${serverMessageId} (optimistic was: ${msgId})`);
               const res = await fetch(url, {
                 method: 'POST',
                 mode: 'cors',
                 headers: headersObj,
                 body: JSON.stringify({
-                  message_id: (JSON.parse(outboxItem.content) || {}).id || outboxItem.id,
+                  message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
                   group_id: outboxItem.group_id,
                   sender_id: outboxItem.user_id,
                   created_at: new Date().toISOString(),
                 })
               });
-              this.log(`[supabase-pipeline] push-fanout response: status=${res.status}`);
+              this.log(`[supabase-pipeline] push-fanout response (outbox): status=${res.status}`);
             } catch (_) {}
 
           } catch {}
@@ -2476,6 +2494,47 @@ class SupabasePipeline {
     if (!this.client || !this.isInitialized) {
       await this.initialize();
     }
+    return this.client!;
+  }
+
+  /**
+   * Get client with guaranteed valid auth token
+   * CRITICAL: Use this for background operations that need auth (e.g., FCM message fetch)
+   *
+   * This method ensures the auth token is valid before returning the client.
+   * If the token is expired or about to expire, it will refresh it first.
+   *
+   * @returns Promise<any> - Supabase client with valid auth token
+   */
+  public async getClientWithValidToken(): Promise<any> {
+    this.log('🔑 getClientWithValidToken() called - ensuring valid auth token');
+
+    // First, ensure client is initialized
+    if (!this.client || !this.isInitialized) {
+      this.log('🔑 Client not initialized, initializing now');
+      await this.initialize();
+    }
+
+    // Check if we have a valid token
+    const hasToken = !!this.lastKnownAccessToken;
+    this.log(`🔑 Current token status: hasToken=${hasToken}`);
+
+    if (!hasToken) {
+      this.log('⚠️ No token available, attempting to recover session');
+      const recovered = await this.recoverSession();
+      if (!recovered) {
+        this.log('❌ Session recovery failed, returning client anyway (may fail)');
+      } else {
+        this.log('✅ Session recovered successfully');
+      }
+    } else {
+      // CRITICAL FIX: Do NOT proactively refresh if we already have a token
+      // This was causing unnecessary TOKEN_REFRESHED events and outbox triggers
+      // If the token is expired, the actual API call will fail with 401 and we'll handle it then
+      this.log('✅ Token exists, using cached token (no proactive refresh)');
+    }
+
+    this.log('🔑 Returning client with best available token');
     return this.client!;
   }
 

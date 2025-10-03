@@ -1,7 +1,7 @@
 import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
 import { messageCache } from '@/lib/messageCache';
-import { preloadingService } from '@/lib/preloadingService';
+import { unreadTracker } from '@/lib/unreadTracker';
 import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
@@ -19,7 +19,6 @@ export interface FetchActions {
   loadOlderMessages: (groupId: string, pageSize?: number) => Promise<number>;
   fetchMessageById: (messageId: string) => Promise<Message | null>;
   fetchReplies: (messageId: string) => Promise<Message[]>;
-  preloadTopGroupMessages: () => Promise<void>;
   // Delta sync: fetch only new messages since cursor
   deltaSyncSince: (groupId: string, sinceIso: string) => Promise<void>;
   // Missed sync wrapper
@@ -187,7 +186,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
   fetchMessages: async (groupId: string) => {
     try {
-      console.log('🔄 Fetching messages for group:', groupId);
+      const startTime = Date.now();
+      console.log(`🔄 Fetching messages for group: ${groupId} (started at ${new Date().toISOString().split('T')[1]})`);
 
       // Throttle duplicate fetches for the same group
       const now = Date.now();
@@ -214,9 +214,23 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         }
       };
 
-      // Check if we're on a native platform with SQLite available
+      // CRITICAL FIX: Check SQLite readiness IMMEDIATELY without any async waits
+      // This ensures we load local messages first before any auth/network operations
       const isNative = Capacitor.isNativePlatform();
-      const isSqliteReady = isNative && await sqliteService.isReady();
+      let isSqliteReady = false;
+      if (isNative) {
+        // Check if SQLite is already ready (synchronous check if possible)
+        try {
+          isSqliteReady = await Promise.race([
+            sqliteService.isReady(),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)) // 100ms timeout
+          ]);
+          console.log(`📱 SQLite ready check: ${isSqliteReady} (${Date.now() - startTime}ms)`);
+        } catch (e) {
+          console.warn('⚠️ SQLite ready check failed:', e);
+          isSqliteReady = false;
+        }
+      }
 
       // Helper: merge fetched messages with existing messages to preserve realtime updates
       const mergeWithPending = (incoming: Message[]): Message[] => {
@@ -296,7 +310,10 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       };
 
       // FIRST: Try to load from in-memory cache for instant display
+      const cacheCheckTime = Date.now();
       const cachedMessages = messageCache.getCachedMessages(groupId);
+      console.log(`📦 Cache check completed in ${Date.now() - cacheCheckTime}ms, found ${cachedMessages?.length || 0} messages`);
+
       if (cachedMessages && cachedMessages.length > 0) {
         console.log('⚡ INSTANT: Loading messages from in-memory cache');
 
@@ -333,14 +350,17 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       }
 
       // SECOND: Load from SQLite (either as primary source or background refresh)
+      // CRITICAL: This should happen IMMEDIATELY, before any other operations
       let localDataLoaded = false;
       if (isSqliteReady) {
+        const sqliteStartTime = Date.now();
         const loadingMessage = cachedMessages ? 'Background refresh from SQLite' : 'Loading from SQLite';
-        console.log(`📱 ${loadingMessage}`);
+        console.log(`📱 ${loadingMessage} (started at ${sqliteStartTime - startTime}ms from group open)`);
 
         try {
-          // Load only 10 recent messages for instant UI
-          const localMessages = await sqliteService.getRecentMessages(groupId, 10);
+          // Load 50 recent messages for instant UI (increased for better history)
+          const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+          console.log(`📱 SQLite query completed in ${Date.now() - sqliteStartTime}ms, got ${localMessages?.length || 0} messages`);
 
           if (localMessages && localMessages.length > 0) {
             // Get all unique user IDs first to batch load users
@@ -366,19 +386,11 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             const pollMessages = localMessages.filter(msg => msg.message_type === 'poll');
             const pollMessageIds = pollMessages.map(msg => msg.id);
 
-            // Get current user for vote checking (with timeout to prevent hanging)
-            let user = null;
-            try {
-              const userPromise = supabasePipeline.getUser();
-              const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Auth timeout')), 10000) // Increased from 3s to 10s
-              );
-              const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
-              user = data?.user || null;
-            } catch (error) {
-              // Silently continue without user context - this is non-critical for displaying messages
-              user = null;
-            }
+            // CRITICAL FIX: Don't get user during SQLite loading - this triggers token recovery
+            // which can timeout for 10s and block message display!
+            // We'll get user votes in background after messages are displayed
+            // Typing as nullable with id to allow optional chaining (user?.id)
+            let user: { id?: string } | null = null;
 
             // Fetch poll data for poll messages
             let pollsData: any[] = [];
@@ -409,7 +421,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               });
 
               // Check current user's vote
-              const userVote = pollVotes.find(vote => vote.user_id === user?.id);
+              const currentUserId: any = (user as any)?.id;
+              const userVote = pollVotes.find(vote => vote.user_id === currentUserId);
 
               pollDataMap.set(poll.message_id, {
                 ...poll,
@@ -481,7 +494,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
-                userVotes: userVotesMap
+                userVotes: userVotesMap,
+                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
               });
               console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
             } else {
@@ -489,17 +503,60 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
-                userVotes: userVotesMap
+                userVotes: userVotesMap,
+                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
               });
               console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite`);
             }
             localDataLoaded = true;
 
-            // Load remaining messages in background
+            // Background task: Refresh poll votes with user context (non-blocking)
+            if (polls.length > 0) {
+              setTimeout(async () => {
+                try {
+                  if (!stillCurrent()) return;
+
+                  // Get current user with fast timeout
+                  let currentUser = null;
+                  try {
+                    const userPromise = supabasePipeline.getUser();
+                    const timeoutPromise = new Promise((_, reject) =>
+                      setTimeout(() => reject(new Error('Auth timeout')), 1000) // 1s timeout
+                    );
+                    const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
+                    currentUser = data?.user || null;
+                  } catch (error) {
+                    // Continue without user - votes will show as null
+                    currentUser = null;
+                  }
+
+                  if (currentUser) {
+                    // Refresh poll votes with user context
+                    const pollIds = polls.map(p => p.id);
+                    const pollVotesData = await sqliteService.getPollVotes(pollIds);
+
+                    const updatedUserVotes: Record<string, number | null> = {};
+                    polls.forEach(poll => {
+                      const userVote = pollVotesData.find(vote => vote.poll_id === poll.id && vote.user_id === currentUser.id);
+                      updatedUserVotes[poll.id] = userVote?.option_index ?? null;
+                    });
+
+                    if (stillCurrent()) {
+                      setSafely({ userVotes: updatedUserVotes });
+                      console.log(`🔄 Background: Updated poll votes for ${Object.keys(updatedUserVotes).length} polls`);
+                    }
+                  }
+                } catch (error) {
+                  console.warn('⚠️ Background poll vote refresh failed:', error);
+                }
+              }, 100); // Quick background task
+            }
+
+            // Load remaining messages in background (increased to 50 for better history)
             setTimeout(async () => {
               try {
                 console.log('🔄 Loading remaining messages in background...');
-                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 30);
+                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 50);
 
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
@@ -523,12 +580,18 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   const pollMessages = allLocalMessages.filter(msg => msg.message_type === 'poll');
                   const pollMessageIds = pollMessages.map(msg => msg.id);
 
-                  let user = null;
+                  // Get user for poll votes in background (with fast timeout)
+                  // Typing as nullable with id to allow optional chaining (user?.id)
+                  let user: { id?: string } | null = null;
                   try {
-                    const { data } = await supabasePipeline.getUser();
+                    const userPromise = supabasePipeline.getUser();
+                    const timeoutPromise = new Promise((_, reject) =>
+                      setTimeout(() => reject(new Error('Auth timeout')), 2000) // 2s timeout for background task
+                    );
+                    const { data } = await Promise.race([userPromise, timeoutPromise]) as any;
                     user = data?.user || null;
                   } catch (error) {
-                    console.warn('⚠️ Could not get current user for poll data');
+                    console.warn('⚠️ Could not get current user for poll data (background task)');
                     user = null;
                   }
 
@@ -558,7 +621,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                       }
                     });
 
-                    const userVote = pollVotes.find(vote => vote.user_id === user?.id);
+                    const currentUserId: any = (user as any)?.id;
+                    const userVote = pollVotes.find(vote => vote.user_id === currentUserId);
 
                     pollDataMap.set(poll.message_id, {
                       ...poll,
@@ -621,15 +685,34 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                   setSafely({
                     messages: mergeWithPending(mergePendingReplies(allStructuredMessages)),
                     polls: allPolls,
-                    userVotes: allUserVotesMap
+                    userVotes: allUserVotesMap,
+                    hasMoreOlder: allMessages.length >= 50, // If we got 50 messages, there might be more
+                    isLoading: false // ✅ Set loading to false after SQLite data is displayed
                   });
                   console.log(`🔄 Background loaded ${allStructuredMessages.length} total messages`);
+
+                  // ✅ Fetch unread tracking data immediately after SQLite load
+                  try {
+                    const firstUnreadId = await unreadTracker.getFirstUnreadMessageId(groupId);
+                    const unreadCount = await unreadTracker.getUnreadCount(groupId);
+                    setSafely({
+                      firstUnreadMessageId: firstUnreadId,
+                      unreadCount: unreadCount
+                    });
+                    console.log(`📊 Unread tracking: firstUnreadId=${firstUnreadId}, count=${unreadCount}`);
+                  } catch (error) {
+                    console.error('❌ Error fetching unread tracking data:', error);
+                  }
                 }
               } catch (error) {
                 console.error('❌ Error loading background messages:', error);
               }
             }, 100); // Load background messages after 100ms
           }
+
+          // ✅ CRITICAL: Set loading to false immediately after SQLite data is displayed
+          // This ensures instant UI update without waiting for Supabase
+          localDataLoaded = true;
         } catch (error) {
           console.error('❌ Error loading messages from local storage:', error);
         }
@@ -638,23 +721,80 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // If we've already loaded data from cache or local storage, don't show loading indicator
       if (!cachedMessages && !localDataLoaded) {
         setSafely({ isLoading: true });
+      } else {
+        // ✅ We have local data - hide loading indicator immediately
+        setSafely({ isLoading: false });
       }
 
       // Check network status
       const networkStatus = await Network.getStatus();
       const isOnline = networkStatus.connected;
 
-      // If offline and we couldn't load from cache or local storage, show empty state
+      // If offline, check if we have local data
       if (!isOnline) {
-        console.log('📵 Offline and no local data available');
         if (!cachedMessages && !localDataLoaded) {
+          // No local data available and offline - show empty state
+          console.log('📵 Offline: No local data available for this group');
           setSafely({ messages: [], isLoading: false });
+        } else {
+          // We have local data - we're good to go
+          console.log('📵 Offline: Using local data only');
+          setSafely({ isLoading: false });
         }
         return;
       }
 
-      // If we're online, fetch from Supabase
-      console.log('🌐 Fetching messages from Supabase...');
+      // ✅ If we have local data, fetch from Supabase in background (non-blocking)
+      // This ensures instant UI display from SQLite while Supabase syncs in background
+      if (localDataLoaded || cachedMessages) {
+        console.log('🌐 Background: Fetching messages from Supabase (non-blocking)...');
+
+        // Fetch in background without blocking - don't await this
+        setTimeout(async () => {
+          try {
+            // Only proceed if still on the same group
+            if (!stillCurrent()) {
+              console.log('⏭️ Skipping background Supabase fetch - user switched groups');
+              return;
+            }
+
+            const client = await supabasePipeline.getDirectClient();
+            const { data, error } = await client
+              .from('messages')
+              .select(`
+                *,
+                reactions(*),
+                users!messages_user_id_fkey(display_name, avatar_url, created_at)
+              `)
+              .eq('group_id', groupId)
+              .order('created_at', { ascending: false })
+              .limit(50);
+
+            if (error) throw error;
+
+            // Sync to SQLite in background
+            if (isSqliteReady && data && data.length > 0) {
+              await sqliteService.syncMessagesFromRemote(groupId, data);
+              console.log(`🔄 Background: Synced ${data.length} messages from Supabase to SQLite`);
+            }
+
+            // Update cache
+            if (data && data.length > 0) {
+              messageCache.setCachedMessages(groupId, data);
+            }
+
+            console.log('✅ Background Supabase sync completed');
+          } catch (error) {
+            console.error('❌ Background Supabase fetch failed:', error);
+          }
+        }, 200); // Small delay to ensure UI is responsive
+
+        // Return immediately - UI is already showing local data
+        return;
+      }
+
+      // If we don't have local data, fetch from Supabase (blocking)
+      console.log('🌐 Fetching messages from Supabase (no local data)...');
       const client = await supabasePipeline.getDirectClient();
       const { data, error } = await client
         .from('messages')
@@ -665,7 +805,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         `)
         .eq('group_id', groupId)
         .order('created_at', { ascending: false })
-        .limit(30);
+        .limit(50);
 
       if (error) throw error;
 
@@ -810,9 +950,37 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         messageCache.setCachedMessages(groupId, messages);
       }
 
-      // Only update UI with Supabase data if we didn't already load from cache or local storage
-      if (!cachedMessages && !localDataLoaded) {
-        setSafely({ messages: structuredMessages, isLoading: false });
+      // Update UI with Supabase data
+      // If we already loaded from cache/local, merge the Supabase data to ensure we have the latest
+      if (cachedMessages || localDataLoaded) {
+        // We already showed local data, now silently update with Supabase data if it's newer/different
+        console.log('🔄 Background: Updating UI with fresh Supabase data');
+        setSafely({
+          messages: mergeWithPending(mergePendingReplies(structuredMessages)),
+          isLoading: false,
+          hasMoreOlder: messages.length >= 50 // If we got 50 messages, there might be more
+        });
+      } else {
+        // First load from Supabase (no local data was available)
+        console.log('✅ Loaded messages from Supabase (no local data available)');
+        setSafely({
+          messages: structuredMessages,
+          isLoading: false,
+          hasMoreOlder: messages.length >= 50 // If we got 50 messages, there might be more
+        });
+      }
+
+      // Fetch unread tracking data
+      try {
+        const firstUnreadId = await unreadTracker.getFirstUnreadMessageId(groupId);
+        const unreadCount = await unreadTracker.getUnreadCount(groupId);
+        setSafely({
+          firstUnreadMessageId: firstUnreadId,
+          unreadCount: unreadCount
+        });
+        console.log(`📊 Unread tracking: firstUnreadId=${firstUnreadId}, count=${unreadCount}`);
+      } catch (error) {
+        console.error('❌ Error fetching unread tracking data:', error);
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
@@ -994,20 +1162,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
     }
   },
 
-  preloadTopGroupMessages: async () => {
-    try {
-      const { groups } = get();
-      if (!groups || groups.length === 0) {
-        console.log('🚀 Preloader: No groups available for preloading');
-        return;
-      }
-
-      console.log('🚀 Preloader: Starting preload for top groups while on dashboard');
-      await preloadingService.preloadTopGroups(groups);
-    } catch (error) {
-      console.error('🚀 Preloader: Error during preload:', error);
-    }
-  },
+  // REMOVED: preloadTopGroupMessages - preloader removed entirely (Fix #3)
+  // Messages load instantly from SQLite when opening groups, no need for preloading
 
   // Delta sync implementation
   deltaSyncSince: async (groupId: string, sinceIso: string) => {

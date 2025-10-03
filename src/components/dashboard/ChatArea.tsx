@@ -19,16 +19,18 @@ import { ChatInput } from '@/components/chat/ChatInput';
 import { ThreadPanel } from '@/components/chat/ThreadPanel';
 import { GroupDetailsPanel } from '@/components/dashboard/GroupDetailsPanel';
 import { WhatsAppEmojiPanel } from '@/components/chat/WhatsAppEmojiPanel';
+import { unreadTracker } from '@/lib/unreadTracker';
 
 export function ChatArea() {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const { 
-    activeGroup, 
-    fetchMessages, 
-    activeThread, 
+  const {
+    activeGroup,
+    fetchMessages,
+    messages,
+    activeThread,
     connectionStatus,
     cleanupRealtimeSubscription,
     showGroupDetailsPanel,
@@ -49,6 +51,22 @@ export function ChatArea() {
       });
     }
   }, [activeGroup?.id, fetchMessages]);
+
+  // Mark messages as read when viewing the chat
+  useEffect(() => {
+    if (activeGroup?.id && messages.length > 0) {
+      // Mark as read after a short delay (user has actually viewed the messages)
+      const markReadTimer = setTimeout(() => {
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage) {
+          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id);
+          console.log(`✅ Marked group ${activeGroup.id} as read up to message ${lastMessage.id}`);
+        }
+      }, 2000); // 2 second delay to ensure user is actually viewing
+
+      return () => clearTimeout(markReadTimer);
+    }
+  }, [activeGroup?.id, messages]);
 
   // Cleanup on unmount
   useEffect(() => {

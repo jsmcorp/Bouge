@@ -224,6 +224,8 @@ export class DatabaseManager {
         user_id TEXT NOT NULL,
         role TEXT DEFAULT 'participant',
         joined_at INTEGER NOT NULL,
+        last_read_at INTEGER DEFAULT 0,
+        last_read_message_id TEXT,
         PRIMARY KEY (group_id, user_id),
         FOREIGN KEY (group_id) REFERENCES groups(id),
         FOREIGN KEY (user_id) REFERENCES users(id)
@@ -319,6 +321,10 @@ export class DatabaseManager {
       await ensureColumn('users', 'phone_number', 'TEXT');
       await ensureColumn('users', 'is_onboarded', 'INTEGER', 'DEFAULT 0');
       await ensureColumn('users', 'created_at', 'INTEGER');
+
+      // Group members - unread tracking
+      await ensureColumn('group_members', 'last_read_at', 'INTEGER', 'DEFAULT 0');
+      await ensureColumn('group_members', 'last_read_message_id', 'TEXT');
 
       console.log('✅ Database migration completed');
     } catch (error) {

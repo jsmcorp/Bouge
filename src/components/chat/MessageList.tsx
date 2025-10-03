@@ -3,32 +3,35 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
-import { RefreshCw } from 'lucide-react';
-import { toast } from 'sonner';
+import { UnreadMessageSeparator } from '@/components/chat/UnreadMessageSeparator';
+import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, fetchMessages, loadOlderMessages, isLoadingOlder, hasMoreOlder } = useChatStore();
+  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId, unreadCount } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [isPulling, setIsPulling] = useState(false);
-  const [pullDistance, setPullDistance] = useState(0);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const touchStartY = useRef(0);
-  const scrollTop = useRef(0);
+  const unreadSeparatorRef = useRef<HTMLDivElement>(null);
+  const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+
+  // Debug logging for unread tracking
+  useEffect(() => {
+    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}`);
+  }, [firstUnreadMessageId, unreadCount, messages.length]);
 
   const loadingOlderRef = useRef(false);
 
-  // Attach scroll listener to the ScrollArea viewport for lazy loading older messages
+  // Attach scroll listener to the ScrollArea viewport for automatic lazy loading of older messages
+  // WhatsApp-style: automatically load when scrolling near the top
   useEffect(() => {
     const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
     if (!viewport) return;
 
     const onScroll = async () => {
       if (!activeGroup || loadingOlderRef.current) return;
-      // Near top threshold
-      if (viewport.scrollTop <= 64 && hasMoreOlder && !isLoadingOlder) {
+      // Trigger loading when within 150px of the top (WhatsApp-style threshold)
+      if (viewport.scrollTop <= 150 && hasMoreOlder && !isLoadingOlder) {
         loadingOlderRef.current = true;
         const prevHeight = viewport.scrollHeight;
         const prevTop = viewport.scrollTop;
@@ -53,9 +56,28 @@ export function MessageList() {
     return () => viewport.removeEventListener('scroll', onScroll);
   }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages]);
 
-  // Auto-scroll to bottom when new messages arrive - instant scroll
+  // Auto-scroll to first unread message on initial load
   useEffect(() => {
-    if (messagesEndRef.current && messages.length > 0) {
+    if (firstUnreadMessageId && !hasScrolledToUnread && messages.length > 0 && unreadSeparatorRef.current) {
+      console.log(`📍 Auto-scrolling to first unread message: ${firstUnreadMessageId}`);
+      setTimeout(() => {
+        unreadSeparatorRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center'
+        });
+        setHasScrolledToUnread(true);
+      }, 300); // Small delay to ensure DOM is fully rendered
+    }
+  }, [firstUnreadMessageId, messages.length, hasScrolledToUnread]);
+
+  // Reset scroll flag when changing groups
+  useEffect(() => {
+    setHasScrolledToUnread(false);
+  }, [activeGroup?.id]);
+
+  // Auto-scroll to bottom when new messages arrive (only if no unread or already scrolled to unread)
+  useEffect(() => {
+    if (messagesEndRef.current && messages.length > 0 && (!firstUnreadMessageId || hasScrolledToUnread)) {
       // Use setTimeout to ensure DOM is updated
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({
@@ -64,62 +86,9 @@ export function MessageList() {
         });
       }, 0);
     }
-  }, [messages, typingUsers]);
+  }, [messages, typingUsers, firstUnreadMessageId, hasScrolledToUnread]);
 
-  // Handle pull-to-refresh
-  const handleTouchStart = (e: React.TouchEvent) => {
-    touchStartY.current = e.touches[0].clientY;
-    if (scrollAreaRef.current) {
-      const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
-      if (scrollContainer) {
-        scrollTop.current = scrollContainer.scrollTop;
-      }
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (scrollTop.current === 0) {
-      const touchY = e.touches[0].clientY;
-      const distance = touchY - touchStartY.current;
-
-      if (distance > 5) {
-        setIsPulling(true);
-        setPullDistance(Math.min(distance * 0.5, 80)); // Limit max pull distance
-        e.preventDefault();
-      }
-    }
-  };
-
-  const handleTouchEnd = async () => {
-    if (isPulling && pullDistance > 60 && activeGroup) {
-      // Trigger refresh
-      setIsRefreshing(true);
-      setPullDistance(60); // Keep showing the refresh indicator
-
-      try {
-        await fetchMessages(activeGroup.id);
-        toast.success('Messages refreshed');
-      } catch (error) {
-        console.error('Error refreshing messages:', error);
-        toast.error('Failed to refresh messages');
-      } finally {
-        // Reset pull state with a small delay to show completion
-        setTimeout(() => {
-          setIsRefreshing(false);
-          setIsPulling(false);
-          setPullDistance(0);
-        }, 500);
-      }
-    } else {
-      // Reset pull state immediately if not triggering refresh
-      setIsPulling(false);
-      setPullDistance(0);
-    }
-  };
-
-  // Remove loading screen - messages should load instantly from local storage
-
-  if (messages.length === 0 && typingUsers.length === 0 && !isPulling && !isRefreshing) {
+  if (messages.length === 0 && typingUsers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
@@ -136,37 +105,32 @@ export function MessageList() {
     <ScrollArea
       className="h-full overflow-x-hidden"
       ref={scrollAreaRef}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
     >
-      {/* Pull-to-refresh indicator */}
-      {(isPulling || isRefreshing) && (
-        <div
-          className="flex items-center justify-center py-2 sm:py-4 transition-transform"
-          style={{
-            transform: `translateY(${pullDistance}px)`,
-            height: pullDistance > 0 ? `${pullDistance}px` : '0px'
-          }}
-        >
-          <RefreshCw
-            className={`w-5 h-5 sm:w-6 sm:h-6 text-primary ${isRefreshing ? 'animate-spin' : ''}`}
-            style={{
-              transform: `rotate(${pullDistance * 3}deg)`
-            }}
-          />
-          <span className="ml-2 text-xs sm:text-sm font-medium">
-            {isRefreshing ? 'Refreshing...' : 'Pull to refresh'}
-          </span>
-        </div>
-      )}
-
       <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-2 overflow-x-hidden">
-        {messages.map((message) => (
-          <div key={message.id}>
-            <MessageBubble message={message} />
+        {/* Loading indicator for older messages - WhatsApp style */}
+        {isLoadingOlder && hasMoreOlder && (
+          <div className="flex items-center justify-center py-2">
+            <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
+            <span className="ml-2 text-xs text-muted-foreground">Loading older messages...</span>
           </div>
-        ))}
+        )}
+
+        {messages.map((message) => {
+          // Check if this is the first unread message
+          const isFirstUnread = message.id === firstUnreadMessageId;
+
+          return (
+            <div key={message.id}>
+              {/* Show unread separator before first unread message */}
+              {isFirstUnread && (
+                <div ref={unreadSeparatorRef}>
+                  <UnreadMessageSeparator />
+                </div>
+              )}
+              <MessageBubble message={message} />
+            </div>
+          );
+        })}
 
         {/* Typing Indicator (hide self) */}
         {typingUsers.filter(u => u.user_id !== user?.id).length > 0 && (
