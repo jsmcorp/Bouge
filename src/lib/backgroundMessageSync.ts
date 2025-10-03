@@ -78,12 +78,17 @@ class BackgroundMessageSyncService {
 
       if (error) {
         const elapsed = Date.now() - startTime;
-        console.error(`[bg-sync] ❌ Error fetching message ${messageId} after ${elapsed}ms:`, {
-          message: error.message,
-          code: error.code,
-          details: error.details,
-          hint: error.hint
-        });
+        console.error(`[bg-sync] ❌ Error fetching message ${messageId} after ${elapsed}ms:`,
+          JSON.stringify({
+            message: error.message,
+            code: error.code,
+            details: error.details,
+            hint: error.hint,
+            status: error.status,
+            statusText: error.statusText,
+            name: error.name
+          }, null, 2)
+        );
 
         // If message doesn't exist yet (timing issue), retry after delay
         if (error.code === 'PGRST116' || error.message?.includes('no rows')) {
@@ -112,10 +117,14 @@ class BackgroundMessageSyncService {
 
           if (retryError) {
             const totalElapsed = Date.now() - startTime;
-            console.error(`[bg-sync] ❌ Retry failed after ${totalElapsed}ms:`, {
-              message: retryError.message,
-              code: retryError.code
-            });
+            console.error(`[bg-sync] ❌ Retry failed after ${totalElapsed}ms:`,
+              JSON.stringify({
+                message: retryError.message,
+                code: retryError.code,
+                status: retryError.status,
+                statusText: retryError.statusText
+              }, null, 2)
+            );
             return false;
           }
 

@@ -1,15 +1,12 @@
 import { useState, useEffect } from 'react';
 import { messageCache } from '@/lib/messageCache';
-import { preloadingService } from '@/lib/preloadingService';
 
 export function CacheStatus() {
   const [stats, setStats] = useState(messageCache.getStats());
-  const [preloadStatus, setPreloadStatus] = useState(preloadingService.getPreloadingStatus());
 
   useEffect(() => {
     const interval = setInterval(() => {
       setStats(messageCache.getStats());
-      setPreloadStatus(preloadingService.getPreloadingStatus());
     }, 1000);
 
     return () => clearInterval(interval);
@@ -25,7 +22,6 @@ export function CacheStatus() {
       <div>Cache: {stats.cacheSize} groups</div>
       <div>Hits: {stats.hits} | Misses: {stats.misses}</div>
       <div>Preloads: {stats.preloads}</div>
-      <div>Preloading: {preloadStatus.isPreloading ? 'Yes' : 'No'} ({preloadStatus.queueSize})</div>
     </div>
   );
 }

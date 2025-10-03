@@ -57,6 +57,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let authStateListener: any = null;
   let isConnecting = false; // Guard against overlapping connection attempts
   let lastForceReconnectAt = 0; // Debounce force reconnects
+  let cleanupTimer: NodeJS.Timeout | null = null; // Fix #5: 5s delay before cleanup
 
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
@@ -461,6 +462,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     },
 
     setupSimplifiedRealtimeSubscription: async (groupId: string) => {
+      // Fix #5: Cancel any pending cleanup timer when setting up new subscription
+      if (cleanupTimer) {
+        log('Canceling pending cleanup timer (reusing connection)');
+        clearTimeout(cleanupTimer);
+        cleanupTimer = null;
+      }
+
       if (isConnecting) {
         log('Connection already in progress, skipping');
         return;
@@ -831,41 +839,64 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
 
     cleanupRealtimeSubscription: async () => {
-      const { realtimeChannel, typingTimeout } = get();
+      // Fix #5: Add 5s delay before cleanup to handle quick navigation
+      // If user opens another group within 5s, we can reuse the connection
 
-      log('Cleaning up realtime subscription (navigation) - keeping root socket alive');
-      isConnecting = false; // Clear connection guard
-      // Do NOT reset outbox state on routine navigation
+      log('Scheduling cleanup in 5s (allows quick navigation reuse)');
 
-      if (typingTimeout) clearTimeout(typingTimeout);
-
-      if (realtimeChannel) {
-        try {
-          const client = await supabasePipeline.getDirectClient();
-          client.removeChannel(realtimeChannel);
-        } catch (e) {
-          log('Error removing channel: ' + e);
-        }
-        set({ realtimeChannel: null });
+      // Clear any existing cleanup timer
+      if (cleanupTimer) {
+        clearTimeout(cleanupTimer);
+        cleanupTimer = null;
       }
 
-      // No reconnect timeout to clear with simplified logic
+      // Schedule cleanup after 5 seconds
+      cleanupTimer = setTimeout(async () => {
+        const { realtimeChannel, typingTimeout, connectionStatus } = get();
 
-      // Clear typing users and keep connection status based on actual socket/token health
-      const hasToken = !!(supabasePipeline as any).getCachedAccessToken?.() || !!(await supabasePipeline.getWorkingSession())?.access_token;
-      set({
-        connectionStatus: 'disconnected',
-        typingUsers: [],
-        typingTimeout: null,
-        subscribedAt: null,
-        isReconnecting: false
-      });
+        // CRITICAL FIX: Don't cleanup if connection is still active/connected
+        if (connectionStatus === 'connected' && realtimeChannel) {
+          log('⏭️ Skipping cleanup - connection still active and healthy');
+          cleanupTimer = null;
+          return;
+        }
 
-      // Update WhatsApp-style connection status
-      try {
-        const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
-        whatsappConnection.setConnectionState('disconnected', hasToken ? 'Disconnected (auth ok)' : 'Disconnected');
-      } catch {}
+        log('Executing delayed cleanup (5s passed) - keeping root socket alive');
+        isConnecting = false; // Clear connection guard
+        // Do NOT reset outbox state on routine navigation
+
+        if (typingTimeout) clearTimeout(typingTimeout);
+
+        if (realtimeChannel) {
+          try {
+            const client = await supabasePipeline.getDirectClient();
+            client.removeChannel(realtimeChannel);
+          } catch (e) {
+            log('Error removing channel: ' + e);
+          }
+          set({ realtimeChannel: null });
+        }
+
+        // No reconnect timeout to clear with simplified logic
+
+        // Clear typing users and keep connection status based on actual socket/token health
+        const hasToken = !!(supabasePipeline as any).getCachedAccessToken?.() || !!(await supabasePipeline.getWorkingSession())?.access_token;
+        set({
+          connectionStatus: 'disconnected',
+          typingUsers: [],
+          typingTimeout: null,
+          subscribedAt: null,
+          isReconnecting: false
+        });
+
+        // Update WhatsApp-style connection status
+        try {
+          const { whatsappConnection } = await import('@/lib/whatsappStyleConnection');
+          whatsappConnection.setConnectionState('disconnected', hasToken ? 'Disconnected (auth ok)' : 'Disconnected');
+        } catch {}
+
+        cleanupTimer = null;
+      }, 5000); // 5 second delay
     },
 
     sendTypingStatus: (isTyping: boolean, isGhost = false) => {

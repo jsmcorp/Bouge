@@ -77,19 +77,8 @@ function AppContent() {
         console.log('📱 App state changed:', isActive ? 'active' : 'inactive');
 
         if (isActive) {
-          // App resume is handled centrally in main.tsx - only handle dashboard-specific preloading here
-          const currentPath = window.location.pathname;
-          if (currentPath === '/dashboard') {
-            try {
-              console.log('🚀 App resumed on dashboard: triggering background preload');
-              // Delay preload to avoid interfering with main resume logic
-              setTimeout(() => {
-                useChatStore.getState().preloadTopGroupMessages();
-              }, 1000);
-            } catch (error) {
-              console.error('❌ Failed to trigger preload on resume:', error);
-            }
-          }
+          // App resume is handled centrally in main.tsx
+          // Preloader removed - messages load instantly from SQLite when opening groups
         } else {
           // Handle app going to background/pause
           try {

@@ -16,14 +16,14 @@ class MessageCacheManager {
   private cache = new Map<string, CachedMessages>();
   private readonly CACHE_EXPIRY = 15 * 60 * 1000; // 15 minutes
   private readonly MAX_CACHE_SIZE = 10; // Maximum number of chats to cache
-  private readonly RECENT_MESSAGES_COUNT = 10;
+  private readonly RECENT_MESSAGES_COUNT = 50; // FIXED: Match current message loading (was 10 from preloader days)
   private stats: CacheStats = { hits: 0, misses: 0, preloads: 0 };
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     // Start cleanup interval
     this.startCleanupInterval();
-    console.log('📦 MessageCache: Initialized with 15min expiry, max 10 chats');
+    console.log('📦 MessageCache: Initialized with 15min expiry, max 10 chats, 50 messages per chat');
   }
 
   /**
