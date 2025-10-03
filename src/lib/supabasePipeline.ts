@@ -575,10 +575,11 @@ class SupabasePipeline {
             access_token: this.lastKnownAccessToken,
             refresh_token: this.lastKnownRefreshToken,
           });
-          // CRITICAL FIX: Increased timeout from 5s to 10s for better reliability
-          // Background message sync needs more time on slow networks
+          // CRITICAL FIX: Reduced timeout from 10s to 3s for faster failure detection
+          // FCM-triggered fetches should use getDirectClient() instead (no token validation)
+          // This timeout only affects operations that explicitly need validated tokens
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('setSession timeout')), 10000)
+            setTimeout(() => reject(new Error('setSession timeout')), 3000)
           );
           let data: any;
           try {
@@ -590,7 +591,7 @@ class SupabasePipeline {
             }
           } catch (e: any) {
             if (e && e.message === 'setSession timeout') {
-              this.log('🔄 Token recovery timed out after 10s');
+              this.log('🔄 Token recovery timed out after 3s');
               return false;
             }
             throw e;

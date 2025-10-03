@@ -51,6 +51,15 @@ class BackgroundMessageSyncService {
         return false;
       }
 
+      // CRITICAL FIX: Check if message already exists (delivered via realtime WebSocket)
+      // This prevents redundant fetches when realtime already delivered the message
+      const exists = await sqliteService.messageExists(messageId);
+      if (exists) {
+        const elapsed = Date.now() - startTime;
+        console.log(`[bg-sync] ✅ Message ${messageId} already exists (delivered via realtime), skipping fetch (${elapsed}ms)`);
+        return true; // Return true since message is already available
+      }
+
       // Fetch message from Supabase with timeout
       // CRITICAL FIX: Use getDirectClient() for FCM-triggered fetches
       // FCM receipt already implies authenticated user context - no need to validate/refresh token

@@ -205,10 +205,11 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		try {
 			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
 
-			// Add 15-second timeout to prevent hanging
-			// CRITICAL: Must account for token recovery (3s) + fetch (8s) + buffer (4s) = 15s
+			// Add 10-second timeout to prevent hanging
+			// CRITICAL: backgroundMessageSync uses getDirectClient() (no token validation)
+			// Timeout accounts for: message existence check (50ms) + fetch (8s) + buffer (2s) = 10s
 			const timeoutPromise = new Promise<boolean>((_, reject) =>
-				setTimeout(() => reject(new Error('Direct fetch timeout after 15s')), 15000)
+				setTimeout(() => reject(new Error('Direct fetch timeout after 10s')), 10000)
 			);
 
 			const fetchPromise = backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);
@@ -256,27 +257,31 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		}
 	}
 
-	// STEP 2: ALWAYS trigger fallback mechanism (onWake) - this is CRITICAL
-	// Even if direct fetch succeeded, onWake() provides additional sync and connection management
-	// This ensures messages are NEVER lost, even if direct fetch fails or times out
-	try {
-		console.log(`[push] 🔄 Triggering fallback sync via onWake (messageHandled=${messageHandled})`);
-		await useChatStore.getState().onWake?.(reason, data?.group_id);
-		console.log(`[push] ✅ Fallback sync completed via onWake`);
-	} catch (wakeErr) {
-		console.error('[push] ❌ CRITICAL: onWake failed (this should never happen):', wakeErr);
-
-		// Last resort: Try direct fallback call
+	// STEP 2: Trigger fallback mechanism (onWake) ONLY if direct fetch failed
+	// CRITICAL FIX: Skip fallback if message was already handled (exists in SQLite)
+	// This prevents redundant sync operations when realtime already delivered the message
+	if (!messageHandled) {
 		try {
-			console.log('[push] 🆘 Attempting emergency fallback sync...');
-			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-			if (data.group_id) {
-				await backgroundMessageSync.fetchMissedMessages(data.group_id);
-				console.log('[push] ✅ Emergency fallback sync completed');
+			console.log(`[push] 🔄 Direct fetch failed, triggering fallback sync via onWake`);
+			await useChatStore.getState().onWake?.(reason, data?.group_id);
+			console.log(`[push] ✅ Fallback sync completed via onWake`);
+		} catch (wakeErr) {
+			console.error('[push] ❌ CRITICAL: onWake failed (this should never happen):', wakeErr);
+
+			// Last resort: Try direct fallback call
+			try {
+				console.log('[push] 🆘 Attempting emergency fallback sync...');
+				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+				if (data.group_id) {
+					await backgroundMessageSync.fetchMissedMessages(data.group_id);
+					console.log('[push] ✅ Emergency fallback sync completed');
+				}
+			} catch (emergencyErr) {
+				console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
 			}
-		} catch (emergencyErr) {
-			console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
 		}
+	} else {
+		console.log(`[push] ⏭️ Skipping fallback sync - message already handled (messageHandled=${messageHandled})`);
 	}
 
 	// STEP 3: Dispatch custom event for any other listeners

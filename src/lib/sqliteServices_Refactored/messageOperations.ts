@@ -116,6 +116,26 @@ export class MessageOperations {
     }
   }
 
+  /**
+   * Check if a message exists in local storage
+   * Used to avoid redundant fetches when message already delivered via realtime
+   */
+  public async messageExists(messageId: string): Promise<boolean> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    try {
+      const result = await db.query(
+        'SELECT 1 FROM messages WHERE id = ? LIMIT 1',
+        [messageId]
+      );
+      return (result.values?.length || 0) > 0;
+    } catch (error) {
+      console.error(`❌ Error checking message existence ${messageId}:`, error);
+      return false; // Assume doesn't exist on error to allow fetch attempt
+    }
+  }
+
   public async syncMessagesFromRemote(groupId: string, messages: Array<{
     id: string;
     group_id: string;

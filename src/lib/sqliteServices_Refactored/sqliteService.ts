@@ -102,6 +102,10 @@ class SQLiteService {
     return this.messageOps.deleteMessage(messageId);
   }
 
+  public async messageExists(messageId: string): Promise<boolean> {
+    return this.messageOps.messageExists(messageId);
+  }
+
   public async syncMessagesFromRemote(groupId: string, messages: Array<{
     id: string;
     group_id: string;
