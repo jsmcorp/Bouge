@@ -65,8 +65,107 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let circuitBreakerOpen = false;
   let circuitBreakerTimer: NodeJS.Timeout | null = null;
 
+  // CRITICAL FIX (LOG46 Phase 3): Heartbeat mechanism to detect realtime death
+  let lastRealtimeEventAt = Date.now();
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatCheckTimer: NodeJS.Timeout | null = null;
+  const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30 seconds
+  const HEARTBEAT_TIMEOUT_MS = 60000; // Consider dead if no events for 60 seconds
+
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
+
+  // CRITICAL FIX (LOG46 Phase 3): Heartbeat functions to detect and recover from realtime death
+  const updateLastEventTime = () => {
+    lastRealtimeEventAt = Date.now();
+  };
+
+  const startHeartbeat = (channel: any, groupId: string) => {
+    log('💓 Starting heartbeat mechanism');
+
+    // Clear any existing timers
+    stopHeartbeat();
+
+    // Send heartbeat every 30 seconds
+    heartbeatTimer = setInterval(() => {
+      const { connectionStatus } = get();
+      if (connectionStatus === 'connected' && channel) {
+        try {
+          channel.send({
+            type: 'broadcast',
+            event: 'heartbeat',
+            payload: { timestamp: Date.now() }
+          });
+          log('💓 Heartbeat sent');
+        } catch (error) {
+          log(`💓 Heartbeat send failed: ${error}`);
+        }
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    // Check for realtime death every 10 seconds
+    heartbeatCheckTimer = setInterval(() => {
+      const { connectionStatus } = get();
+      const timeSinceLastEvent = Date.now() - lastRealtimeEventAt;
+
+      if (connectionStatus === 'connected' && timeSinceLastEvent > HEARTBEAT_TIMEOUT_MS) {
+        log(`⚠️ Realtime appears DEAD (no events for ${Math.round(timeSinceLastEvent / 1000)}s)`);
+        log('🔄 Forcing reconnection due to realtime death');
+
+        // Stop heartbeat before reconnecting
+        stopHeartbeat();
+
+        // Force reconnection
+        forceRealtimeRecovery(groupId);
+      }
+    }, 10000); // Check every 10 seconds
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+      log('💓 Heartbeat stopped');
+    }
+    if (heartbeatCheckTimer) {
+      clearInterval(heartbeatCheckTimer);
+      heartbeatCheckTimer = null;
+      log('💓 Heartbeat check stopped');
+    }
+  };
+
+  const forceRealtimeRecovery = async (groupId: string) => {
+    log('🔧 CRITICAL: Forcing realtime recovery');
+
+    // Step 1: Cleanup current subscription
+    const { realtimeChannel } = get();
+    if (realtimeChannel) {
+      try {
+        const client = await supabasePipeline.getDirectClient();
+        await client.removeChannel(realtimeChannel);
+        log('🔧 Removed dead channel');
+      } catch (error) {
+        log(`🔧 Error removing dead channel: ${error}`);
+      }
+      set({ realtimeChannel: null });
+    }
+
+    // Step 2: Force session refresh
+    log('🔧 Forcing session refresh');
+    try {
+      await supabasePipeline.refreshSessionDirect();
+      log('🔧 Session refreshed successfully');
+    } catch (error) {
+      log(`🔧 Session refresh failed: ${error}`);
+    }
+
+    // Step 3: Recreate subscription with exponential backoff
+    log('🔧 Recreating subscription');
+    set({ connectionStatus: 'reconnecting' });
+
+    // Use handleChannelError for exponential backoff logic
+    handleChannelError(groupId);
+  };
 
   // Simplified connection monitoring - rely on Supabase's built-in reconnection with Web Worker heartbeats
 
@@ -634,6 +733,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           // 3. SQLite INSERT OR REPLACE
 
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const row = payload.new as DbMessageRow;
 
           log(`📨 Realtime INSERT received: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
@@ -706,6 +806,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const pollRow = payload.new as DbPollRow;
           await handlePollInsert(pollRow, user.id, groupId);
         });
@@ -716,6 +817,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
+          updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
           const vote = payload.new as { poll_id: string; user_id: string; option_index: number };
           if (vote.user_id === user.id) return; // Skip own votes
 
@@ -742,16 +844,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           .on('presence', { event: 'sync' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .on('presence', { event: 'join' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .on('presence', { event: 'leave' }, () => {
             if (localToken !== connectionToken) return;
             bumpActivity();
+            updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
           .subscribe(async (status: any) => {
@@ -794,7 +899,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Stop degraded poll fallback when connected
               try { (get() as any).stopPollFallback?.(); } catch {}
 
-              // No custom heartbeat needed - Supabase Web Worker handles this
+              // CRITICAL FIX (LOG46 Phase 3): Start heartbeat mechanism to detect realtime death
+              startHeartbeat(channel, groupId);
+              updateLastEventTime(); // Initialize timestamp
 
               // Process outbox after successful connection using unified system (delayed to avoid redundant triggers)
               try {
@@ -817,6 +924,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Connection failed - let Supabase handle reconnection
               log(`❌ Connection failed with status: ${status}`);
               isConnecting = false; // Clear the guard
+
+              // CRITICAL FIX (LOG46 Phase 3): Stop heartbeat when connection fails
+              stopHeartbeat();
 
               // Enhanced handling for CHANNEL_ERROR - try session refresh first, avoid excessive rebuilds
               if (status === 'CHANNEL_ERROR') {
@@ -970,6 +1080,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Do NOT reset outbox state on routine navigation
 
         if (typingTimeout) clearTimeout(typingTimeout);
+
+        // CRITICAL FIX (LOG46 Phase 3): Stop heartbeat before cleanup
+        stopHeartbeat();
 
         if (realtimeChannel) {
           try {
