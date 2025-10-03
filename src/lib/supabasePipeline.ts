@@ -130,10 +130,75 @@ class SupabasePipeline {
   private readonly maxFailures = 10; // Increased from 5 to reduce false positives
   private readonly circuitBreakerResetMs = 30000; // 30 seconds (reduced from 60s)
 
+  // Proactive token refresh timer
+  private proactiveRefreshTimer: NodeJS.Timeout | null = null;
+
   constructor() {
     this.log('🚀 Pipeline initialized');
     this.log('🧪 Debug tag: v2025-09-24.stage-markers.v2');
     this.log('🧪 Marker pack installed: entered-send, pre-network, POST markers, 5s timeout→outbox, watchdog job creation');
+
+    // CRITICAL FIX: Start proactive token refresh to prevent JWT expiry
+    this.startProactiveTokenRefresh();
+  }
+
+  /**
+   * CRITICAL FIX: Proactive token refresh to prevent JWT expiry
+   * Checks token expiry every 5 minutes and refreshes if less than 5 minutes until expiry
+   */
+  private startProactiveTokenRefresh(): void {
+    // Clear any existing timer
+    if (this.proactiveRefreshTimer) {
+      clearInterval(this.proactiveRefreshTimer);
+    }
+
+    // Check every 5 minutes
+    this.proactiveRefreshTimer = setInterval(async () => {
+      try {
+        // Only run if we have a client
+        if (!this.client?.auth) return;
+
+        // Get current session
+        const { data } = await this.client.auth.getSession();
+        const session = data?.session;
+
+        if (!session?.expires_at) return;
+
+        const expiresAt = session.expires_at;
+        const now = Math.floor(Date.now() / 1000);
+        const timeUntilExpiry = expiresAt - now;
+
+        // Refresh if less than 5 minutes (300 seconds) until expiry
+        if (timeUntilExpiry < 300 && timeUntilExpiry > 0) {
+          this.log(`🔄 Proactive token refresh (expires in ${timeUntilExpiry}s)`);
+          const success = await this.refreshSessionDirect();
+          if (success) {
+            this.log('✅ Proactive token refresh successful');
+          } else {
+            this.log('⚠️ Proactive token refresh failed');
+          }
+        } else if (timeUntilExpiry <= 0) {
+          this.log('⚠️ Token already expired! Forcing refresh...');
+          await this.refreshSessionDirect();
+        }
+      } catch (error) {
+        this.log('⚠️ Proactive token refresh check error:', stringifyError(error));
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+
+    this.log('✅ Proactive token refresh timer started (checks every 5 minutes)');
+  }
+
+  /**
+   * Stop proactive token refresh (cleanup)
+   * Called when pipeline is destroyed or user logs out
+   */
+  public stopProactiveTokenRefresh(): void {
+    if (this.proactiveRefreshTimer) {
+      clearInterval(this.proactiveRefreshTimer);
+      this.proactiveRefreshTimer = null;
+      this.log('🛑 Proactive token refresh timer stopped');
+    }
   }
 
   // Terminal instrumentation helpers
@@ -859,6 +924,7 @@ class SupabasePipeline {
 
   /**
    * Get current session with deduplication and caching
+   * CRITICAL FIX: Added timeout to waiting for in-flight session request to prevent deadlock
    */
   public async getSession(): Promise<AuthOperationResult> {
     // Check if we have a valid cached session
@@ -868,10 +934,25 @@ class SupabasePipeline {
       return { data: { session: this.cachedSession.session } };
     }
 
-    // If there's already an in-flight session request, wait for it
+    // If there's already an in-flight session request, wait for it WITH TIMEOUT
+    // CRITICAL FIX: This prevents deadlock when setSession/refreshSession hangs internally
     if (this.inFlightSessionPromise) {
-      this.log('🔐 Waiting for in-flight session request');
-      return await this.inFlightSessionPromise;
+      this.log('🔐 Waiting for in-flight session request (max 5s)');
+      try {
+        const timeoutPromise = new Promise<AuthOperationResult>((_, reject) => {
+          setTimeout(() => reject(new Error('In-flight session request timeout')), 5000);
+        });
+        return await Promise.race([this.inFlightSessionPromise, timeoutPromise]);
+      } catch (error: any) {
+        if (error?.message === 'In-flight session request timeout') {
+          this.log('⚠️ In-flight session request timed out after 5s, clearing and retrying');
+          // Clear the hung promise to allow new requests
+          this.inFlightSessionPromise = null;
+          // Fall through to create new request
+        } else {
+          throw error;
+        }
+      }
     }
 
     // Create new session request

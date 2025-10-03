@@ -59,6 +59,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   let lastForceReconnectAt = 0; // Debounce force reconnects
   let cleanupTimer: NodeJS.Timeout | null = null; // Fix #5: 5s delay before cleanup
 
+  // CRITICAL FIX: Exponential backoff and circuit breaker for realtime reconnection
+  let retryCount = 0;
+  const maxRetries = 5;
+  let circuitBreakerOpen = false;
+  let circuitBreakerTimer: NodeJS.Timeout | null = null;
+
   const bumpActivity = () => set({ lastActivityAt: Date.now() });
   const log = (message: string) => console.log(`[realtime-v2] ${message}`);
 
@@ -103,7 +109,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     }
   }
 
-  // Simplified reconnection - let Supabase handle the timing
+  // CRITICAL FIX: Simplified reconnection with exponential backoff and circuit breaker
   const handleChannelError = (groupId: string) => {
     log('Channel error detected, cleaning up and attempting reconnection');
 
@@ -120,6 +126,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       set({ realtimeChannel: null });
     }
 
+    // Check if circuit breaker is open
+    if (circuitBreakerOpen) {
+      log('⚠️ Circuit breaker is open, skipping reconnection attempt');
+      set({ connectionStatus: 'disconnected' });
+      return;
+    }
+
     // Check if we should attempt reconnection
     const { online } = get();
     if (!online) {
@@ -127,6 +140,49 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       set({ connectionStatus: 'disconnected' });
       return;
     }
+
+    // Increment retry count
+    retryCount++;
+    log(`Reconnection attempt ${retryCount}/${maxRetries}`);
+
+    // Check if we've exceeded max retries
+    if (retryCount >= maxRetries) {
+      log(`❌ Max retries (${maxRetries}) exceeded, opening circuit breaker for 5 minutes`);
+      circuitBreakerOpen = true;
+      set({ connectionStatus: 'disconnected' });
+
+      // Close circuit breaker after 5 minutes
+      circuitBreakerTimer = setTimeout(() => {
+        log('✅ Circuit breaker closed, allowing reconnection attempts');
+        circuitBreakerOpen = false;
+        retryCount = 0;
+        circuitBreakerTimer = null;
+
+        // Attempt reconnection after circuit breaker closes
+        const { activeGroup } = get();
+        if (activeGroup?.id) {
+          log('🔄 Circuit breaker closed, attempting reconnection');
+          handleChannelError(activeGroup.id);
+        }
+      }, 5 * 60 * 1000); // 5 minutes
+
+      return;
+    }
+
+    // Calculate exponential backoff delay
+    const delay = Math.min(1000 * Math.pow(2, retryCount - 1), 30000); // Max 30 seconds
+    log(`⏳ Retrying reconnection in ${delay}ms (exponential backoff)`);
+
+    // Schedule reconnection with exponential backoff
+    setTimeout(() => {
+      log(`🔄 Executing scheduled reconnection (attempt ${retryCount}/${maxRetries})`);
+      const { activeGroup } = get();
+      if (activeGroup?.id === groupId) {
+        (get() as any).setupSimplifiedRealtimeSubscription(groupId);
+      } else {
+        log('⚠️ Active group changed, skipping reconnection');
+      }
+    }, delay);
 
     // Simple reconnection attempt after a brief delay
     set({ connectionStatus: 'reconnecting' });
@@ -680,6 +736,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // Removed: resetting outbox state here could interrupt an in-flight drain and cause concurrency
               // resetOutboxProcessingState();
               isConnecting = false; // Clear the guard
+
+              // CRITICAL FIX: Reset retry count and circuit breaker on successful connection
+              retryCount = 0;
+              if (circuitBreakerTimer) {
+                clearTimeout(circuitBreakerTimer);
+                circuitBreakerTimer = null;
+              }
+              circuitBreakerOpen = false;
+
               set({
                 connectionStatus: 'connected',
                 realtimeChannel: channel,

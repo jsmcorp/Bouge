@@ -90,15 +90,33 @@ if (Capacitor.isNativePlatform()) {
 		});
 
 		// Register notificationActionPerformed listener
+		// CRITICAL FIX: Added navigation to group when notification is tapped
 		FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
 			try {
 				const data = event?.notification?.data || {};
 				const groupId = data?.group_id;
 				if (groupId) {
-					console.log('[push] wake reason=notification_tap');
+					console.log('[push] 🔔 Notification tapped! Navigating to group:', groupId);
+
+					// Dispatch wake event for background sync
 					window.dispatchEvent(new CustomEvent('push:wakeup', { detail: { type: 'tap', group_id: groupId } }));
+
+					// Navigate to the group
+					// Use setTimeout to ensure app is fully resumed before navigation
+					setTimeout(() => {
+						try {
+							// Use window.location for reliable navigation on mobile
+							const targetUrl = `/dashboard?group=${groupId}`;
+							console.log('[push] 📍 Navigating to:', targetUrl);
+							window.location.href = targetUrl;
+						} catch (navError) {
+							console.error('[push] ❌ Navigation error:', navError);
+						}
+					}, 300);
 				}
-			} catch {}
+			} catch (error) {
+				console.error('[push] ❌ Error handling notification tap:', error);
+			}
 		}).then((handle: any) => {
 			listenerHandles.push(handle);
 			console.log('[push] ✅ notificationActionPerformed listener registered and handle stored!');
