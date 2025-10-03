@@ -52,9 +52,10 @@ class BackgroundMessageSyncService {
       }
 
       // Fetch message from Supabase with timeout
-      // CRITICAL: Use getClientWithValidToken() to ensure auth token is valid
-      // getDirectClient() skips auth recovery and can return expired tokens
-      const client = await supabasePipeline.getClientWithValidToken();
+      // CRITICAL FIX: Use getDirectClient() for FCM-triggered fetches
+      // FCM receipt already implies authenticated user context - no need to validate/refresh token
+      // This avoids unnecessary auth checks, token refreshes, and outbox triggers
+      const client = await supabasePipeline.getDirectClient();
 
       // Create timeout promise (8 seconds)
       const timeoutPromise = new Promise<never>((_, reject) =>

@@ -2528,28 +2528,10 @@ class SupabasePipeline {
         this.log('✅ Session recovered successfully');
       }
     } else {
-      // We have a token, but it might be expired
-      // Try to refresh it proactively (with timeout)
-      try {
-        this.log('🔄 Proactively refreshing session to ensure token is valid');
-        const refreshPromise = this.recoverSession();
-        const timeoutPromise = new Promise<boolean>((_, reject) =>
-          setTimeout(() => reject(new Error('Token refresh timeout')), 3000)
-        );
-
-        const refreshed = await Promise.race([refreshPromise, timeoutPromise]);
-        if (refreshed) {
-          this.log('✅ Token refreshed successfully');
-        } else {
-          this.log('⚠️ Token refresh returned false, using existing token');
-        }
-      } catch (err: any) {
-        if (err?.message === 'Token refresh timeout') {
-          this.log('⚠️ Token refresh timed out after 3s, using existing token');
-        } else {
-          this.log('⚠️ Token refresh failed:', stringifyError(err));
-        }
-      }
+      // CRITICAL FIX: Do NOT proactively refresh if we already have a token
+      // This was causing unnecessary TOKEN_REFRESHED events and outbox triggers
+      // If the token is expired, the actual API call will fail with 401 and we'll handle it then
+      this.log('✅ Token exists, using cached token (no proactive refresh)');
     }
 
     this.log('🔑 Returning client with best available token');
