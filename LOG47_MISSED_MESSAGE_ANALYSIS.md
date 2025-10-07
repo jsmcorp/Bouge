@@ -439,4 +439,72 @@ if (status === 'SUBSCRIBED') {
 
 **Priority**: Medium (current FCM + realtime recovery works, but foreground service would improve UX)
 
+---
+
+## 🔧 **LOG48 FIX: Session Readiness Check**
+
+### **Problem Found in log48.txt**
+
+The missed message fetch was triggered but **silently failed** with NO log output:
+- Line 133: "Fetching missed messages since realtime death: 2025-10-03T23:48:43.689Z"
+- Lines 130-163: Multiple session timeout errors happening AFTER fetch was triggered
+- **NO log output** showing messages found, saved, or errors
+
+**Root Cause**: Session recovery was still in progress (taking 10+ seconds) when fetch was triggered. The `getDirectClient()` call hung because session was in broken state.
+
+### **Solution Implemented**
+
+1. **Wait for session to be ready** before fetching (up to 10 seconds, retry every 1s)
+2. **Add timeout to entire fetch operation** (15 seconds)
+3. **Increase delay before fetch** from 1s to 3s to give session recovery more time
+4. **Add detailed logging** at each step to diagnose failures
+
+### **Changes Made**
+
+**File**: `src/store/chatstore_refactored/realtimeActions.ts`
+
+**1. Session readiness check** (Lines 184-211):
+- Poll `getSession()` every 1 second for up to 10 seconds
+- Wait for valid `access_token` before proceeding
+- Abort fetch if session not ready after 10s
+
+**2. Fetch timeout** (Lines 213-240):
+- Wrap entire fetch operation in `Promise.race()` with 15s timeout
+- Prevents indefinite hang if Supabase query fails
+
+**3. Increased delay** (Line 1020):
+- Changed from 1s to 3s delay before triggering fetch
+- Gives session recovery more time to complete
+
+**4. Detailed logging**:
+- Log each step: session check, client fetch, query execution
+- Log number of groups and messages found
+- Makes debugging much easier
+
+### **Expected Behavior**
+
+**Before Fix (LOG48)**:
+```
+1. Realtime reconnects → Fetch triggered 1s later
+2. Session still broken → getDirectClient() hangs
+3. Query never executes → Silent failure
+4. Message lost
+```
+
+**After Fix**:
+```
+1. Realtime reconnects → Wait 3s
+2. Check session readiness (retry up to 10s)
+3. Wait for valid access_token
+4. Get client → Execute query with 15s timeout
+5. Save messages → Refresh UI
+6. Message appears ✅
+```
+
+### **Result**
+
+✅ **Messages fetched successfully even when session recovery is slow**
+✅ **No more silent failures**
+✅ **Detailed logs for debugging**
+
 

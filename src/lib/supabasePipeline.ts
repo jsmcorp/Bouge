@@ -2602,19 +2602,29 @@ class SupabasePipeline {
 
   /**
    * Handle network reconnection events - simplified approach
+   * CRITICAL FIX (LOG52): Make session refresh non-blocking to prevent 10s delays
    */
   public async onNetworkReconnect(): Promise<void> {
-    this.log('🌐 Network reconnection detected - refreshing session');
+    this.log('🌐 Network reconnection detected - triggering background session refresh');
 
-    try {
-      // Simple session refresh
-      await this.recoverSession();
-      // Nudge outbox on network reconnect; preflight will skip if empty
-      this.triggerOutboxProcessing('network-reconnect');
-      this.log('✅ Network reconnect session refresh completed');
-    } catch (error) {
-      this.log('❌ Network reconnect session refresh failed:', stringifyError(error));
-    }
+    // CRITICAL FIX: Fire-and-forget session refresh (don't block on it)
+    // If token is expired, the actual API calls will fail with 401 and we'll handle it then
+    // This prevents 10-second delays on network reconnection
+    this.recoverSession().then(
+      (success) => {
+        if (success) {
+          this.log('✅ Background session refresh completed successfully');
+        } else {
+          this.log('⚠️ Background session refresh failed (will retry on next API call)');
+        }
+      }
+    ).catch((error) => {
+      this.log('❌ Background session refresh error:', stringifyError(error));
+    });
+
+    // Nudge outbox on network reconnect; preflight will skip if empty
+    this.triggerOutboxProcessing('network-reconnect');
+    this.log('✅ Network reconnect handler completed (session refresh in background)');
   }
 
   /**

@@ -178,24 +178,66 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   const fetchMissedMessagesSinceRealtimeDeath = async (groupIds: string[], deathTimestamp: number) => {
     const deathTime = new Date(deathTimestamp).toISOString();
     log(`🔄 Fetching missed messages since realtime death: ${deathTime}`);
+    log(`🔄 Fetching for ${groupIds.length} groups: ${groupIds.join(', ')}`);
 
     try {
-      const client = await supabasePipeline.getDirectClient();
+      // CRITICAL FIX (LOG49): Use cached token directly for REST API call
+      // getDirectClient() can hang if there's an in-flight session request
+      log('🔄 Getting cached token for direct REST call...');
+      const cachedToken = supabasePipeline.getCachedAccessToken();
 
-      // Fetch all messages sent after realtime died
-      const { data: missedMessages, error } = await client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          author:users!messages_user_id_fkey(display_name, avatar_url)
-        `)
-        .in('group_id', groupIds)
-        .gte('created_at', deathTime)
-        .order('created_at', { ascending: true });
+      if (!cachedToken) {
+        log('❌ No cached token available, aborting missed message fetch');
+        return;
+      }
+
+      log('✅ Cached token found, making direct REST API call...');
+
+      // CRITICAL FIX (LOG49): Make direct REST API call with cached token
+      // This bypasses getDirectClient() which can hang on in-flight session requests
+      const fetchPromise = (async () => {
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+        const groupIdsParam = groupIds.map(id => `"${id}"`).join(',');
+
+        const url = `${supabaseUrl}/rest/v1/messages?select=*,reactions(*),author:users!messages_user_id_fkey(display_name,avatar_url)&group_id=in.(${groupIdsParam})&created_at=gte.${deathTime}&order=created_at.asc`;
+
+        log(`🔄 Fetching from: ${url.substring(0, 100)}...`);
+
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${cachedToken}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        log(`✅ Query completed, got ${data?.length || 0} messages`);
+        return { data, error: null };
+      })();
+
+      const timeoutPromise = new Promise<{ data: null; error: Error }>((_, reject) =>
+        setTimeout(() => reject({ data: null, error: new Error('Fetch timeout after 15s') }), 15000)
+      );
+
+      let missedMessages: any[] | null = null;
+      let error: Error | null = null;
+
+      try {
+        const result = await Promise.race([fetchPromise, timeoutPromise]);
+        missedMessages = result.data;
+        error = result.error;
+      } catch (e: any) {
+        error = e.error || e;
+      }
 
       if (error) {
-        log(`❌ Error fetching missed messages: ${error.message}`);
+        log(`❌ Error fetching missed messages: ${error.message || error}`);
         return;
       }
 
@@ -998,6 +1040,8 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 realtimeDeathAt = null;
                 log('🔧 Cleared realtimeDeathAt to prevent duplicate fetches');
 
+                // CRITICAL FIX (LOG49): Reduced delay to 1s since we now use cached token directly
+                // No need to wait for session recovery - we bypass getDirectClient()
                 // Fetch missed messages in background (don't block reconnection)
                 setTimeout(() => {
                   fetchMissedMessagesSinceRealtimeDeath(allGroupIds, deathTime);

@@ -29,7 +29,7 @@ class PseudonymService {
   private cache: Map<string, PseudonymCacheEntry> = new Map();
   private inFlight: Map<string, Promise<string>> = new Map();
   private readonly CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
-  private readonly RPC_TIMEOUT = 3000; // 3 seconds timeout for RPC calls
+  private readonly RPC_TIMEOUT = 30000; // 30 seconds timeout for RPC calls (increased from 3s due to LOG52 timeouts)
 
   /**
    * Generate a random pseudonym locally

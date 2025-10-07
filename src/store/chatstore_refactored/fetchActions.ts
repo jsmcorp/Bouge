@@ -783,6 +783,52 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               messageCache.setCachedMessages(groupId, data);
             }
 
+            // CRITICAL FIX (LOG52): Update UI state with new messages from background sync
+            // This fixes the issue where messages sent while app was dead don't appear until user navigates away and back
+            if (data && data.length > 0) {
+              const currentState = get();
+
+              // Only update if we're still viewing the same group
+              if (currentState.activeGroup?.id === groupId) {
+                const existingIds = new Set(currentState.messages.map((m: Message) => m.id));
+                const newMessages = data.filter((msg: any) => !existingIds.has(msg.id));
+
+                if (newMessages.length > 0) {
+                  console.log(`🔄 Background: Found ${newMessages.length} new messages from Supabase, updating UI`);
+
+                  // Convert raw Supabase data to Message format
+                  const builtMessages: Message[] = newMessages.map((msg: any) => ({
+                    id: msg.id,
+                    group_id: msg.group_id,
+                    user_id: msg.user_id,
+                    content: msg.content,
+                    is_ghost: msg.is_ghost,
+                    message_type: msg.message_type || 'text',
+                    category: msg.category,
+                    parent_id: msg.parent_id,
+                    image_url: msg.image_url,
+                    created_at: typeof msg.created_at === 'string' ? msg.created_at : new Date(msg.created_at).toISOString(),
+                    author: msg.is_ghost ? undefined : msg.users,
+                    reply_count: 0,
+                    replies: [],
+                    delivery_status: 'delivered' as const,
+                    reactions: msg.reactions || [],
+                    poll: undefined
+                  }));
+
+                  // Merge with existing messages
+                  const updatedMessages = [...currentState.messages, ...builtMessages];
+                  set({ messages: updatedMessages });
+
+                  console.log(`✅ Background: UI updated with ${builtMessages.length} new messages`);
+                } else {
+                  console.log(`🔄 Background: No new messages to add to UI (all ${data.length} already exist)`);
+                }
+              } else {
+                console.log(`🔄 Background: User switched groups, skipping UI update`);
+              }
+            }
+
             console.log('✅ Background Supabase sync completed');
           } catch (error) {
             console.error('❌ Background Supabase fetch failed:', error);
