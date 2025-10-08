@@ -816,11 +816,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     poll: undefined
                   }));
 
-                  // Merge with existing messages
-                  const updatedMessages = [...currentState.messages, ...builtMessages];
+                  // CRITICAL FIX (LOG54): Merge and sort by created_at to ensure chronological order
+                  // This prevents messages from appearing out of order when some were saved to SQLite
+                  // by FCM while user was on dashboard
+                  const updatedMessages = [...currentState.messages, ...builtMessages]
+                    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
                   set({ messages: updatedMessages });
 
-                  console.log(`✅ Background: UI updated with ${builtMessages.length} new messages`);
+                  console.log(`✅ Background: UI updated with ${builtMessages.length} new messages (sorted by timestamp)`);
                 } else {
                   console.log(`🔄 Background: No new messages to add to UI (all ${data.length} already exist)`);
                 }

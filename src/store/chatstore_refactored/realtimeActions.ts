@@ -67,10 +67,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
   // CRITICAL FIX (LOG46 Phase 3): Heartbeat mechanism to detect realtime death
   let lastRealtimeEventAt = Date.now();
+  let lastMessageReceivedAt = Date.now(); // CRITICAL FIX (LOG54): Track message-specific events
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let heartbeatCheckTimer: NodeJS.Timeout | null = null;
+  let zombieCheckTimer: NodeJS.Timeout | null = null; // CRITICAL FIX (LOG54): Separate zombie detection
   const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30 seconds
   const HEARTBEAT_TIMEOUT_MS = 60000; // Consider dead if no events for 60 seconds
+  const ZOMBIE_TIMEOUT_MS = 5 * 60 * 1000; // CRITICAL FIX (LOG54): Consider zombie if no messages for 5 minutes
 
   // CRITICAL FIX (LOG47): Track realtime death time to fetch missed messages
   let realtimeDeathAt: number | null = null;
@@ -122,6 +125,29 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         forceRealtimeRecovery(groupId);
       }
     }, 10000); // Check every 10 seconds
+
+    // CRITICAL FIX (LOG54): Zombie connection detection
+    // Detects when connection is "alive" (heartbeat works) but not receiving messages
+    zombieCheckTimer = setInterval(() => {
+      const { connectionStatus } = get();
+      const timeSinceLastMessage = Date.now() - lastMessageReceivedAt;
+      const timeSinceLastEvent = Date.now() - lastRealtimeEventAt;
+
+      // Zombie state: connection is "connected", heartbeat is working (events received recently),
+      // but no message INSERT events for 5+ minutes
+      if (connectionStatus === 'connected' &&
+          timeSinceLastMessage > ZOMBIE_TIMEOUT_MS &&
+          timeSinceLastEvent < HEARTBEAT_TIMEOUT_MS) {
+        log(`⚠️ ZOMBIE CONNECTION DETECTED (no messages for ${Math.round(timeSinceLastMessage / 1000)}s but heartbeat OK)`);
+        log('🔄 Forcing reconnection to recover from zombie state');
+
+        // Stop heartbeat before reconnecting
+        stopHeartbeat();
+
+        // Force reconnection
+        forceRealtimeRecovery(groupId);
+      }
+    }, 60000); // Check every 60 seconds
   };
 
   const stopHeartbeat = () => {
@@ -134,6 +160,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       clearInterval(heartbeatCheckTimer);
       heartbeatCheckTimer = null;
       log('💓 Heartbeat check stopped');
+    }
+    // CRITICAL FIX (LOG54): Clear zombie detection timer
+    if (zombieCheckTimer) {
+      clearInterval(zombieCheckTimer);
+      zombieCheckTimer = null;
+      log('💓 Zombie check stopped');
     }
   };
 
@@ -160,10 +192,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
     // Step 2: Force session refresh
     log('🔧 Forcing session refresh');
     try {
-      await supabasePipeline.refreshSessionDirect();
-      log('🔧 Session refreshed successfully');
+      const refreshSuccess = await supabasePipeline.refreshSessionDirect();
+      // CRITICAL FIX: Only log success if it actually succeeded
+      if (refreshSuccess) {
+        log('🔧 Session refresh: ✅ SUCCESS');
+      } else {
+        log('🔧 Session refresh: ❌ FAILED (timeout or error)');
+      }
     } catch (error) {
-      log(`🔧 Session refresh failed: ${error}`);
+      log(`🔧 Session refresh: ❌ EXCEPTION - ${error}`);
     }
 
     // Step 3: Recreate subscription with exponential backoff
@@ -860,6 +897,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
           bumpActivity();
           updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
+          lastMessageReceivedAt = Date.now(); // CRITICAL FIX (LOG54): Track message-specific events for zombie detection
           const row = payload.new as DbMessageRow;
 
           log(`📨 Realtime INSERT received: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
@@ -878,6 +916,17 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               log(`📨 Message attached to state: id=${message.id} (active group)`);
             } else {
               log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
+
+              // CRITICAL FIX (LOG54): Dispatch event for dashboard to refresh this group
+              // This ensures messages received while on dashboard are visible when user navigates to the group
+              try {
+                window.dispatchEvent(new CustomEvent('message:background', {
+                  detail: { groupId: row.group_id, messageId: message.id }
+                }));
+                log(`📨 Dispatched background message event for group ${row.group_id}`);
+              } catch (eventErr) {
+                console.warn('⚠️ Failed to dispatch background message event:', eventErr);
+              }
             }
 
             // Persist to local storage immediately to avoid disappearing on navigation
@@ -914,9 +963,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               const isOwnMessage = row.user_id === user.id;
 
               if (!isOwnMessage && !isInActiveChat) {
-                // User is not viewing this group, so increment unread count
-                const newCount = await unreadTracker.getUnreadCount(row.group_id);
-                log(`📊 Unread count updated for group ${row.group_id}: ${newCount}`);
+                // CRITICAL FIX (LOG54): Trigger callbacks to update dashboard badges in real-time
+                await unreadTracker.triggerCallbacks(row.group_id);
+                log(`📊 Unread count callbacks triggered for group ${row.group_id}`);
               }
             } catch (unreadErr) {
               console.warn('⚠️ Failed to update unread count:', unreadErr);
@@ -1028,6 +1077,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               // CRITICAL FIX (LOG46 Phase 3): Start heartbeat mechanism to detect realtime death
               startHeartbeat(channel, groupId);
               updateLastEventTime(); // Initialize timestamp
+              lastMessageReceivedAt = Date.now(); // CRITICAL FIX (LOG54): Initialize message timestamp for zombie detection
 
               // CRITICAL FIX (LOG47): Fetch missed messages after realtime reconnection
               if (realtimeDeathAt) {
