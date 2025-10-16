@@ -93,29 +93,61 @@ class BackgroundMessageSyncService {
         }
       }
 
-      // Fetch message from Supabase with timeout
-      // CRITICAL FIX: Use getDirectClient() for FCM-triggered fetches
+      // CRITICAL FIX (LOG50): Use cached token directly for REST API call
       // FCM receipt already implies authenticated user context - no need to validate/refresh token
-      // This avoids unnecessary auth checks, token refreshes, and outbox triggers
-      const client = await supabasePipeline.getDirectClient();
+      // getDirectClient() can hang on in-flight session requests during session recovery
+      // Using cached token bypasses all session management complexity
+      console.log('[bg-sync] 🔄 Getting cached token for direct REST call...');
+      const cachedToken = supabasePipeline.getCachedAccessToken();
+
+      if (!cachedToken) {
+        console.error('[bg-sync] ❌ No cached token available, aborting FCM fetch');
+        return false;
+      }
+
+      console.log('[bg-sync] ✅ Cached token found, making direct REST API call...');
+
+      // CRITICAL FIX (LOG50): Make direct REST API call with cached token
+      // This bypasses getDirectClient() which can hang on in-flight session requests
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      const url = `${supabaseUrl}/rest/v1/messages?select=*,reactions(*),users!messages_user_id_fkey(display_name,avatar_url,created_at)&id=eq.${messageId}`;
+
+      console.log(`[bg-sync] 🔄 Fetching from: ${url.substring(0, 100)}...`);
 
       // CRITICAL FIX: 10-second timeout for Supabase fetch
-      // This is sufficient now that we fixed the SQLite hang issue (LOG46)
-      // Previous timeout increases (15s, 20s) were masking the real problem
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Fetch timeout after 10s')), 10000)
       );
 
-      // Create fetch promise
-      const fetchPromise = client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url, created_at)
-        `)
-        .eq('id', messageId)
-        .single();
+      // Create fetch promise with direct REST API call
+      const fetchPromise = (async () => {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'apikey': supabaseAnonKey,
+            'Authorization': `Bearer ${cachedToken}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        console.log(`[bg-sync] ✅ Query completed, got ${data?.length || 0} messages`);
+
+        // Supabase returns array for .eq() queries, extract single item
+        if (Array.isArray(data) && data.length > 0) {
+          return { data: data[0], error: null };
+        } else if (Array.isArray(data) && data.length === 0) {
+          return { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+        } else {
+          return { data, error: null };
+        }
+      })();
 
       // Race between fetch and timeout
       const { data, error } = await Promise.race([fetchPromise, timeoutPromise]) as any;
@@ -139,20 +171,36 @@ class BackgroundMessageSyncService {
           console.log(`[bg-sync] ⏳ Message ${messageId} not found, retrying in 2s...`);
           await new Promise(resolve => setTimeout(resolve, 2000));
 
-          // Retry once with timeout
+          // Retry once with timeout using cached token
           const retryTimeoutPromise = new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error('Retry timeout after 5s')), 5000)
           );
 
-          const retryFetchPromise = client
-            .from('messages')
-            .select(`
-              *,
-              reactions(*),
-              users!messages_user_id_fkey(display_name, avatar_url, created_at)
-            `)
-            .eq('id', messageId)
-            .single();
+          const retryFetchPromise = (async () => {
+            const response = await fetch(url, {
+              method: 'GET',
+              headers: {
+                'apikey': supabaseAnonKey,
+                'Authorization': `Bearer ${cachedToken}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+
+            // Supabase returns array for .eq() queries, extract single item
+            if (Array.isArray(data) && data.length > 0) {
+              return { data: data[0], error: null };
+            } else if (Array.isArray(data) && data.length === 0) {
+              return { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+            } else {
+              return { data, error: null };
+            }
+          })();
 
           const { data: retryData, error: retryError } = await Promise.race([
             retryFetchPromise,
@@ -269,22 +317,47 @@ class BackgroundMessageSyncService {
         }
       }
 
-      // Fetch messages from Supabase
-      const client = await supabasePipeline.getDirectClient();
-      const query = client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url, created_at)
-        `)
-        .eq('group_id', groupId)
-        .order('created_at', { ascending: true })
-        .limit(100); // Fetch up to 100 missed messages
+      // CRITICAL FIX (LOG50): Use cached token directly for REST API call
+      // This is called during fallback sync when session may be broken
+      console.log('[bg-sync] 🔄 Getting cached token for missed messages fetch...');
+      const cachedToken = supabasePipeline.getCachedAccessToken();
 
-      const { data, error } = since 
-        ? await query.gt('created_at', since)
-        : await query;
+      if (!cachedToken) {
+        console.error('[bg-sync] ❌ No cached token available, aborting missed messages fetch');
+        return 0;
+      }
+
+      console.log('[bg-sync] ✅ Cached token found, making direct REST API call...');
+
+      // Build query URL
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      let url = `${supabaseUrl}/rest/v1/messages?select=*,reactions(*),users!messages_user_id_fkey(display_name,avatar_url,created_at)&group_id=eq.${groupId}&order=created_at.asc&limit=100`;
+
+      if (since) {
+        url += `&created_at=gt.${since}`;
+      }
+
+      console.log(`[bg-sync] 🔄 Fetching from: ${url.substring(0, 100)}...`);
+
+      // Make direct REST API call
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'apikey': supabaseAnonKey,
+          'Authorization': `Bearer ${cachedToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        console.error(`[bg-sync] HTTP ${response.status}: ${response.statusText}`);
+        return 0;
+      }
+
+      const data = await response.json();
+      const error = null;
 
       if (error) {
         console.error(`[bg-sync] Error fetching missed messages:`, error);

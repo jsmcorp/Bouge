@@ -699,6 +699,7 @@ class SupabasePipeline {
 
       // CRITICAL FIX: Try setSession() with cached tokens first (more reliable)
       // refreshSession() often hangs after app is backgrounded for long periods
+      // WHATSAPP-STYLE: Reduced timeouts to prevent long hangs
       if (this.lastKnownAccessToken && this.lastKnownRefreshToken) {
         this.log('🔄 Attempting setSession() with cached tokens (more reliable than refreshSession)');
         try {
@@ -706,14 +707,15 @@ class SupabasePipeline {
             access_token: this.lastKnownAccessToken,
             refresh_token: this.lastKnownRefreshToken,
           });
+          // WHATSAPP-STYLE: Reduced from 10s to 3s
           const setSessionTimeout = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('setSession timeout')), 10000);
+            setTimeout(() => reject(new Error('setSession timeout')), 3000);
           });
 
           const setSessionResult: any = await Promise.race([setSessionPromise, setSessionTimeout]);
 
           if (setSessionResult?.data?.session?.access_token && !setSessionResult?.error) {
-            this.log('🔄 Direct session refresh: success via setSession()');
+            this.log('🔄 Direct session refresh: ✅ SUCCESS via setSession()');
             this.updateSessionCache(setSessionResult.data.session);
             // Reset failure counter on success
             this.consecutiveRefreshFailures = 0;
@@ -723,7 +725,7 @@ class SupabasePipeline {
           }
         } catch (setSessionError: any) {
           if (setSessionError?.message === 'setSession timeout') {
-            this.log('🔄 setSession() timed out, will try refreshSession()');
+            this.log('🔄 setSession() TIMEOUT after 3s, will try refreshSession()');
           } else {
             this.log('🔄 setSession() error, will try refreshSession():', stringifyError(setSessionError));
           }
@@ -733,6 +735,7 @@ class SupabasePipeline {
       // Fall back to refreshSession() if setSession() failed or no cached tokens
       this.log('🔄 Attempting refreshSession() as fallback');
       const refreshPromise = client.auth.refreshSession();
+      // WHATSAPP-STYLE: Keep at 5s (already reasonable)
       const refreshTimeout = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
       });
@@ -742,7 +745,8 @@ class SupabasePipeline {
         result = await Promise.race([refreshPromise, refreshTimeout]);
       } catch (err: any) {
         if (err && err.message === 'refreshSession timeout') {
-          this.log('🔄 Direct session refresh: timeout (refreshSession hung)');
+          // CRITICAL FIX: Clear logging - this is a TIMEOUT, not success
+          this.log('🔄 Direct session refresh: ❌ TIMEOUT after 5s (refreshSession hung)');
           // Track consecutive failures
           this.consecutiveRefreshFailures++;
           this.log(`⚠️ Consecutive refresh failures: ${this.consecutiveRefreshFailures}/${this.MAX_CONSECUTIVE_REFRESH_FAILURES}`);
@@ -760,7 +764,12 @@ class SupabasePipeline {
       }
 
       const success = !!result?.data?.session?.access_token && !result?.error;
-      this.log(`🔄 Direct session refresh: ${success ? 'success' : 'failed'} via refreshSession()`);
+      // CRITICAL FIX: Clear success/failure logging
+      if (success) {
+        this.log(`🔄 Direct session refresh: ✅ SUCCESS via refreshSession()`);
+      } else {
+        this.log(`🔄 Direct session refresh: ❌ FAILED via refreshSession() - ${result?.error?.message || 'unknown error'}`);
+      }
 
       // Update session cache if successful
       if (success && result?.data?.session) {
@@ -1645,35 +1654,39 @@ class SupabasePipeline {
 
       // Fire-and-forget: fan out push notification (best-effort)
       // CRITICAL: Use server-returned ID, not optimistic ID!
-      try {
-        const client = await this.getDirectClient();
-        const createdAt = new Date().toISOString();
-        const bearer = this.lastKnownAccessToken || '';
-        const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+      // WHATSAPP-STYLE FIX: Don't await - truly fire-and-forget to avoid blocking send!
+      (async () => {
         try {
-          const origin = (typeof window !== 'undefined' ? window.location.origin : 'native');
-          const headersObj: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'apikey': this.supabaseAnonKey || '',
-            'Authorization': bearer ? `Bearer ${bearer}` : '',
-          };
-          this.log(`[supabase-pipeline] push-fanout call: origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
-          this.log(`[supabase-pipeline] 🔑 Using server message ID for FCM: ${serverMessageId} (optimistic was: ${message.id})`);
-          const res = await fetch(url, {
-            method: 'POST',
-            mode: 'cors',
-            headers: headersObj,
-            body: JSON.stringify({
-              message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
-              group_id: message.group_id,
-              sender_id: message.user_id,
-              created_at: createdAt,
-            })
-          });
-          this.log(`[supabase-pipeline] push-fanout response: status=${res.status}`);
-        } catch (_) {}
-
-      } catch {}
+          const client = await this.getDirectClient();
+          const createdAt = new Date().toISOString();
+          const bearer = this.lastKnownAccessToken || '';
+          const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+          try {
+            const headersObj: Record<string, string> = {
+              'Content-Type': 'application/json',
+              'apikey': this.supabaseAnonKey || '',
+              'Authorization': bearer ? `Bearer ${bearer}` : '',
+            };
+            this.log(`[supabase-pipeline] 🚀 FCM fanout (fire-and-forget): message=${serverMessageId}`);
+            const res = await fetch(url, {
+              method: 'POST',
+              mode: 'cors',
+              headers: headersObj,
+              body: JSON.stringify({
+                message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
+                group_id: message.group_id,
+                sender_id: message.user_id,
+                created_at: createdAt,
+              })
+            });
+            this.log(`[supabase-pipeline] ✅ FCM fanout complete: status=${res.status}`);
+          } catch (err) {
+            this.log(`[supabase-pipeline] ⚠️ FCM fanout failed (non-blocking): ${stringifyError(err)}`);
+          }
+        } catch (err) {
+          this.log(`[supabase-pipeline] ⚠️ FCM fanout error (non-blocking): ${stringifyError(err)}`);
+        }
+      })().catch(() => {}); // Truly fire-and-forget - don't block on errors
     } catch (error) {
       if ((error as any)?.code === 'QUEUED_OUTBOX' || (error as any)?.name === 'MessageQueuedError') {
         this.log(`📦 Message ${message.id} queued to outbox`);
@@ -1696,19 +1709,41 @@ class SupabasePipeline {
   private async sendMessageInternal(message: Message): Promise<string> {
     // Do not gate sends after unlock; proceed directly
 
-    // Check health before attempting direct send
+    // WHATSAPP-STYLE OPTIMIZATION: Skip health check if realtime is connected
+    // This dramatically speeds up message sending when connection is healthy
     const dbgLabel = `send-${message.id}`;
-    this.log(`[${dbgLabel}] checkHealth() -> start`);
-    const isHealthy = await this.checkHealth();
-    this.log(`[${dbgLabel}] checkHealth() -> ${isHealthy ? 'healthy' : 'unhealthy'}`);
-    if (isHealthy) this.log(`[${dbgLabel}] stage: health ok`);
-    if (!isHealthy) {
-      this.log(`📤 Client unhealthy, falling back to outbox - message ${message.id}`);
-      await this.fallbackToOutbox(message);
-      const queuedError: any = new Error(`Message ${message.id} queued to outbox (unhealthy client)`);
-      queuedError.code = 'QUEUED_OUTBOX';
-      queuedError.name = 'MessageQueuedError';
-      throw queuedError;
+    let skipHealthCheck = false;
+
+    try {
+      // Check if realtime is connected (fast, synchronous check)
+      const mod = await import('@/store/chatstore_refactored');
+      const state = (mod as any).useChatStore?.getState?.();
+      const connectionStatus = state?.connectionStatus;
+      const isRealtimeConnected = connectionStatus === 'connected';
+
+      if (isRealtimeConnected) {
+        this.log(`[${dbgLabel}] ⚡ FAST PATH: Realtime connected, skipping health check`);
+        skipHealthCheck = true;
+      }
+    } catch (e) {
+      // If we can't check realtime status, fall back to health check
+      this.log(`[${dbgLabel}] Could not check realtime status, will do health check`);
+    }
+
+    // Only do health check if realtime is not connected
+    if (!skipHealthCheck) {
+      this.log(`[${dbgLabel}] checkHealth() -> start`);
+      const isHealthy = await this.checkHealth();
+      this.log(`[${dbgLabel}] checkHealth() -> ${isHealthy ? 'healthy' : 'unhealthy'}`);
+      if (isHealthy) this.log(`[${dbgLabel}] stage: health ok`);
+      if (!isHealthy) {
+        this.log(`📤 Client unhealthy, falling back to outbox - message ${message.id}`);
+        await this.fallbackToOutbox(message);
+        const queuedError: any = new Error(`Message ${message.id} queued to outbox (unhealthy client)`);
+        queuedError.code = 'QUEUED_OUTBOX';
+        queuedError.name = 'MessageQueuedError';
+        throw queuedError;
+      }
     }
 
     // Attempt direct send with retries
@@ -2262,33 +2297,37 @@ class SupabasePipeline {
 
           // Fire-and-forget: fan out push notification for outbox item
           // CRITICAL FIX: Use server-returned ID, not optimistic ID!
-          try {
-            const client = await this.getClient();
-            const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+          // WHATSAPP-STYLE FIX: Don't await - truly fire-and-forget to avoid blocking outbox processing!
+          (async () => {
             try {
-              const origin = (typeof window !== 'undefined' ? window.location.origin : 'native');
-              const headersObj: Record<string, string> = {
-                'Content-Type': 'application/json',
-                'apikey': this.supabaseAnonKey || '',
-                'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
-              };
-              this.log(`[supabase-pipeline] push-fanout call (outbox): origin=${origin} headers=[${Object.keys(headersObj).join(',')}]`);
-              this.log(`[supabase-pipeline] 🔑 Using server message ID for FCM (outbox): ${serverMessageId} (optimistic was: ${msgId})`);
-              const res = await fetch(url, {
-                method: 'POST',
-                mode: 'cors',
-                headers: headersObj,
-                body: JSON.stringify({
-                  message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
-                  group_id: outboxItem.group_id,
-                  sender_id: outboxItem.user_id,
-                  created_at: new Date().toISOString(),
-                })
-              });
-              this.log(`[supabase-pipeline] push-fanout response (outbox): status=${res.status}`);
-            } catch (_) {}
-
-          } catch {}
+              const client = await this.getClient();
+              const url = `${(client as any).supabaseUrl || ''}/functions/v1/push-fanout`;
+              try {
+                const headersObj: Record<string, string> = {
+                  'Content-Type': 'application/json',
+                  'apikey': this.supabaseAnonKey || '',
+                  'Authorization': this.lastKnownAccessToken ? `Bearer ${this.lastKnownAccessToken}` : '',
+                };
+                this.log(`[supabase-pipeline] 🚀 FCM fanout (outbox, fire-and-forget): message=${serverMessageId}`);
+                const res = await fetch(url, {
+                  method: 'POST',
+                  mode: 'cors',
+                  headers: headersObj,
+                  body: JSON.stringify({
+                    message_id: serverMessageId,  // ✅ Use server ID, not optimistic ID!
+                    group_id: outboxItem.group_id,
+                    sender_id: outboxItem.user_id,
+                    created_at: new Date().toISOString(),
+                  })
+                });
+                this.log(`[supabase-pipeline] ✅ FCM fanout complete (outbox): status=${res.status}`);
+              } catch (err) {
+                this.log(`[supabase-pipeline] ⚠️ FCM fanout failed (outbox, non-blocking): ${stringifyError(err)}`);
+              }
+            } catch (err) {
+              this.log(`[supabase-pipeline] ⚠️ FCM fanout error (outbox, non-blocking): ${stringifyError(err)}`);
+            }
+          })().catch(() => {}); // Truly fire-and-forget - don't block on errors
 
         } catch (error) {
           const emsg = String((error as any)?.message || error || '');
@@ -2602,19 +2641,29 @@ class SupabasePipeline {
 
   /**
    * Handle network reconnection events - simplified approach
+   * CRITICAL FIX (LOG52): Make session refresh non-blocking to prevent 10s delays
    */
   public async onNetworkReconnect(): Promise<void> {
-    this.log('🌐 Network reconnection detected - refreshing session');
+    this.log('🌐 Network reconnection detected - triggering background session refresh');
 
-    try {
-      // Simple session refresh
-      await this.recoverSession();
-      // Nudge outbox on network reconnect; preflight will skip if empty
-      this.triggerOutboxProcessing('network-reconnect');
-      this.log('✅ Network reconnect session refresh completed');
-    } catch (error) {
-      this.log('❌ Network reconnect session refresh failed:', stringifyError(error));
-    }
+    // CRITICAL FIX: Fire-and-forget session refresh (don't block on it)
+    // If token is expired, the actual API calls will fail with 401 and we'll handle it then
+    // This prevents 10-second delays on network reconnection
+    this.recoverSession().then(
+      (success) => {
+        if (success) {
+          this.log('✅ Background session refresh completed successfully');
+        } else {
+          this.log('⚠️ Background session refresh failed (will retry on next API call)');
+        }
+      }
+    ).catch((error) => {
+      this.log('❌ Background session refresh error:', stringifyError(error));
+    });
+
+    // Nudge outbox on network reconnect; preflight will skip if empty
+    this.triggerOutboxProcessing('network-reconnect');
+    this.log('✅ Network reconnect handler completed (session refresh in background)');
   }
 
   /**

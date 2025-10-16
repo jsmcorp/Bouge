@@ -90,10 +90,16 @@ if (Capacitor.isNativePlatform()) {
 		});
 
 		// Register notificationActionPerformed listener
-		// CRITICAL FIX: Added navigation to group when notification is tapped
+		// CRITICAL FIX (LOG54): Enhanced logging and navigation for notification taps
 		FirebaseMessaging.addListener('notificationActionPerformed', (event: any) => {
+			console.log('[push] 🔔🔔🔔 NOTIFICATION ACTION PERFORMED FIRED!', JSON.stringify(event));
+			console.log('[push] 🔔 Event type:', typeof event);
+			console.log('[push] 🔔 Event keys:', Object.keys(event || {}));
+
 			try {
 				const data = event?.notification?.data || {};
+				console.log('[push] 🔔 Extracted data:', JSON.stringify(data));
+
 				const groupId = data?.group_id;
 				if (groupId) {
 					console.log('[push] 🔔 Notification tapped! Navigating to group:', groupId);
@@ -113,6 +119,8 @@ if (Capacitor.isNativePlatform()) {
 							console.error('[push] ❌ Navigation error:', navError);
 						}
 					}, 300);
+				} else {
+					console.warn('[push] ⚠️ No group_id in notification data!');
 				}
 			} catch (error) {
 				console.error('[push] ❌ Error handling notification tap:', error);

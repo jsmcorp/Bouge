@@ -153,10 +153,11 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 				},
 				android: {
 					priority: 'HIGH',
-					// Android-specific notification config
+					// CRITICAL FIX (LOG54): Use deep link for Capacitor instead of Flutter-specific action
+					// This ensures notificationActionPerformed listener fires when notification is tapped
 					notification: {
 						sound: 'default',
-						click_action: 'FLUTTER_NOTIFICATION_CLICK'
+						click_action: `confessr://dashboard?group_id=${data.group_id}`
 					}
 				},
 				apns: {
@@ -202,11 +203,12 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 		registration_ids: tokens,
 		priority: 'high',
 		// Notification block for system tray
+		// CRITICAL FIX (LOG54): Use deep link for Capacitor instead of Flutter-specific action
 		notification: {
 			title: 'New message',
 			body: 'You have a new message in Confessr',
 			sound: 'default',
-			click_action: 'FLUTTER_NOTIFICATION_CLICK'
+			click_action: `confessr://dashboard?group_id=${data.group_id}`
 		},
 		// Data block for custom handling (all values must be strings!)
 		data: {

@@ -1,18 +1,104 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Ghost, Phone, Sparkles } from 'lucide-react';
+import { Ghost, Phone, Sparkles, Shield } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { supabasePipeline } from '@/lib/supabasePipeline';
+import { Capacitor } from '@capacitor/core';
+import TruecallerAuth from '@/plugins/truecaller';
 
 export default function LoginPage() {
   const [phone, setPhone] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isTruecallerLoading, setIsTruecallerLoading] = useState(false);
+  const [isTruecallerAvailable, setIsTruecallerAvailable] = useState(false);
   const navigate = useNavigate();
 
+  // Check Truecaller availability on mount (Android only)
+  useEffect(() => {
+    const checkTruecaller = async () => {
+      if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') {
+        return;
+      }
+
+      try {
+        const result = await TruecallerAuth.isAvailable();
+        setIsTruecallerAvailable(result.available);
+        console.log('[Truecaller] Available:', result.available);
+      } catch (error) {
+        console.error('[Truecaller] Error checking availability:', error);
+      }
+    };
+
+    checkTruecaller();
+  }, []);
+
+  // Handle Truecaller one-tap verification
+  const handleTruecallerLogin = async () => {
+    setIsTruecallerLoading(true);
+    try {
+      console.log('[Truecaller] Starting verification...');
+
+      // Step 1: Get authorization code from Truecaller SDK
+      const result = await TruecallerAuth.verifyWithTruecaller();
+
+      if (!result.success || !result.authorizationCode || !result.codeVerifier) {
+        throw new Error('Truecaller verification failed');
+      }
+
+      console.log('[Truecaller] Authorization code received');
+
+      // Step 2: Exchange authorization code for user profile via backend
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/truecaller-verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          authorizationCode: result.authorizationCode,
+          state: result.state,
+          codeVerifier: result.codeVerifier,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Backend verification failed');
+      }
+
+      const data = await response.json();
+      console.log('[Truecaller] User verified:', data.phoneNumber);
+
+      // Step 3: Sign in with Supabase using the verified phone number
+      // Use OTP flow to create Supabase session
+      const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+
+      if (otpError) {
+        throw new Error(otpError.message);
+      }
+
+      toast.success('Verification code sent to your phone!');
+      navigate('/auth/verify', {
+        state: {
+          phone: data.phoneNumber,
+          truecallerVerified: true,
+          userName: data.user.name,
+        }
+      });
+
+    } catch (error: any) {
+      console.error('[Truecaller] Verification error:', error);
+      toast.error(error.message || 'Truecaller verification failed. Please use phone number instead.');
+    } finally {
+      setIsTruecallerLoading(false);
+    }
+  };
+
+  // Handle manual phone number OTP
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!phone.trim()) return;
@@ -100,6 +186,39 @@ export default function LoginPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {/* Truecaller One-Tap Login (Android only) */}
+            {isTruecallerAvailable && (
+              <div className="space-y-4 mb-6">
+                <Button
+                  type="button"
+                  onClick={handleTruecallerLogin}
+                  className="w-full h-12 text-base font-semibold bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white shadow-lg"
+                  disabled={isTruecallerLoading}
+                >
+                  {isTruecallerLoading ? (
+                    <div className="flex items-center space-x-2">
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Verifying with Truecaller...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center space-x-2">
+                      <Shield className="w-5 h-5" />
+                      <span>Continue with Truecaller</span>
+                    </div>
+                  )}
+                </Button>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-border/50"></div>
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-card px-2 text-muted-foreground">Or continue with phone</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-6">
               <div className="space-y-2">
                 <div className="relative">
