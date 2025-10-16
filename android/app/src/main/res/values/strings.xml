@@ -7,4 +7,7 @@
     <string name="default_notification_channel_id">confessr_default</string>
     <string name="default_notification_channel_name">Confessr Notifications</string>
 
+    <!-- Truecaller OAuth SDK Client ID -->
+    <string name="truecaller_client_id">ppahhdlivw5_ublvua1eg6xawmferfdcapccbtf9sg8</string>
+
 </resources>

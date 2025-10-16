@@ -45,6 +45,11 @@
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="@string/default_notification_channel_id" />
 
+        <!-- Truecaller OAuth SDK Configuration -->
+        <meta-data
+            android:name="com.truecaller.android.sdk.ClientId"
+            android:value="@string/truecaller_client_id" />
+
     </application>
 
     <!-- Permissions -->
