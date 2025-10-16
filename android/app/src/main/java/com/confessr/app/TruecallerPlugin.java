@@ -1,6 +1,7 @@
 package com.confessr.app;
 
 import android.content.Intent;
+import androidx.fragment.app.FragmentActivity;
 import com.getcapacitor.*;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.PluginCall;
@@ -23,13 +24,20 @@ public class TruecallerPlugin extends Plugin {
      */
     @Override
     public void load() {
-        truecallerManager = TruecallerManager.getInstance();
-        truecallerManager.initialize(getActivity());
+        android.util.Log.d("TruecallerPlugin", "Plugin load() called");
+        try {
+            truecallerManager = TruecallerManager.getInstance();
+            // BridgeActivity extends AppCompatActivity which extends FragmentActivity
+            truecallerManager.initialize((FragmentActivity) getActivity());
+            android.util.Log.d("TruecallerPlugin", "Plugin initialized successfully");
+        } catch (Exception e) {
+            android.util.Log.e("TruecallerPlugin", "Error initializing plugin", e);
+        }
     }
     
     /**
      * Check if Truecaller is available on this device
-     * 
+     *
      * Returns:
      * {
      *   available: boolean
@@ -37,10 +45,22 @@ public class TruecallerPlugin extends Plugin {
      */
     @PluginMethod
     public void isAvailable(PluginCall call) {
-        boolean available = truecallerManager.isUsable();
-        JSObject ret = new JSObject();
-        ret.put("available", available);
-        call.resolve(ret);
+        android.util.Log.d("TruecallerPlugin", "isAvailable() called");
+        try {
+            if (truecallerManager == null) {
+                android.util.Log.e("TruecallerPlugin", "TruecallerManager is null!");
+                call.reject("TruecallerManager not initialized");
+                return;
+            }
+            boolean available = truecallerManager.isUsable();
+            android.util.Log.d("TruecallerPlugin", "Truecaller available: " + available);
+            JSObject ret = new JSObject();
+            ret.put("available", available);
+            call.resolve(ret);
+        } catch (Exception e) {
+            android.util.Log.e("TruecallerPlugin", "Error checking availability", e);
+            call.reject("Error checking Truecaller availability: " + e.getMessage());
+        }
     }
     
     /**
@@ -65,7 +85,7 @@ public class TruecallerPlugin extends Plugin {
         // Save call for later resolution in callback
         saveCall(call);
 
-        truecallerManager.verifyUser(getActivity(), new TruecallerManager.TruecallerCallback() {
+        truecallerManager.verifyUser((FragmentActivity) getActivity(), new TruecallerManager.TruecallerCallback() {
             @Override
             public void onSuccess(String authorizationCode, String state, String codeVerifier) {
                 JSObject ret = new JSObject();
@@ -90,7 +110,16 @@ public class TruecallerPlugin extends Plugin {
     @Override
     protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
         super.handleOnActivityResult(requestCode, resultCode, data);
-        truecallerManager.handleActivityResult(requestCode, resultCode, data, getActivity());
+        handleTruecallerActivityResult(requestCode, resultCode, data);
+    }
+
+    /**
+     * Public method to handle Truecaller activity result
+     * Called from MainActivity.onActivityResult() for request code 100
+     */
+    public void handleTruecallerActivityResult(int requestCode, int resultCode, Intent data) {
+        android.util.Log.d("TruecallerPlugin", "handleTruecallerActivityResult called: requestCode=" + requestCode + ", resultCode=" + resultCode);
+        truecallerManager.handleActivityResult(requestCode, resultCode, data, (FragmentActivity) getActivity());
     }
 }
 

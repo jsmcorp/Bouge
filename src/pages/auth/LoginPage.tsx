@@ -52,11 +52,13 @@ export default function LoginPage() {
       console.log('[Truecaller] Authorization code received');
 
       // Step 2: Exchange authorization code for user profile via backend
+      console.log('[Truecaller] Calling backend:', `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/truecaller-verify`);
       const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/truecaller-verify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
         },
         body: JSON.stringify({
           authorizationCode: result.authorizationCode,
@@ -65,30 +67,105 @@ export default function LoginPage() {
         }),
       });
 
+      console.log('[Truecaller] Backend response status:', response.status);
+
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Backend verification failed');
+        let errorMessage = 'Backend verification failed';
+        try {
+          const errorData = await response.json();
+          console.error('[Truecaller] Backend error response:', errorData);
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch (e) {
+          // If response is not JSON, try to get text
+          const errorText = await response.text();
+          console.error('[Truecaller] Backend error text:', errorText);
+          errorMessage = errorText || errorMessage;
+        }
+        throw new Error(`${errorMessage} (HTTP ${response.status})`);
       }
 
       const data = await response.json();
       console.log('[Truecaller] User verified:', data.phoneNumber);
+      console.log('[Truecaller] Truecaller verified flag:', data.truecallerVerified);
 
-      // Step 3: Sign in with Supabase using the verified phone number
-      // Use OTP flow to create Supabase session
-      const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+      // Step 3: Phone already verified by Truecaller - navigate directly to dashboard
+      // The backend created auth user with phone_confirm: true
+      // We need to trigger a sign-in but Supabase won't send OTP since phone is confirmed
+      if (data.truecallerVerified) {
+        console.log('[Truecaller] Phone already verified by Truecaller');
+        toast.success('Logged in with Truecaller!');
 
-      if (otpError) {
-        throw new Error(otpError.message);
-      }
+        // Try to sign in with OTP - since phone_confirm: true, no SMS will be sent
+        // and the user should be auto-logged in
+        const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
 
-      toast.success('Verification code sent to your phone!');
-      navigate('/auth/verify', {
-        state: {
-          phone: data.phoneNumber,
-          truecallerVerified: true,
-          userName: data.user.name,
+        if (otpError) {
+          console.error('[Truecaller] Sign-in error:', otpError);
+          // If OTP fails, it might be because Supabase still requires verification
+          // Navigate to verify page as fallback
+          navigate('/auth/verify', {
+            state: {
+              phone: data.phoneNumber,
+              truecallerVerified: true,
+              userName: data.user.displayName,
+            }
+          });
+          return;
         }
-      });
+
+        console.log('[Truecaller] Sign-in initiated, checking session...');
+
+        // Wait a moment for session to be created
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Check if we have a session now
+        const client = await supabasePipeline.getDirectClient();
+        const { data: sessionData } = await client.auth.getSession();
+
+        if (sessionData?.session) {
+          console.log('[Truecaller] Session created! Checking onboarding status...');
+
+          // Check if user needs onboarding
+          const { data: userData } = await client
+            .from('users')
+            .select('is_onboarded')
+            .eq('id', sessionData.session.user.id)
+            .single();
+
+          if (userData?.is_onboarded) {
+            navigate('/dashboard');
+          } else {
+            navigate('/onboarding/name');
+          }
+        } else {
+          console.log('[Truecaller] No session yet, navigating to verify page');
+          // No session created yet - navigate to verify page
+          navigate('/auth/verify', {
+            state: {
+              phone: data.phoneNumber,
+              truecallerVerified: true,
+              userName: data.user.displayName,
+            }
+          });
+        }
+      } else {
+        // Fallback: Normal OTP flow
+        console.log('[Truecaller] Falling back to normal OTP flow');
+        const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+
+        if (otpError) {
+          throw new Error(otpError.message);
+        }
+
+        toast.success('Verification code sent to your phone!');
+        navigate('/auth/verify', {
+          state: {
+            phone: data.phoneNumber,
+            truecallerVerified: false,
+            userName: data.user.displayName,
+          }
+        });
+      }
 
     } catch (error: any) {
       console.error('[Truecaller] Verification error:', error);
