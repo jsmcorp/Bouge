@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { Capacitor } from '@capacitor/core';
 import TruecallerAuth from '@/plugins/truecaller';
+import { useAuthStore } from '@/store/authStore';
 
 export default function LoginPage() {
   const [phone, setPhone] = useState('');
@@ -16,6 +17,7 @@ export default function LoginPage() {
   const [isTruecallerLoading, setIsTruecallerLoading] = useState(false);
   const [isTruecallerAvailable, setIsTruecallerAvailable] = useState(false);
   const navigate = useNavigate();
+  const { setUser } = useAuthStore();
 
   // Check Truecaller availability on mount (Android only)
   useEffect(() => {
@@ -85,68 +87,29 @@ export default function LoginPage() {
       }
 
       const data = await response.json();
-      console.log('[Truecaller] User verified:', data.phoneNumber);
-      console.log('[Truecaller] Truecaller verified flag:', data.truecallerVerified);
+      console.log('[Truecaller] Backend response:', data);
 
-      // Step 3: Phone already verified by Truecaller - navigate directly to dashboard
-      // The backend created auth user with phone_confirm: true
-      // We need to trigger a sign-in but Supabase won't send OTP since phone is confirmed
-      if (data.truecallerVerified) {
-        console.log('[Truecaller] Phone already verified by Truecaller');
+      // Step 3: Handle custom JWT auth (bypasses Supabase Auth entirely)
+      if (data.customAuth && data.token && data.user) {
+        console.log('[Truecaller] Custom JWT received - logging in without Supabase Auth');
         toast.success('Logged in with Truecaller!');
 
-        // Try to sign in with OTP - since phone_confirm: true, no SMS will be sent
-        // and the user should be auto-logged in
-        const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+        // Store custom JWT token and user data in localStorage
+        localStorage.setItem('truecaller_token', data.token);
+        localStorage.setItem('truecaller_user', JSON.stringify(data.user));
 
-        if (otpError) {
-          console.error('[Truecaller] Sign-in error:', otpError);
-          // If OTP fails, it might be because Supabase still requires verification
-          // Navigate to verify page as fallback
-          navigate('/auth/verify', {
-            state: {
-              phone: data.phoneNumber,
-              truecallerVerified: true,
-              userName: data.user.displayName,
-            }
-          });
-          return;
-        }
+        console.log('[Truecaller] Token and user data stored');
 
-        console.log('[Truecaller] Sign-in initiated, checking session...');
+        // Update auth store with user data (no Supabase session needed)
+        setUser(data.user);
 
-        // Wait a moment for session to be created
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Check if we have a session now
-        const client = await supabasePipeline.getDirectClient();
-        const { data: sessionData } = await client.auth.getSession();
-
-        if (sessionData?.session) {
-          console.log('[Truecaller] Session created! Checking onboarding status...');
-
-          // Check if user needs onboarding
-          const { data: userData } = await client
-            .from('users')
-            .select('is_onboarded')
-            .eq('id', sessionData.session.user.id)
-            .single();
-
-          if (userData?.is_onboarded) {
-            navigate('/dashboard');
-          } else {
-            navigate('/onboarding/name');
-          }
+        // Navigate based on onboarding status
+        if (data.user.is_onboarded) {
+          console.log('[Truecaller] User onboarded - navigating to dashboard');
+          navigate('/dashboard');
         } else {
-          console.log('[Truecaller] No session yet, navigating to verify page');
-          // No session created yet - navigate to verify page
-          navigate('/auth/verify', {
-            state: {
-              phone: data.phoneNumber,
-              truecallerVerified: true,
-              userName: data.user.displayName,
-            }
-          });
+          console.log('[Truecaller] User not onboarded - navigating to onboarding');
+          navigate('/onboarding/name');
         }
       } else {
         // Fallback: Normal OTP flow

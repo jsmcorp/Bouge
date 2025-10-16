@@ -206,54 +206,38 @@ serve(async (req) => {
       console.log('[Truecaller] New user created:', userId);
     }
 
-    // Step 4: Create/update Supabase Auth user with verified phone
-    // Use admin API to create user with phone already confirmed
-    const authClient = createClient(PROJECT_URL, SERVICE_ROLE, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false
-      }
-    });
+    console.log('[Truecaller] User profile ready:', userId);
 
-    // Try to create user with phone confirmed, or update if exists
-    const { data: authUser, error: createUserError } = await authClient.auth.admin.createUser({
-      phone: userInfo.phone_number,
-      phone_confirm: true,  // Mark phone as verified (Truecaller already verified it)
-      user_metadata: {
-        display_name: userInfo.name,
-        avatar_url: userInfo.picture,
-        truecaller_verified: true,
-      },
-      app_metadata: {
-        provider: 'truecaller',
-      }
-    });
+    // Step 5: Generate custom JWT for Truecaller user (bypass Supabase Auth entirely)
+    // This is a simple base64-encoded token with user info
+    // Frontend will store this and use it to identify the user
+    const customToken = btoa(JSON.stringify({
+      userId: userId,
+      phoneNumber: userInfo.phone_number,
+      displayName: userInfo.name,
+      provider: 'truecaller',
+      truecallerId: userInfo.sub,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
+    }));
 
-    if (createUserError && !createUserError.message.includes('already registered')) {
-      console.error('[Truecaller] Error creating auth user:', createUserError);
-      return new Response(
-        JSON.stringify({ error: 'Failed to create auth user', details: createUserError.message }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+    console.log('[Truecaller] Custom JWT generated for user:', userId);
 
-    const authUserId = authUser?.user?.id || userId;
-    console.log('[Truecaller] Auth user ready:', authUserId);
-
-    // Step 5: Return success response
-    // Phone is already verified by Truecaller, frontend should skip OTP
+    // Step 6: Return success response with custom JWT and full user data
+    // Frontend will store the token and user data, bypassing Supabase Auth
     return new Response(
       JSON.stringify({
         success: true,
+        customAuth: true,  // Flag that this uses custom JWT, not Supabase Auth
+        token: customToken,
         user: {
           id: userId,
-          phoneNumber: userInfo.phone_number,
-          displayName: userInfo.name,
-          avatarUrl: userInfo.picture,
-          truecallerId: userInfo.sub,
+          phone_number: userInfo.phone_number,
+          display_name: userInfo.name,
+          avatar_url: userInfo.picture || null,
+          is_onboarded: existingUser?.is_onboarded || false,
+          created_at: existingUser?.created_at || new Date().toISOString(),
         },
-        phoneNumber: userInfo.phone_number,
-        truecallerVerified: true,  // Flag that phone is already verified
       }),
       {
         status: 200,
