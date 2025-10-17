@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { supabasePipeline } from '@/lib/supabasePipeline';
 import { Capacitor } from '@capacitor/core';
 import TruecallerAuth from '@/plugins/truecaller';
+import { useAuthStore } from '@/store/authStore';
 
 export default function LoginPage() {
   const [phone, setPhone] = useState('');
@@ -16,6 +17,7 @@ export default function LoginPage() {
   const [isTruecallerLoading, setIsTruecallerLoading] = useState(false);
   const [isTruecallerAvailable, setIsTruecallerAvailable] = useState(false);
   const navigate = useNavigate();
+  const { setUser } = useAuthStore();
 
   // Check Truecaller availability on mount (Android only)
   useEffect(() => {
@@ -52,11 +54,13 @@ export default function LoginPage() {
       console.log('[Truecaller] Authorization code received');
 
       // Step 2: Exchange authorization code for user profile via backend
+      console.log('[Truecaller] Calling backend:', `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/truecaller-verify`);
       const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/truecaller-verify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
         },
         body: JSON.stringify({
           authorizationCode: result.authorizationCode,
@@ -65,30 +69,66 @@ export default function LoginPage() {
         }),
       });
 
+      console.log('[Truecaller] Backend response status:', response.status);
+
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Backend verification failed');
+        let errorMessage = 'Backend verification failed';
+        try {
+          const errorData = await response.json();
+          console.error('[Truecaller] Backend error response:', errorData);
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch (e) {
+          // If response is not JSON, try to get text
+          const errorText = await response.text();
+          console.error('[Truecaller] Backend error text:', errorText);
+          errorMessage = errorText || errorMessage;
+        }
+        throw new Error(`${errorMessage} (HTTP ${response.status})`);
       }
 
       const data = await response.json();
-      console.log('[Truecaller] User verified:', data.phoneNumber);
+      console.log('[Truecaller] Backend response:', data);
 
-      // Step 3: Sign in with Supabase using the verified phone number
-      // Use OTP flow to create Supabase session
-      const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+      // Step 3: Handle Truecaller custom JWT auth (NO Supabase session)
+      if (data.customAuth && data.user) {
+        console.log('[Truecaller] Truecaller auth successful - custom JWT only');
+        toast.success('Logged in with Truecaller!');
 
-      if (otpError) {
-        throw new Error(otpError.message);
-      }
+        // Store custom JWT token and user data
+        localStorage.setItem('truecaller_token', data.token);
+        localStorage.setItem('truecaller_user', JSON.stringify(data.user));
 
-      toast.success('Verification code sent to your phone!');
-      navigate('/auth/verify', {
-        state: {
-          phone: data.phoneNumber,
-          truecallerVerified: true,
-          userName: data.user.name,
+        console.log('[Truecaller] Custom token and user data stored');
+
+        // Update auth store with user data
+        setUser(data.user);
+
+        // Navigate based on onboarding status
+        if (data.user.is_onboarded) {
+          console.log('[Truecaller] User onboarded - navigating to dashboard');
+          navigate('/dashboard');
+        } else {
+          console.log('[Truecaller] User not onboarded - navigating to onboarding');
+          navigate('/onboarding/name');
         }
-      });
+      } else {
+        // Fallback: Normal OTP flow
+        console.log('[Truecaller] Falling back to normal OTP flow');
+        const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
+
+        if (otpError) {
+          throw new Error(otpError.message);
+        }
+
+        toast.success('Verification code sent to your phone!');
+        navigate('/auth/verify', {
+          state: {
+            phone: data.phoneNumber,
+            truecallerVerified: false,
+            userName: data.user.displayName,
+          }
+        });
+      }
 
     } catch (error: any) {
       console.error('[Truecaller] Verification error:', error);

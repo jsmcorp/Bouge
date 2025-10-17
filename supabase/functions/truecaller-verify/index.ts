@@ -61,10 +61,17 @@ serve(async (req) => {
   }
 
   try {
+    console.log('[Truecaller] Edge Function called - method:', req.method);
+    console.log('[Truecaller] Headers:', Object.fromEntries(req.headers.entries()));
+
     // Parse request body
-    const { authorizationCode, state, codeVerifier } = await req.json() as TruecallerVerifyRequest;
+    const bodyText = await req.text();
+    console.log('[Truecaller] Request body:', bodyText);
+
+    const { authorizationCode, state, codeVerifier } = JSON.parse(bodyText) as TruecallerVerifyRequest;
 
     if (!authorizationCode || !codeVerifier) {
+      console.error('[Truecaller] Missing parameters:', { authorizationCode: !!authorizationCode, codeVerifier: !!codeVerifier });
       return new Response(
         JSON.stringify({ error: 'Missing required parameters: authorizationCode and codeVerifier' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -74,7 +81,6 @@ serve(async (req) => {
     console.log('[Truecaller] Starting OAuth token exchange...');
 
     // Step 1: Exchange authorization code for access token using PKCE
-    // CRITICAL: Use code_verifier instead of client_secret for PKCE flow
     const tokenResponse = await fetch(TRUECALLER_TOKEN_URL, {
       method: 'POST',
       headers: {
@@ -84,8 +90,8 @@ serve(async (req) => {
         grant_type: 'authorization_code',
         client_id: TRUECALLER_CLIENT_ID,
         code: authorizationCode,
-        code_verifier: codeVerifier,  // PKCE: Use code_verifier, NOT client_secret
-        redirect_uri: 'https://confessr.app/callback', // Must match SDK config
+        code_verifier: codeVerifier,
+        redirect_uri: 'https://confessr.app/callback',
       }),
     });
 
@@ -135,11 +141,11 @@ serve(async (req) => {
     // Check if user exists with this phone number
     const { data: existingUser, error: fetchError } = await db
       .from('users')
-      .select('id, phone_number, name, avatar_url')
+      .select('id, phone_number, display_name, avatar_url')  // FIXED: display_name
       .eq('phone_number', userInfo.phone_number)
       .single();
 
-    if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = not found
+    if (fetchError && fetchError.code !== 'PGRST116') {
       console.error('[Truecaller] Error fetching user:', fetchError);
       return new Response(
         JSON.stringify({ error: 'Database error', details: fetchError.message }),
@@ -154,10 +160,10 @@ serve(async (req) => {
       userId = existingUser.id;
       console.log('[Truecaller] Existing user found:', userId);
 
-      // Update name and avatar if not set
+      // Update display_name and avatar if not set
       const updates: any = {};
-      if (!existingUser.name && userInfo.name) {
-        updates.name = userInfo.name;
+      if (!existingUser.display_name && userInfo.name) {  // FIXED: display_name
+        updates.display_name = userInfo.name;  // FIXED: display_name
       }
       if (!existingUser.avatar_url && userInfo.picture) {
         updates.avatar_url = userInfo.picture;
@@ -181,7 +187,7 @@ serve(async (req) => {
         .from('users')
         .insert({
           phone_number: userInfo.phone_number,
-          name: userInfo.name || null,
+          display_name: userInfo.name || null,  // FIXED: display_name
           avatar_url: userInfo.picture || null,
           created_at: new Date().toISOString(),
         })
@@ -200,23 +206,36 @@ serve(async (req) => {
       console.log('[Truecaller] New user created:', userId);
     }
 
-    // Step 4: Create Supabase auth session for this user
-    // Use Supabase's signInWithPhone or custom JWT approach
-    // For now, return user data and let frontend handle Supabase auth
+    console.log('[Truecaller] User profile ready:', userId);
 
-    // Return success response with user data
+    // Step 5: Generate custom JWT for Truecaller user (bypass Supabase Auth entirely)
+    const customToken = btoa(JSON.stringify({
+      userId: userId,
+      phoneNumber: userInfo.phone_number,
+      displayName: userInfo.name,
+      provider: 'truecaller',
+      truecallerId: userInfo.sub,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
+    }));
+
+    console.log('[Truecaller] Custom JWT generated for user:', userId);
+
+    // Step 6: Return success response with custom JWT (NO Supabase Auth session)
+    // Truecaller users use custom JWT only - no OTP, no Supabase Auth
     return new Response(
       JSON.stringify({
         success: true,
+        customAuth: true,
+        token: customToken,
         user: {
           id: userId,
-          phoneNumber: userInfo.phone_number,
-          name: userInfo.name,
-          avatarUrl: userInfo.picture,
-          truecallerId: userInfo.sub,
+          phone_number: userInfo.phone_number,
+          display_name: userInfo.name,
+          avatar_url: userInfo.picture || null,
+          is_onboarded: existingUser?.is_onboarded || false,
+          created_at: existingUser?.created_at || new Date().toISOString(),
         },
-        // Frontend should use this phone number to sign in with Supabase
-        phoneNumber: userInfo.phone_number,
       }),
       {
         status: 200,
@@ -238,4 +257,3 @@ serve(async (req) => {
     );
   }
 });
-
