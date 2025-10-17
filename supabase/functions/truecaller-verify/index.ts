@@ -209,8 +209,6 @@ serve(async (req) => {
     console.log('[Truecaller] User profile ready:', userId);
 
     // Step 5: Generate custom JWT for Truecaller user (bypass Supabase Auth entirely)
-    // This is a simple base64-encoded token with user info
-    // Frontend will store this and use it to identify the user
     const customToken = btoa(JSON.stringify({
       userId: userId,
       phoneNumber: userInfo.phone_number,
@@ -223,12 +221,12 @@ serve(async (req) => {
 
     console.log('[Truecaller] Custom JWT generated for user:', userId);
 
-    // Step 6: Return success response with custom JWT and full user data
-    // Frontend will store the token and user data, bypassing Supabase Auth
+    // Step 6: Return success response with custom JWT (NO Supabase Auth session)
+    // Truecaller users use custom JWT only - no OTP, no Supabase Auth
     return new Response(
       JSON.stringify({
         success: true,
-        customAuth: true,  // Flag that this uses custom JWT, not Supabase Auth
+        customAuth: true,
         token: customToken,
         user: {
           id: userId,

@@ -89,18 +89,18 @@ export default function LoginPage() {
       const data = await response.json();
       console.log('[Truecaller] Backend response:', data);
 
-      // Step 3: Handle custom JWT auth (bypasses Supabase Auth entirely)
-      if (data.customAuth && data.token && data.user) {
-        console.log('[Truecaller] Custom JWT received - logging in without Supabase Auth');
+      // Step 3: Handle Truecaller custom JWT auth (NO Supabase session)
+      if (data.customAuth && data.user) {
+        console.log('[Truecaller] Truecaller auth successful - custom JWT only');
         toast.success('Logged in with Truecaller!');
 
-        // Store custom JWT token and user data in localStorage
+        // Store custom JWT token and user data
         localStorage.setItem('truecaller_token', data.token);
         localStorage.setItem('truecaller_user', JSON.stringify(data.user));
 
-        console.log('[Truecaller] Token and user data stored');
+        console.log('[Truecaller] Custom token and user data stored');
 
-        // Update auth store with user data (no Supabase session needed)
+        // Update auth store with user data
         setUser(data.user);
 
         // Navigate based on onboarding status
