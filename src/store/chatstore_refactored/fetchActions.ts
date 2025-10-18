@@ -110,99 +110,36 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // If we're online, fetch from Supabase
       console.log('🌐 Fetching groups from Supabase...');
 
-      // Check if user is authenticated via Truecaller custom JWT
-      const truecallerToken = localStorage.getItem('truecaller_token');
-      const truecallerUserStr = localStorage.getItem('truecaller_user');
+      // Use Supabase Auth for all users (including Truecaller)
+      console.log('🔑 Fetching groups with Supabase Auth');
+      const { data: { user } } = await supabasePipeline.getUser();
+      if (!user) throw new Error('Not authenticated');
+      const userId = user.id;
 
-      let userId: string;
-      let groups: any[] | null = null;
+      const client = await supabasePipeline.getDirectClient();
+      const { data: memberGroups, error: memberError } = await client
+        .from('group_members')
+        .select('group_id')
+        .eq('user_id', userId);
 
-      if (truecallerToken && truecallerUserStr) {
-        // Truecaller user - use custom JWT with direct API calls
-        console.log('🔐 Fetching groups with Truecaller custom JWT');
-        const truecallerUser = JSON.parse(truecallerUserStr);
-        userId = truecallerUser.id;
+      if (memberError) throw memberError;
 
-        // Make direct REST API calls with custom JWT
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-        const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-        // Fetch group memberships
-        const memberResponse = await fetch(
-          `${supabaseUrl}/rest/v1/group_members?select=group_id&user_id=eq.${userId}`,
-          {
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-
-        if (!memberResponse.ok) {
-          throw new Error(`Failed to fetch group memberships: ${memberResponse.statusText}`);
+      if (!memberGroups || memberGroups.length === 0) {
+        if (!localDataLoaded) {
+          set({ groups: [], isLoading: false });
         }
-
-        const memberGroups = await memberResponse.json();
-
-        if (!memberGroups || memberGroups.length === 0) {
-          if (!localDataLoaded) {
-            set({ groups: [], isLoading: false });
-          }
-          return;
-        }
-
-        const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
-
-        // Fetch groups
-        const groupsResponse = await fetch(
-          `${supabaseUrl}/rest/v1/groups?select=*&id=in.(${groupIds.join(',')})`,
-          {
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-
-        if (!groupsResponse.ok) {
-          throw new Error(`Failed to fetch groups: ${groupsResponse.statusText}`);
-        }
-
-        groups = await groupsResponse.json();
-      } else {
-        // Regular Supabase Auth user
-        console.log('🔑 Fetching groups with Supabase Auth');
-        const { data: { user } } = await supabasePipeline.getUser();
-        if (!user) throw new Error('Not authenticated');
-        userId = user.id;
-
-        const client = await supabasePipeline.getDirectClient();
-        const { data: memberGroups, error: memberError } = await client
-          .from('group_members')
-          .select('group_id')
-          .eq('user_id', userId);
-
-        if (memberError) throw memberError;
-
-        if (!memberGroups || memberGroups.length === 0) {
-          if (!localDataLoaded) {
-            set({ groups: [], isLoading: false });
-          }
-          return;
-        }
-
-        const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
-
-        const { data: groupsData, error: groupsError } = await client
-          .from('groups')
-          .select('*')
-          .in('id', groupIds);
-
-        if (groupsError) throw groupsError;
-        groups = groupsData;
+        return;
       }
+
+      const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
+
+      const { data: groupsData, error: groupsError } = await client
+        .from('groups')
+        .select('*')
+        .in('id', groupIds);
+
+      if (groupsError) throw groupsError;
+      const groups = groupsData;
 
       // If SQLite is available, sync groups to local storage first
       if (isSqliteReady) {

@@ -89,45 +89,62 @@ export default function LoginPage() {
       const data = await response.json();
       console.log('[Truecaller] Backend response:', data);
 
-      // Step 3: Handle Truecaller custom JWT auth (NO Supabase session)
-      if (data.customAuth && data.user) {
-        console.log('[Truecaller] Truecaller auth successful - custom JWT only');
-        toast.success('Logged in with Truecaller!');
+      if (!data.success || !data.sessionToken) {
+        throw new Error('Invalid backend response - missing session token');
+      }
 
-        // Store custom JWT token and user data
-        localStorage.setItem('truecaller_token', data.token);
-        localStorage.setItem('truecaller_user', JSON.stringify(data.user));
+      console.log('[Truecaller] Session token received, verifying...');
 
-        console.log('[Truecaller] Custom token and user data stored');
+      // Step 3: Verify recovery token to create Supabase session (NO SMS/EMAIL SENT!)
+      const client = await supabasePipeline.getDirectClient();
 
-        // Update auth store with user data
-        setUser(data.user);
+      const { data: sessionData, error: verifyError } = await client.auth.verifyOtp({
+        type: 'recovery',
+        token_hash: data.sessionToken,
+      });
 
-        // Navigate based on onboarding status
-        if (data.user.is_onboarded) {
-          console.log('[Truecaller] User onboarded - navigating to dashboard');
-          navigate('/dashboard');
-        } else {
-          console.log('[Truecaller] User not onboarded - navigating to onboarding');
-          navigate('/onboarding/name');
-        }
+      if (verifyError) {
+        console.error('[Truecaller] Token verification error:', verifyError);
+        throw verifyError;
+      }
+
+      if (!sessionData.session) {
+        throw new Error('No session created');
+      }
+
+      console.log('[Truecaller] ✅ Session created successfully!');
+
+      // Step 4: Fetch user profile from database
+      const { data: userProfile, error: profileError } = await client
+        .from('users')
+        .select('*')
+        .eq('id', sessionData.session.user.id)
+        .single();
+
+      if (profileError || !userProfile) {
+        console.error('[Truecaller] Error fetching user profile:', profileError);
+        throw new Error('Failed to fetch user profile');
+      }
+
+      // Step 5: Update auth store with complete user data
+      setUser({
+        id: userProfile.id,
+        phone_number: userProfile.phone_number,
+        display_name: userProfile.display_name,
+        avatar_url: userProfile.avatar_url,
+        is_onboarded: userProfile.is_onboarded,
+        created_at: userProfile.created_at,
+      });
+
+      // Step 6: Navigate based on onboarding status
+      toast.success('Logged in with Truecaller!');
+
+      if (userProfile.is_onboarded) {
+        console.log('[Truecaller] User onboarded - navigating to dashboard');
+        navigate('/dashboard');
       } else {
-        // Fallback: Normal OTP flow
-        console.log('[Truecaller] Falling back to normal OTP flow');
-        const { error: otpError } = await supabasePipeline.signInWithOtp(data.phoneNumber);
-
-        if (otpError) {
-          throw new Error(otpError.message);
-        }
-
-        toast.success('Verification code sent to your phone!');
-        navigate('/auth/verify', {
-          state: {
-            phone: data.phoneNumber,
-            truecallerVerified: false,
-            userName: data.user.displayName,
-          }
-        });
+        console.log('[Truecaller] User not onboarded - navigating to onboarding');
+        navigate('/onboarding/name');
       }
 
     } catch (error: any) {

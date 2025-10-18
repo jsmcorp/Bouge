@@ -112,50 +112,17 @@ export const useAuthStore = create<AuthState>()(
         console.log('📝 Updating user profile:', updates);
 
         try {
-          // Check if user is logged in via custom JWT (Truecaller)
-          const customToken = localStorage.getItem('truecaller_token');
+          // Use Supabase Auth for all users (including Truecaller)
+          console.log('🔑 Using Supabase Auth for profile update');
+          const { data, error } = await supabasePipeline.updateUser(user.id, updates);
 
-          if (customToken) {
-            console.log('🔐 Using custom JWT for profile update');
-
-            // Call backend endpoint with custom JWT
-            const response = await fetch(
-              `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/update-user-profile`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-                },
-                body: JSON.stringify({
-                  token: customToken,
-                  updates
-                })
-              }
-            );
-
-            if (!response.ok) {
-              const errorData = await response.json();
-              throw new Error(errorData.error || 'Failed to update profile');
-            }
-
-            const data = await response.json();
-            console.log('✅ User profile updated successfully via custom JWT');
-            set({ user: data.user });
-          } else {
-            // Use Supabase Auth for regular users
-            console.log('🔑 Using Supabase Auth for profile update');
-            const { data, error } = await supabasePipeline.updateUser(user.id, updates);
-
-            if (error) {
-              console.error('❌ User update error:', error);
-              throw error;
-            }
-
-            console.log('✅ User profile updated successfully');
-            set({ user: data });
+          if (error) {
+            console.error('❌ User update error:', error);
+            throw error;
           }
+
+          console.log('✅ User profile updated successfully');
+          set({ user: data });
         } catch (error) {
           console.error('💥 Update user error:', error);
           throw error;
@@ -222,26 +189,14 @@ export const useAuthStore = create<AuthState>()(
           // Explicitly set loading state at the beginning
           set({ isLoading: true, isInitialized: false });
 
-          // Check for Truecaller custom JWT first
-          const truecallerToken = localStorage.getItem('truecaller_token');
-          const truecallerUserStr = localStorage.getItem('truecaller_user');
-
-          if (truecallerToken && truecallerUserStr) {
-            console.log('🔐 Truecaller custom JWT found - using custom auth');
-            try {
-              const truecallerUser = JSON.parse(truecallerUserStr);
-              console.log('👤 Truecaller user loaded:', truecallerUser.id);
-              set({ user: truecallerUser, session: null });
-              return;
-            } catch (error) {
-              console.error('❌ Error parsing Truecaller user:', error);
-              // Clear invalid data
-              localStorage.removeItem('truecaller_token');
-              localStorage.removeItem('truecaller_user');
-            }
+          // Clean up any old Truecaller custom JWT data (migration)
+          if (localStorage.getItem('truecaller_token')) {
+            console.log('🧹 Removing old Truecaller custom JWT data');
+            localStorage.removeItem('truecaller_token');
+            localStorage.removeItem('truecaller_user');
           }
 
-          // Fallback to Supabase Auth session
+          // Check Supabase Auth session (works for all users including Truecaller)
           console.log('🔑 Checking Supabase Auth session...');
           const { data: { session }, error: sessionError } = await supabasePipeline.getSession();
 

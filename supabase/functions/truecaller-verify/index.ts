@@ -135,107 +135,153 @@ serve(async (req) => {
       );
     }
 
-    // Step 3: Create or update user in Supabase
-    const db = createClient(PROJECT_URL, SERVICE_ROLE);
+    // Step 3: Create Supabase admin client
+    const supabase = createClient(PROJECT_URL, SERVICE_ROLE, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    });
 
-    // Check if user exists with this phone number
-    const { data: existingUser, error: fetchError } = await db
-      .from('users')
-      .select('id, phone_number, display_name, avatar_url')  // FIXED: display_name
-      .eq('phone_number', userInfo.phone_number)
-      .single();
+    // Step 4: Check if user exists in Supabase Auth
+    const { data: { users: existingUsers } } = await supabase.auth.admin.listUsers();
+    let authUser = existingUsers.find(u => u.phone === userInfo.phone_number);
 
-    if (fetchError && fetchError.code !== 'PGRST116') {
-      console.error('[Truecaller] Error fetching user:', fetchError);
-      return new Response(
-        JSON.stringify({ error: 'Database error', details: fetchError.message }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+    // Generate email: Use Truecaller email if available, otherwise generate from phone
+    // Format: phone_digits@truecaller.confessr.app (e.g., 917744939966@truecaller.confessr.app)
+    const phoneDigits = userInfo.phone_number.replace(/[^0-9]/g, '');
+    const emailToUse = userInfo.email || `${phoneDigits}@truecaller.confessr.app`;
 
-    let userId: string;
+    if (!authUser) {
+      console.log('[Truecaller] Creating new user in Supabase Auth...');
 
-    if (existingUser) {
-      // User exists - update profile if needed
-      userId = existingUser.id;
-      console.log('[Truecaller] Existing user found:', userId);
+      // Create user with email (real from Truecaller OR generated)
+      // Both phone_confirm and email_confirm are true - NO SMS/EMAIL sent!
+      const { data: newUserData, error: createError } = await supabase.auth.admin.createUser({
+        email: emailToUse,
+        email_confirm: true,  // Mark email as verified - NO EMAIL sent!
+        phone: userInfo.phone_number,
+        phone_confirm: true,  // Mark phone as verified - NO SMS sent!
+        user_metadata: {
+          display_name: userInfo.name,
+          avatar_url: userInfo.picture,
+          truecaller_verified: true,
+        },
+      });
 
-      // Update display_name and avatar if not set
-      const updates: any = {};
-      if (!existingUser.display_name && userInfo.name) {  // FIXED: display_name
-        updates.display_name = userInfo.name;  // FIXED: display_name
+      if (createError) {
+        console.error('[Truecaller] Error creating auth user:', createError);
+        throw createError;
       }
-      if (!existingUser.avatar_url && userInfo.picture) {
-        updates.avatar_url = userInfo.picture;
-      }
 
-      if (Object.keys(updates).length > 0) {
-        const { error: updateError } = await db
-          .from('users')
-          .update(updates)
-          .eq('id', userId);
+      authUser = newUserData.user;
+      console.log('[Truecaller] Auth user created:', authUser.id, 'with email:', emailToUse);
 
-        if (updateError) {
-          console.error('[Truecaller] Error updating user:', updateError);
-        } else {
-          console.log('[Truecaller] User profile updated');
-        }
+      // Create profile in users table
+      const { error: profileError } = await supabase.from('users').insert({
+        id: authUser.id,
+        phone_number: userInfo.phone_number,
+        display_name: userInfo.name,
+        avatar_url: userInfo.picture,
+        is_onboarded: false,
+      });
+
+      if (profileError) {
+        console.error('[Truecaller] Error creating user profile:', profileError);
+        // Don't fail - auth user is created, profile can be created later
+      } else {
+        console.log('[Truecaller] User profile created');
       }
     } else {
-      // New user - create profile
-      const { data: newUser, error: insertError } = await db
-        .from('users')
-        .insert({
-          phone_number: userInfo.phone_number,
-          display_name: userInfo.name || null,  // FIXED: display_name
-          avatar_url: userInfo.picture || null,
-          created_at: new Date().toISOString(),
-        })
-        .select('id')
-        .single();
+      console.log('[Truecaller] Existing auth user found:', authUser.id);
 
-      if (insertError) {
-        console.error('[Truecaller] Error creating user:', insertError);
-        return new Response(
-          JSON.stringify({ error: 'Failed to create user', details: insertError.message }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      // CRITICAL: Check if existing user has an email
+      if (!authUser.email) {
+        console.log('[Truecaller] Existing user has no email - adding email now...');
+
+        // Update user to add email (required for generateLink)
+        const { data: updatedUser, error: updateEmailError } = await supabase.auth.admin.updateUserById(
+          authUser.id,
+          {
+            email: emailToUse,
+            email_confirm: true,  // Mark as verified - NO EMAIL sent!
+          }
         );
+
+        if (updateEmailError) {
+          console.error('[Truecaller] Error adding email to existing user:', updateEmailError);
+          throw updateEmailError;
+        }
+
+        authUser = updatedUser.user;
+        console.log('[Truecaller] Email added to existing user:', emailToUse);
+      } else {
+        console.log('[Truecaller] Existing user already has email:', authUser.email);
       }
 
-      userId = newUser.id;
-      console.log('[Truecaller] New user created:', userId);
+      // Update user metadata
+      const { error: updateError } = await supabase.auth.admin.updateUserById(
+        authUser.id,
+        {
+          user_metadata: {
+            display_name: userInfo.name,
+            avatar_url: userInfo.picture,
+            truecaller_verified: true,
+          },
+        }
+      );
+
+      if (updateError) {
+        console.error('[Truecaller] Error updating user metadata:', updateError);
+      }
     }
 
-    console.log('[Truecaller] User profile ready:', userId);
+    // Step 5: Generate recovery link (NO EMAIL SENT!)
+    console.log('[Truecaller] Generating recovery link for instant login...');
 
-    // Step 5: Generate custom JWT for Truecaller user (bypass Supabase Auth entirely)
-    const customToken = btoa(JSON.stringify({
-      userId: userId,
-      phoneNumber: userInfo.phone_number,
-      displayName: userInfo.name,
-      provider: 'truecaller',
-      truecallerId: userInfo.sub,
-      issuedAt: Date.now(),
-      expiresAt: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 days
-    }));
+    // CRITICAL: Use the EXACT email that's in auth.users.email
+    const emailForLink = authUser.email!;
+    console.log('[Truecaller] Using email for recovery link:', emailForLink);
 
-    console.log('[Truecaller] Custom JWT generated for user:', userId);
+    const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
+      type: 'recovery',
+      email: emailForLink,
+    });
 
-    // Step 6: Return success response with custom JWT (NO Supabase Auth session)
-    // Truecaller users use custom JWT only - no OTP, no Supabase Auth
+    if (linkError) {
+      console.error('[Truecaller] Link generation error:', linkError);
+      throw linkError;
+    }
+
+    // Extract the token from the recovery link
+    const url = new URL(linkData.properties.action_link);
+    const token = url.searchParams.get('token');
+    const type = url.searchParams.get('type');
+
+    if (!token) {
+      throw new Error('No token in recovery link');
+    }
+
+    console.log('[Truecaller] Recovery link generated successfully');
+
+    // Step 6: Fetch user profile for response
+    const { data: userProfile } = await supabase
+      .from('users')
+      .select('is_onboarded')
+      .eq('id', authUser.id)
+      .single();
+
+    // Step 7: Return token for frontend to create session
     return new Response(
       JSON.stringify({
         success: true,
-        customAuth: true,
-        token: customToken,
         user: {
-          id: userId,
-          phone_number: userInfo.phone_number,
-          display_name: userInfo.name,
-          avatar_url: userInfo.picture || null,
-          is_onboarded: existingUser?.is_onboarded || false,
-          created_at: existingUser?.created_at || new Date().toISOString(),
+          id: authUser.id,
+          phoneNumber: userInfo.phone_number,
+          displayName: userInfo.name,
+          avatarUrl: userInfo.picture,
+          isOnboarded: userProfile?.is_onboarded || false,
         },
+        // Frontend uses this token to create Supabase Auth session
+        sessionToken: token,
+        sessionType: type || 'recovery',
       }),
       {
         status: 200,
