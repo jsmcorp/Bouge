@@ -245,15 +245,15 @@ export function ChatArea() {
         </div>
 
         {/* Messages - Scrollable area that fills remaining space */}
-        <div className={`flex-1 overflow-hidden transition-all duration-300 ${
+        <div className={`flex-1 overflow-hidden transition-all duration-300 chat-background-gradient ${
           isMobile && showEmojiPanel ? 'pb-[400px]' : ''
         }`}>
           <MessageList />
         </div>
 
         {/* Input - Fixed at bottom */}
-        <div className="flex-shrink-0 border-t border-border/50 bg-card/30 backdrop-blur-sm z-10">
-          <ChatInput 
+        <div className="flex-shrink-0">
+          <ChatInput
             showEmojiPanel={showEmojiPanel}
             setShowEmojiPanel={setShowEmojiPanel}
           />

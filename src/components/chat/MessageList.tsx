@@ -103,10 +103,10 @@ export function MessageList() {
 
   return (
     <ScrollArea
-      className="h-full overflow-x-hidden"
+      className="h-full overflow-x-hidden smooth-scroll-messages"
       ref={scrollAreaRef}
     >
-      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-2 overflow-x-hidden">
+      <div className="p-2 sm:p-3 md:p-4 space-y-1 overflow-x-hidden messages-container">
         {/* Loading indicator for older messages - WhatsApp style */}
         {isLoadingOlder && hasMoreOlder && (
           <div className="flex items-center justify-center py-2">
@@ -115,9 +115,16 @@ export function MessageList() {
           </div>
         )}
 
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           // Check if this is the first unread message
           const isFirstUnread = message.id === firstUnreadMessageId;
+
+          // Determine if we should show sender name (WhatsApp-style grouping)
+          // Show name if: first message OR different sender OR ghost mode changed
+          const prevMessage = index > 0 ? messages[index - 1] : null;
+          const showSenderName = !prevMessage ||
+            prevMessage.user_id !== message.user_id ||
+            prevMessage.is_ghost !== message.is_ghost;
 
           return (
             <div key={message.id}>
@@ -127,7 +134,11 @@ export function MessageList() {
                   <UnreadMessageSeparator />
                 </div>
               )}
-              <MessageBubble message={message} />
+              <MessageBubble
+                message={message}
+                showSenderName={showSenderName}
+                isNewSender={showSenderName}
+              />
             </div>
           );
         })}

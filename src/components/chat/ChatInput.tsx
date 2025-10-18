@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Ghost, Image, Smile, Plus, X, Reply, BarChart3, Keyboard } from 'lucide-react';
+import { Ghost, X, Reply, BarChart3, Keyboard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import ghostIconSVG from '@/assets/ghosticon.svg';
+import sendIconSVG from '@/assets/sendicon.svg';
 import {
   Select,
   SelectContent,
@@ -13,12 +12,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
 import { useChatStore } from '@/store/chatStore';
 import { PollCreationModal } from '@/components/chat/PollCreationModal';
@@ -38,10 +31,10 @@ interface ChatInputProps {
   setShowEmojiPanel?: (show: boolean) => void;
 }
 
-export function ChatInput({ 
-  isInThread = false, 
-  showEmojiPanel = false, 
-  setShowEmojiPanel 
+export function ChatInput({
+  isInThread = false,
+  showEmojiPanel = false,
+  setShowEmojiPanel
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isLoading] = useState(false);
@@ -51,10 +44,13 @@ export function ChatInput({
   const [category, setCategory] = useState<string>('');
   const [isTyping, setIsTyping] = useState(false);
   const [showPollModal, setShowPollModal] = useState(false);
+  const [showSendOptions, setShowSendOptions] = useState(false);
   const isMobile = useIsMobile();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sendButtonLongPressRef = useRef<NodeJS.Timeout | null>(null);
+  const ghostButtonLongPressRef = useRef<NodeJS.Timeout | null>(null);
   const maxLines = 6;
   
   const { 
@@ -175,11 +171,6 @@ export function ChatInput({
     setImagePreview(null);
   };
 
-  const handleImageButtonClick = () => {
-    if (uploadingFile) return;
-    fileInputRef.current?.click();
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     console.log('📤 Send button clicked, processing message...', { message: message.trim(), activeGroup: !!activeGroup, isLoading, uploadingFile });
@@ -272,27 +263,6 @@ export function ChatInput({
   const handleCreatePoll = () => {
     setShowPollModal(true);
   };
-  
-  const handleEmojiButtonClick = async () => {
-    if (isMobile && setShowEmojiPanel) {
-      if (showEmojiPanel) {
-        // Switch from emoji panel to keyboard
-        setShowEmojiPanel(false);
-        // Focus textarea to bring up keyboard
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-        }
-      } else {
-        // Switch from keyboard to emoji panel
-        try {
-          await CapacitorKeyboard.hide();
-        } catch (error) {
-          console.log('Keyboard hide not available or failed:', error);
-        }
-        setShowEmojiPanel(true);
-      }
-    }
-  };
 
   const handleTextareaFocus = () => {
     if (isMobile && setShowEmojiPanel && showEmojiPanel) {
@@ -300,27 +270,63 @@ export function ChatInput({
     }
   };
 
-  const getPlaceholderText = () => {
-    if (isInThread) {
-      return 'Write your reply...';
-    }
-    if (selectedImage) {
-      return 'Add a caption (optional)...';
-    }
-    if (replyingTo) {
-      return 'Write your reply...';
-    }
-    switch (messageType) {
-      case 'confession':
-        return 'Share your confession anonymously...';
-      case 'poll':
-        return 'Create a poll to get group feedback...';
-      default:
-        return currentGhostMode 
-          ? 'Send an anonymous message...' 
-          : 'Type your message...';
+  // Long-press handlers for send button
+  const handleSendButtonLongPressStart = () => {
+    sendButtonLongPressRef.current = setTimeout(() => {
+      setShowSendOptions(true);
+    }, 500); // 500ms long press
+  };
+
+  const handleSendButtonLongPressEnd = () => {
+    if (sendButtonLongPressRef.current) {
+      clearTimeout(sendButtonLongPressRef.current);
+      sendButtonLongPressRef.current = null;
     }
   };
+
+  // Long-press handlers for ghost button (emoji picker)
+  const handleGhostButtonLongPressStart = () => {
+    ghostButtonLongPressRef.current = setTimeout(async () => {
+      // Show emoji panel on long press
+      if (isMobile && setShowEmojiPanel) {
+        try {
+          await CapacitorKeyboard.hide();
+        } catch (error) {
+          console.log('Keyboard hide not available or failed:', error);
+        }
+        setShowEmojiPanel(true);
+      }
+    }, 500); // 500ms long press
+  };
+
+  const handleGhostButtonLongPressEnd = () => {
+    if (ghostButtonLongPressRef.current) {
+      clearTimeout(ghostButtonLongPressRef.current);
+      ghostButtonLongPressRef.current = null;
+    }
+  };
+
+  // Click handler for ghost button (toggle ghost mode)
+  const handleGhostButtonClick = () => {
+    // Only toggle if not long-pressing
+    if (!ghostButtonLongPressRef.current) {
+      toggleGhostMode();
+    }
+  };
+
+  // Close send options on click outside
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (showSendOptions) {
+        setShowSendOptions(false);
+      }
+    };
+
+    if (showSendOptions) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showSendOptions]);
 
   return (
     <>
@@ -456,28 +462,8 @@ export function ChatInput({
           </motion.div>
         )}
 
-        {/* Ghost Mode Toggle */}
-        {messageType === 'text' && !selectedImage && (
-          <div className="flex items-center justify-between mb-1 sm:mb-2">
-            <div className="flex items-center space-x-1 sm:space-x-2">
-              <Ghost className={`w-3 h-3 sm:w-4 sm:h-4 ${currentGhostMode ? 'text-green-500' : 'text-muted-foreground'}`} />
-              <Label htmlFor={`ghost-mode-${isInThread ? 'thread' : 'main'}`} className="text-xs sm:text-sm">
-                Ghost Mode
-              </Label>
-              <Switch
-                id={`ghost-mode-${isInThread ? 'thread' : 'main'}`}
-                checked={currentGhostMode}
-                onCheckedChange={toggleGhostMode}
-              />
-            </div>
-            <div className="text-xs text-muted-foreground hidden sm:block">
-              {currentGhostMode ? 'Messages will be anonymous' : 'Messages will show your identity'}
-            </div>
-          </div>
-        )}
-
-        {/* Compact Input Bar */}
-        <form onSubmit={handleSubmit} className={`message-input-area w-full overflow-hidden flex items-end gap-1 sm:gap-2 p-1 sm:p-2 shadow-lg ${isInThread ? 'min-h-10 sm:min-h-12' : 'min-h-12 sm:min-h-14'}`}>
+        {/* iOS-Style Pixel-Perfect Input Bar */}
+        <form onSubmit={handleSubmit} className="ios-input-bar">
           {/* Hidden file input */}
           <input
             ref={fileInputRef}
@@ -486,87 +472,102 @@ export function ChatInput({
             onChange={handleImageSelect}
             className="hidden"
           />
-          
-          {/* Message Type Button */}
-          {!replyingTo && !isInThread && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button 
-                  type="button" 
-                  variant="ghost" 
-                  className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
-                >
-                  <Plus className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem onClick={() => setMessageType('text')}>
-                  <Ghost className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
-                  Regular Message
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setMessageType('confession')}>
-                  <Ghost className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-green-500" />
-                  Anonymous Confession
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={handleCreatePoll}>
-                  <BarChart3 className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-blue-500" />
-                  Create Poll
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
 
-          {/* Emoji Button */}
-          <Button
+          {/* Ghost Emoji Button */}
+          <button
             type="button"
-            variant="ghost"
-            onClick={handleEmojiButtonClick}
-            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
+            onClick={handleGhostButtonClick}
+            onPointerDown={handleGhostButtonLongPressStart}
+            onPointerUp={handleGhostButtonLongPressEnd}
+            onPointerLeave={handleGhostButtonLongPressEnd}
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => {
+              // Allow touch but prevent focus
+              e.currentTarget.style.outline = 'none';
+            }}
+            tabIndex={-1}
+            className={`ios-input-bar__emoji-btn ${currentGhostMode ? 'ghost-active' : ''}`}
+            title={currentGhostMode ? 'Ghost Mode ON' : 'Ghost Mode OFF'}
           >
             {isMobile && showEmojiPanel ? (
-              <Keyboard className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
+              <Keyboard className="w-8 h-8 text-gray-700" />
             ) : (
-              <Smile className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
+              <img src={ghostIconSVG} alt="Ghost Mode" />
             )}
-          </Button>
+          </button>
 
-          {/* Text Input */}
-          <Textarea
-            ref={textareaRef}
+          {/* Text Input Field */}
+          <input
+            ref={textareaRef as any}
+            type="text"
             value={message}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
+            onChange={(e) => {
+              setMessage(e.target.value);
+              handleInputChange(e as any);
+            }}
+            onKeyDown={handleKeyDown as any}
             onBlur={handleTypingStop}
             onFocus={handleTextareaFocus}
-            placeholder={getPlaceholderText()}
-            className={`flex-1 min-h-0 ${isInThread ? 'h-7 sm:h-8' : 'h-8 sm:h-10'} py-1 sm:py-2 px-2 sm:px-4 rounded-3xl resize-none overflow-hidden self-end ${isInThread ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'} border-0 bg-transparent focus:ring-0 focus:outline-none focus-visible:ring-0 focus-visible:outline-none ring-0 outline-none ${
-              uploadingFile ? 'opacity-75' : ''
-            }`}
+            placeholder="Share something..."
+            className="ios-input-bar__text"
             maxLength={2000}
             disabled={uploadingFile}
-            rows={1}
-            style={{ height: 'auto', minHeight: 0 }}
           />
 
-          {/* Image Button */}
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={handleImageButtonClick}
-            disabled={uploadingFile || connectionStatus === 'disconnected'}
-            className={`${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full hover:bg-muted/50 self-end flex-shrink-0`}
-          >
-            <Image className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
-          </Button>
-
           {/* Send Button */}
-          <Button
+          <button
             type="submit"
             disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile || (connectionStatus === 'disconnected' && !!selectedImage)}
-            className={`send-button ${isInThread ? 'h-7 w-7 sm:h-8 sm:w-8' : 'h-8 w-8 sm:h-10 sm:w-10'} p-0 rounded-full self-end flex-shrink-0`}
+            onPointerDown={handleSendButtonLongPressStart}
+            onPointerUp={handleSendButtonLongPressEnd}
+            onPointerLeave={handleSendButtonLongPressEnd}
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => {
+              // Allow touch but prevent focus
+              e.currentTarget.style.outline = 'none';
+            }}
+            tabIndex={-1}
+            className="ios-input-bar__send-btn"
           >
-            <Send className={isInThread ? "w-3 h-3 sm:w-4 sm:h-4" : "w-4 h-4 sm:w-5 sm:h-5"} />
-          </Button>
+            <img src={sendIconSVG} alt="Send" />
+          </button>
+
+          {/* Send Options Popup - Long Press Menu */}
+          <AnimatePresence>
+            {showSendOptions && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                transition={{ duration: 0.15 }}
+                className="absolute bottom-16 right-4 bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden z-50"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessageType('confession');
+                    setShowSendOptions(false);
+                  }}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
+                >
+                  <Ghost className="w-5 h-5 text-green-600" />
+                  <span className="text-sm font-medium text-gray-900">Anonymous Confession</span>
+                </button>
+                <div className="h-px bg-gray-100" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleCreatePoll();
+                    setShowSendOptions(false);
+                  }}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
+                >
+                  <BarChart3 className="w-5 h-5 text-blue-600" />
+                  <span className="text-sm font-medium text-gray-900">Create Poll</span>
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </form>
       </div>
 
