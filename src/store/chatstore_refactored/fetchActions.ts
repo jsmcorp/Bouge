@@ -494,23 +494,26 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             messageCache.setCachedMessages(groupId, messages);
 
             // Update UI with local data (only if we didn't already show cached data)
+            const hasMore = messages.length >= 20;
+            console.log(`📊 hasMoreOlder calculation: messages.length=${messages.length}, hasMore=${hasMore}`);
+
             if (!cachedMessages) {
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
+                hasMoreOlder: hasMore // If we got 20 messages, there might be more
               });
-              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
+              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite, hasMoreOlder=${hasMore}`);
             } else {
               // Silently update the UI with fresh data from SQLite
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
+                hasMoreOlder: hasMore // If we got 20 messages, there might be more
               });
-              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite`);
+              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite, hasMoreOlder=${hasMore}`);
             }
             localDataLoaded = true;
 
