@@ -119,8 +119,18 @@ export function MessageBubble({
   const REACTION_EMOJIS = ['👍', '❤️', '😂', '😢', '😮', '😡', '🔥', '👏', '🎉', '💯'];
 
   // Fetch pseudonym for ghost messages
+  // CRITICAL FIX: Use pseudonym from message object if available (loaded during lazy load)
+  // This prevents RPC calls for older messages loaded from SQLite
   useEffect(() => {
     if (isGhost && activeGroup?.id && message.user_id) {
+      // If message already has pseudonym (from lazy load), use it immediately
+      if (message.pseudonym) {
+        console.log('🎭 Using pseudonym from message object:', message.pseudonym);
+        setGhostPseudonym(message.pseudonym);
+        return;
+      }
+
+      // Otherwise, fetch from pseudonym service (will check cache and SQLite first)
       const fetchPseudonym = async () => {
         try {
           const pseudonym = await pseudonymService.getPseudonym(activeGroup.id, message.user_id);
@@ -133,7 +143,7 @@ export function MessageBubble({
 
       fetchPseudonym();
     }
-  }, [isGhost, activeGroup?.id, message.user_id]);
+  }, [isGhost, activeGroup?.id, message.user_id, message.pseudonym]);
 
   // WhatsApp-exact swipe gesture - completely rewritten
   const swipeX = useMotionValue(0);

@@ -2,9 +2,33 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Chat Input Wrapper - Fixed container for reply preview and input bar */
+.chat-input-wrapper {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: 100vw;
+  z-index: 10;
+  pointer-events: none; /* Allow clicks to pass through wrapper */
+}
+
+.chat-input-wrapper > * {
+  pointer-events: auto; /* Re-enable clicks on children */
+}
+
+/* Chat Input Content - Reply preview, image preview, connection status */
+.chat-input-content {
+  position: relative;
+  background: transparent;
+  padding: 0 12px 8px 12px; /* Bottom padding for spacing above input bar */
+  margin-bottom: 0;
+}
+
 /* iOS-Style Input Bar - Premium Design */
 .ios-input-bar {
-  position: fixed;
+  position: relative; /* Changed from fixed - now relative to wrapper */
   bottom: 0;
   left: 0;
   right: 0;
@@ -17,7 +41,6 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  z-index: 10;
   box-sizing: border-box;
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04), 0 -1px 2px rgba(0, 0, 0, 0.02);
   overflow: hidden;
@@ -402,7 +425,7 @@ button:focus-visible {
 
 /* Smooth scrolling for messages - WhatsApp style */
 .smooth-scroll-messages {
-  scroll-behavior: smooth;
+  scroll-behavior: instant;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -410,9 +433,9 @@ button:focus-visible {
   will-change: transform;
   transform: translateZ(0);
   backface-visibility: hidden;
-  /* Add bottom padding to prevent last message from being hidden behind input bar */
-  /* Input bar height is 68px + safe-area-inset-bottom, add extra 12px for spacing */
-  padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px) + 12px) !important;
+  /* Bottom padding to prevent last message from being hidden behind fixed input bar */
+  /* Exact input bar height: 68px + safe-area-inset-bottom (no extra spacing) */
+  padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px)) !important;
 }
 
 /* Animations */
@@ -822,7 +845,7 @@ button:active:not(:disabled) {
 /* Smooth scrolling for chat area */
 .chat-background-gradient {
   -webkit-overflow-scrolling: touch;
-  scroll-behavior: smooth;
+  scroll-behavior: instant;
 }
 
 /* Hardware acceleration for bubbles */

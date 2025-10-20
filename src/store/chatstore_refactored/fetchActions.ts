@@ -1065,7 +1065,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	      try {
   	        const localOlder = await (sqliteService as any).getMessagesBefore(groupId, oldestMs, pageSize);
   	        if (localOlder && localOlder.length > 0) {
-  	          // Batch load authors
+  	          console.log(`📜 loadOlderMessages: Loaded ${localOlder.length} messages from SQLite`);
+
+  	          // Batch load authors for non-ghost messages
   	          const userIds: string[] = Array.from(
 	            new Set<string>(
 	              localOlder
@@ -1081,23 +1083,61 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	            } catch {}
   	          }
 
-  	          const mapped: Message[] = localOlder.map((msg: any) => ({
-  	            id: msg.id,
-  	            group_id: msg.group_id,
-  	            user_id: msg.user_id,
-  	            content: msg.content,
-  	            is_ghost: msg.is_ghost === 1,
-  	            message_type: msg.message_type,
-  	            category: msg.category,
-  	            parent_id: msg.parent_id,
-  	            image_url: msg.image_url,
-  	            created_at: new Date(msg.created_at).toISOString(),
-  	            author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
-  	            reply_count: 0,
-  	            replies: [],
-  	            delivery_status: 'delivered',
-  	            reactions: [],
-  	          }));
+  	          // CRITICAL FIX: Batch load pseudonyms for ghost messages from SQLite
+  	          // This prevents RPC calls when MessageBubble renders
+  	          const ghostUserIds: string[] = Array.from(
+	            new Set<string>(
+	              localOlder
+	                .filter((m: any) => m.is_ghost)
+	                .map((m: any) => String(m.user_id))
+	            )
+	          );
+
+  	          const pseudonymCache = new Map<string, string>();
+  	          if (ghostUserIds.length > 0) {
+  	            try {
+  	              const localPseudonyms = await sqliteService.getUserPseudonyms(groupId);
+  	              console.log(`📜 loadOlderMessages: Loaded ${localPseudonyms.length} pseudonyms from SQLite`);
+
+  	              const now = Date.now();
+  	              const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+  	              for (const p of localPseudonyms) {
+  	                const age = now - p.created_at;
+  	                // Only use pseudonyms that are less than 24 hours old
+  	                if (age < CACHE_DURATION) {
+  	                  pseudonymCache.set(p.user_id, p.pseudonym);
+  	                }
+  	              }
+  	              console.log(`📜 loadOlderMessages: Cached ${pseudonymCache.size} valid pseudonyms`);
+  	            } catch (e) {
+  	              console.warn('⚠️ loadOlderMessages: Failed to load pseudonyms from SQLite', e);
+  	            }
+  	          }
+
+  	          const mapped: Message[] = localOlder.map((msg: any) => {
+  	            const isGhost = msg.is_ghost === 1;
+  	            const pseudonym = isGhost ? pseudonymCache.get(msg.user_id) : undefined;
+
+  	            return {
+  	              id: msg.id,
+  	              group_id: msg.group_id,
+  	              user_id: msg.user_id,
+  	              content: msg.content,
+  	              is_ghost: isGhost,
+  	              message_type: msg.message_type,
+  	              category: msg.category,
+  	              parent_id: msg.parent_id,
+  	              image_url: msg.image_url,
+  	              created_at: new Date(msg.created_at).toISOString(),
+  	              author: isGhost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+  	              pseudonym: pseudonym, // CRITICAL: Attach pseudonym to prevent RPC call
+  	              reply_count: 0,
+  	              replies: [],
+  	              delivery_status: 'delivered',
+  	              reactions: [],
+  	            };
+  	          });
   	          combined = combined.concat(mapped);
   	        }
   	      } catch (e) {

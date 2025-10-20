@@ -328,139 +328,214 @@ export function ChatInput({
     }
   }, [showSendOptions]);
 
+  // For threads, use inline layout (not fixed)
+  if (isInThread) {
+    return (
+      <>
+        <div className="space-y-2 p-1 sm:p-2">
+          {/* iOS-Style Input Bar */}
+          <form onSubmit={handleSubmit} className="ios-input-bar">
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageSelect}
+              className="hidden"
+            />
+
+            {/* Ghost Button */}
+            <button
+              type="button"
+              onClick={handleGhostButtonClick}
+              onPointerDown={handleGhostButtonLongPressStart}
+              onPointerUp={handleGhostButtonLongPressEnd}
+              onPointerLeave={handleGhostButtonLongPressEnd}
+              onMouseDown={(e) => e.preventDefault()}
+              tabIndex={-1}
+              className={`ios-input-bar__emoji-btn ${currentGhostMode ? 'ghost-active' : ''}`}
+            >
+              <img src={ghostIconSVG} alt="Ghost Mode" />
+            </button>
+
+            {/* Text Input */}
+            <input
+              ref={textareaRef as any}
+              type="text"
+              value={message}
+              onChange={(e) => {
+                setMessage(e.target.value);
+                handleInputChange(e as any);
+              }}
+              onKeyDown={handleKeyDown as any}
+              onBlur={handleTypingStop}
+              onFocus={handleTextareaFocus}
+              placeholder="Reply to thread..."
+              className="ios-input-bar__text"
+              maxLength={2000}
+              disabled={uploadingFile}
+            />
+
+            {/* Send Button */}
+            <button
+              type="submit"
+              disabled={(!message.trim() && !selectedImage) || isLoading || uploadingFile}
+              onMouseDown={(e) => e.preventDefault()}
+              tabIndex={-1}
+              className="ios-input-bar__send-btn"
+            >
+              <img src={sendIconSVG} alt="Send" />
+            </button>
+          </form>
+        </div>
+
+        {/* Poll Modal */}
+        <PollCreationModal
+          open={showPollModal}
+          onOpenChange={setShowPollModal}
+        />
+      </>
+    );
+  }
+
+  // For main chat, use fixed wrapper layout
   return (
     <>
-      <div className={`space-y-2 sm:space-y-3 ${isInThread ? 'p-1 sm:p-2' : 'p-2 sm:p-3'}`}>
-        {/* Connection Status */}
-        {connectionStatus !== 'connected' && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex items-center justify-center p-1 sm:p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg"
-          >
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
-              <span className="text-xs sm:text-sm text-yellow-600">
-                {connectionStatus === 'connecting' && 'Connecting...'}
-                {connectionStatus === 'reconnecting' && 'Reconnecting...'}
-                {connectionStatus === 'disconnected' && 'Disconnected - Messages may not send'}
-              </span>
-            </div>
-          </motion.div>
-        )}
-
-        {/* Reply Context */}
-        <AnimatePresence>
-          {replyingTo && !isInThread && (
+      {/* Fixed Wrapper - Contains reply preview and input bar */}
+      <div className="chat-input-wrapper">
+        {/* Content above input bar - reply preview, image preview, etc. */}
+        <div className="chat-input-content space-y-2">
+          {/* Connection Status */}
+          {connectionStatus !== 'connected' && (
             <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              className="flex items-start space-x-3 p-3 bg-muted/30 rounded-lg border-l-4 border-l-green-500"
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex items-center justify-center p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg"
             >
-              <Reply className="w-4 h-4 text-green-500 mt-1 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center space-x-2 mb-1">
-                  <span className="text-sm font-medium text-green-500">
-                    Replying to {replyingTo.is_ghost ? 'Ghost' : replyingTo.author?.display_name || 'Anonymous'}
-                  </span>
-                </div>
-                <p className="text-sm text-muted-foreground truncate">
-                  {replyingTo.content}
-                </p>
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
+                <span className="text-xs sm:text-sm text-yellow-600">
+                  {connectionStatus === 'connecting' && 'Connecting...'}
+                  {connectionStatus === 'reconnecting' && 'Reconnecting...'}
+                  {connectionStatus === 'disconnected' && 'Disconnected - Messages may not send'}
+                </span>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 w-6 p-0"
-                onClick={cancelReply}
+            </motion.div>
+          )}
+
+          {/* Reply Context */}
+          <AnimatePresence>
+            {replyingTo && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="flex items-start space-x-3 p-3 bg-card/95 backdrop-blur-sm rounded-lg border-l-4 border-l-green-500 shadow-lg"
               >
-                <X className="w-3 h-3" />
-              </Button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Image Preview */}
-        <AnimatePresence>
-          {selectedImage && imagePreview && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              className="relative"
-            >
-              <div className="relative bg-muted/30 rounded-lg p-3 border border-border/50">
-                <div className="flex items-start space-x-3">
-                  <div className="relative">
-                    <img
-                      src={imagePreview}
-                      alt="Selected image"
-                      className="w-20 h-20 object-cover rounded-lg border border-border/50"
-                    />
-                    {uploadingFile && (
-                      <div className="absolute inset-0 bg-black/50 rounded-lg flex items-center justify-center">
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      </div>
-                    )}
+                <Reply className="w-4 h-4 text-green-500 mt-1 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center space-x-2 mb-1">
+                    <span className="text-sm font-medium text-green-500">
+                      Replying to {replyingTo.is_ghost ? 'Ghost' : replyingTo.author?.display_name || 'Anonymous'}
+                    </span>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground">
-                      {selectedImage.name}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {(selectedImage.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
-                    {uploadingFile && (
-                      <p className="text-xs text-primary mt-1">
-                        Compressing and uploading...
-                      </p>
-                    )}
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={clearSelectedImage}
-                    disabled={uploadingFile}
-                    className="h-6 w-6 p-0"
-                  >
-                    <X className="w-3 h-3" />
-                  </Button>
+                  <p className="text-sm text-muted-foreground truncate">
+                    {replyingTo.content}
+                  </p>
                 </div>
-              </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0"
+                  onClick={cancelReply}
+                >
+                  <X className="w-3 h-3" />
+                </Button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Image Preview */}
+          <AnimatePresence>
+            {selectedImage && imagePreview && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="relative"
+              >
+                <div className="relative bg-card/95 backdrop-blur-sm rounded-lg p-3 border border-border/50 shadow-lg">
+                  <div className="flex items-start space-x-3">
+                    <div className="relative">
+                      <img
+                        src={imagePreview}
+                        alt="Selected image"
+                        className="w-20 h-20 object-cover rounded-lg border border-border/50"
+                      />
+                      {uploadingFile && (
+                        <div className="absolute inset-0 bg-black/50 rounded-lg flex items-center justify-center">
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        {selectedImage.name}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {(selectedImage.size / 1024 / 1024).toFixed(2)} MB
+                      </p>
+                      {uploadingFile && (
+                        <p className="text-xs text-primary mt-1">
+                          Compressing and uploading...
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearSelectedImage}
+                      disabled={uploadingFile}
+                      className="h-6 w-6 p-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </Button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Message Type & Category */}
+          {messageType === 'confession' && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              className="flex items-center space-x-2"
+            >
+              <Badge variant="secondary" className="bg-green-500/20 text-green-500">
+                Anonymous Confession
+              </Badge>
+              <Select value={category} onValueChange={setCategory}>
+                <SelectTrigger className="w-32">
+                  <SelectValue placeholder="Category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {CONFESSION_CATEGORIES.map((cat) => (
+                    <SelectItem key={cat.value} value={cat.value}>
+                      <div className="flex items-center space-x-2">
+                        <div className={`w-2 h-2 rounded-full ${cat.color.split(' ')[0]}`} />
+                        <span>{cat.label}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </motion.div>
           )}
-        </AnimatePresence>
-
-        {/* Message Type & Category */}
-        {messageType === 'confession' && !isInThread && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="flex items-center space-x-2"
-          >
-            <Badge variant="secondary" className="bg-green-500/20 text-green-500">
-              Anonymous Confession
-            </Badge>
-            <Select value={category} onValueChange={setCategory}>
-              <SelectTrigger className="w-32">
-                <SelectValue placeholder="Category" />
-              </SelectTrigger>
-              <SelectContent>
-                {CONFESSION_CATEGORIES.map((cat) => (
-                  <SelectItem key={cat.value} value={cat.value}>
-                    <div className="flex items-center space-x-2">
-                      <div className={`w-2 h-2 rounded-full ${cat.color.split(' ')[0]}`} />
-                      <span>{cat.label}</span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </motion.div>
-        )}
+        </div> {/* Close chat-input-content */}
 
         {/* iOS-Style Pixel-Perfect Input Bar */}
         <form onSubmit={handleSubmit} className="ios-input-bar">
@@ -569,7 +644,7 @@ export function ChatInput({
             )}
           </AnimatePresence>
         </form>
-      </div>
+      </div> {/* Close chat-input-wrapper */}
 
       {/* Poll Creation Modal */}
       <PollCreationModal
