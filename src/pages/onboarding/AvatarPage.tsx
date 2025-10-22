@@ -28,12 +28,15 @@ export default function OnboardingAvatarPage() {
   const handleComplete = async () => {
     setIsLoading(true);
     try {
-      await updateUser({ 
+      await updateUser({
         avatar_url: selectedAvatar,
-        is_onboarded: true 
+        is_onboarded: true
       });
       toast.success('Profile setup complete!');
-      navigate('/dashboard');
+
+      // Always go to setup page for first-time users
+      // SetupPage will check if setup is complete and skip if needed
+      navigate('/setup');
     } catch (error) {
       toast.error('Failed to save avatar. Please try again.');
     } finally {
@@ -45,7 +48,10 @@ export default function OnboardingAvatarPage() {
     setIsLoading(true);
     try {
       await updateUser({ is_onboarded: true });
-      navigate('/dashboard');
+
+      // Always go to setup page for first-time users
+      // SetupPage will check if setup is complete and skip if needed
+      navigate('/setup');
     } catch (error) {
       toast.error('Something went wrong. Please try again.');
     } finally {

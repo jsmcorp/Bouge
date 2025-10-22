@@ -25,7 +25,6 @@ import {
 import { useAuthStore } from '@/store/authStore';
 import { useChatStore } from '@/store/chatStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
-import { CreateGroupDialog } from '@/components/dashboard/CreateGroupDialog';
 import { JoinGroupDialog } from '@/components/dashboard/JoinGroupDialog';
 import { toast } from 'sonner';
 import { unreadTracker } from '@/lib/unreadTracker';
@@ -35,7 +34,6 @@ export function Sidebar() {
   const isMobile = useIsMobile();
   const { user, logout } = useAuthStore();
   const { groups, activeGroup, setActiveGroup } = useChatStore();
-  const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showJoinGroup, setShowJoinGroup] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
@@ -134,7 +132,7 @@ export function Sidebar() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setShowCreateGroup(true)}>
+                  <DropdownMenuItem onClick={() => navigate('/create-group')}>
                     <Plus className="h-4 w-4 mr-2" />
                     Create Group
                   </DropdownMenuItem>
@@ -241,10 +239,6 @@ export function Sidebar() {
         </div>
       </motion.div>
 
-      <CreateGroupDialog
-        open={showCreateGroup}
-        onOpenChange={setShowCreateGroup}
-      />
       <JoinGroupDialog
         open={showJoinGroup}
         onOpenChange={setShowJoinGroup}

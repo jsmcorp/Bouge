@@ -21,6 +21,7 @@ import LoginPage from '@/pages/auth/LoginPage';
 import VerifyPage from '@/pages/auth/VerifyPage';
 import OnboardingNamePage from '@/pages/onboarding/NamePage';
 import OnboardingAvatarPage from '@/pages/onboarding/AvatarPage';
+import { SetupPage } from '@/pages/onboarding/SetupPage';
 
 // Main app pages
 import DashboardPage from '@/pages/DashboardPage';
@@ -28,6 +29,8 @@ import GroupPage from '@/pages/GroupPage';
 import ThreadViewPage from './pages/ThreadViewPage';
 import GroupDetailsViewPage from './pages/GroupDetailsViewPage';
 import SettingsPage from '@/pages/SettingsPage';
+import CreateGroupPage from '@/pages/CreateGroupPage';
+import ContactSelectionPage from '@/pages/ContactSelectionPage';
 
 // Components
 import { LoadingScreen } from '@/components/LoadingScreen';
@@ -56,7 +59,7 @@ function AppContent() {
     if (Capacitor.isNativePlatform()) {
       const handleBackButton = () => {
         const currentPath = window.location.pathname;
-        
+
         // If we're in a group chat, navigate to dashboard
         if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details')) {
           // Clear active group first
@@ -64,6 +67,16 @@ function AppContent() {
           // Use window.history to ensure immediate navigation
           window.history.replaceState(null, '', '/dashboard');
           navigate('/dashboard', { replace: true });
+        }
+        // If we're in create group flow, navigate back appropriately
+        else if (currentPath.includes('/create-group')) {
+          if (currentPath === '/create-group/select-contacts') {
+            // From contact selection, go back to create group
+            navigate('/create-group', { replace: true });
+          } else {
+            // From create group page, go back to dashboard
+            navigate('/dashboard', { replace: true });
+          }
         }
         // For other pages (not dashboard), navigate back in history
         else if (currentPath !== '/dashboard') {
@@ -137,14 +150,21 @@ function AppContent() {
           console.log('🌐 Network status monitoring handled centrally in main.tsx');
 
           // Initialize contacts store (load from SQLite + check permission)
+          console.log('📇 About to initialize contacts store...');
           try {
-            console.log('📇 Initializing contacts store...');
+            console.log('📇 Calling initializeContacts()...');
             await initializeContacts();
             console.log('✅ Contacts store initialized successfully');
           } catch (error) {
             console.error('❌ Contacts store initialization failed:', error);
+            console.error('❌ Error details:', {
+              message: error instanceof Error ? error.message : String(error),
+              stack: error instanceof Error ? error.stack : undefined,
+              error
+            });
             // Continue without contacts - not critical for app functionality
           }
+          console.log('📇 Contacts initialization block completed');
         }
 
         // Initialize auth listener first
@@ -264,6 +284,16 @@ function AppContent() {
             }
           />
 
+          {/* Setup page - shown after onboarding, before dashboard */}
+          <Route
+            path="/setup"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <SetupPage />
+              </ProtectedRoute>
+            }
+          />
+
           {/* Protected routes */}
           <Route
             path="/dashboard"
@@ -299,7 +329,25 @@ function AppContent() {
               </ProtectedRoute>
             }
           />
-          
+
+          {/* Create Group Flow */}
+          <Route
+            path="/create-group"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <CreateGroupPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/create-group/select-contacts"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <ContactSelectionPage />
+              </ProtectedRoute>
+            }
+          />
+
           <Route
             path="/settings"
             element={

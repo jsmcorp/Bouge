@@ -66,15 +66,19 @@ export class DatabaseManager {
         this.dbVersion,
         false  // not readonly
       );
-      
+
       // Open the unencrypted database
       await unencryptedConn.open();
       console.log('✅ Unencrypted database created');
-      
+
       // Close the unencrypted connection
       await unencryptedConn.close();
       console.log('✅ Unencrypted connection closed');
-      
+
+      // Remove the connection from the pool before creating encrypted connection
+      await this.sqlite.closeConnection(this.dbName, false);
+      console.log('✅ Unencrypted connection removed from pool');
+
       /* 4️⃣ Now encrypt the database */
       console.log('🔐 Encrypting database...');
       const encryptConn = await this.sqlite.createConnection(
@@ -84,14 +88,18 @@ export class DatabaseManager {
         this.dbVersion,
         false  // not readonly
       );
-      
+
       // Open to encrypt the database
       await encryptConn.open();
       console.log('✅ Database encrypted successfully');
-      
+
       // Close the encryption connection
       await encryptConn.close();
       console.log('✅ Encryption connection closed');
+
+      // Remove the encryption connection from the pool
+      await this.sqlite.closeConnection(this.dbName, false);
+      console.log('✅ Encryption connection removed from pool');
     } catch (error: any) {
       console.error('❌ Error creating/encrypting database:', error);
       throw new Error(`Failed to create/encrypt database: ${error.message || error}`);
@@ -273,6 +281,13 @@ export class DatabaseManager {
         mapped_at INTEGER NOT NULL,
         PRIMARY KEY (contact_phone, user_id),
         FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
+      /* Sync metadata - tracks sync state and timestamps */
+      CREATE TABLE IF NOT EXISTS sync_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
       );
 
       /* indexes */
@@ -505,6 +520,10 @@ export class DatabaseManager {
     if (!this.db) {
       throw new Error('Database connection not available');
     }
+    return this.db;
+  }
+
+  public getDb(): SQLiteDBConnection | null {
     return this.db;
   }
 

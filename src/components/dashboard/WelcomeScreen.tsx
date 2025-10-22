@@ -4,12 +4,12 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/authStore';
 import { useState } from 'react';
-import { CreateGroupDialog } from '@/components/dashboard/CreateGroupDialog';
+import { useNavigate } from 'react-router-dom';
 import { JoinGroupDialog } from '@/components/dashboard/JoinGroupDialog';
 
 export function WelcomeScreen() {
   const { user } = useAuthStore();
-  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const navigate = useNavigate();
   const [showJoinGroup, setShowJoinGroup] = useState(false);
 
   const features = [
@@ -127,7 +127,7 @@ export function WelcomeScreen() {
             
             <div className="flex flex-col sm:flex-row gap-4 justify-center max-w-md mx-auto">
               <Button
-                onClick={() => setShowCreateGroup(true)}
+                onClick={() => navigate('/create-group')}
                 className="btn-modern flex-1"
               >
                 <Plus className="w-5 h-5 mr-2" />
@@ -146,10 +146,6 @@ export function WelcomeScreen() {
         </div>
       </div>
 
-      <CreateGroupDialog
-        open={showCreateGroup}
-        onOpenChange={setShowCreateGroup}
-      />
       <JoinGroupDialog
         open={showJoinGroup}
         onOpenChange={setShowJoinGroup}
