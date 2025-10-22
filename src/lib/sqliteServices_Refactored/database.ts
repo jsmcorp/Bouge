@@ -249,6 +249,32 @@ export class DatabaseManager {
         FOREIGN KEY (message_id) REFERENCES messages(id)
       );
 
+      /* ============================================ */
+      /* CONTACTS FEATURE TABLES                     */
+      /* ============================================ */
+
+      /* Contacts table - stores synced device contacts */
+      CREATE TABLE IF NOT EXISTS contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone_number TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        email TEXT,
+        photo_uri TEXT,
+        synced_at INTEGER NOT NULL,
+        UNIQUE(phone_number)
+      );
+
+      /* Contact-to-user mapping - maps contacts to registered Confessr users */
+      CREATE TABLE IF NOT EXISTS contact_user_mapping (
+        contact_phone TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        user_display_name TEXT NOT NULL,
+        user_avatar_url TEXT,
+        mapped_at INTEGER NOT NULL,
+        PRIMARY KEY (contact_phone, user_id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
       /* indexes */
       CREATE INDEX IF NOT EXISTS idx_msg_group_date_asc
         ON messages(group_id, created_at ASC);
@@ -276,6 +302,16 @@ export class DatabaseManager {
         ON user_pseudonyms(group_id);
       CREATE INDEX IF NOT EXISTS idx_confessions_message
         ON confessions(message_id);
+
+      /* Contacts indexes for fast search and lookup */
+      CREATE INDEX IF NOT EXISTS idx_contacts_phone
+        ON contacts(phone_number);
+      CREATE INDEX IF NOT EXISTS idx_contacts_name
+        ON contacts(display_name);
+      CREATE INDEX IF NOT EXISTS idx_contact_mapping_phone
+        ON contact_user_mapping(contact_phone);
+      CREATE INDEX IF NOT EXISTS idx_contact_mapping_user
+        ON contact_user_mapping(user_id);
     `;
 
     await this.db!.execute(sql);

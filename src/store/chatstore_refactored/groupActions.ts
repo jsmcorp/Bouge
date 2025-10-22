@@ -3,8 +3,16 @@ import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
 import { Group, GroupMember, GroupMedia } from './types';
 
+export interface SelectedContact {
+  contactId: number;
+  phoneNumber: string;
+  displayName: string;
+  userId?: string; // If registered user
+  isRegistered: boolean;
+}
+
 export interface GroupActions {
-  createGroup: (name: string, description?: string) => Promise<Group>;
+  createGroup: (name: string, description?: string, selectedContacts?: SelectedContact[]) => Promise<Group>;
   joinGroup: (inviteCode: string) => Promise<void>;
   fetchGroupMembers: (groupId: string) => Promise<void>;
   fetchGroupMedia: (groupId: string) => Promise<void>;
@@ -12,7 +20,7 @@ export interface GroupActions {
 }
 
 export const createGroupActions = (set: any, get: any): GroupActions => ({
-  createGroup: async (name: string, description?: string) => {
+  createGroup: async (name: string, description?: string, selectedContacts?: SelectedContact[]) => {
     try {
       const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
@@ -38,6 +46,29 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
         });
 
       if (memberError) throw memberError;
+
+      // Add selected contacts as group members (only registered users)
+      if (selectedContacts && selectedContacts.length > 0) {
+        const registeredContacts = selectedContacts.filter(c => c.isRegistered && c.userId);
+
+        if (registeredContacts.length > 0) {
+          const memberInserts = registeredContacts.map(contact => ({
+            group_id: data.id,
+            user_id: contact.userId!,
+          }));
+
+          const { error: bulkMemberError } = await client
+            .from('group_members')
+            .insert(memberInserts);
+
+          if (bulkMemberError) {
+            console.error('Error adding selected members:', bulkMemberError);
+            // Don't throw - group is created, just log the error
+          } else {
+            console.log(`✅ Added ${registeredContacts.length} members to group`);
+          }
+        }
+      }
 
       const newGroups = [...get().groups, data];
       set({ groups: newGroups });

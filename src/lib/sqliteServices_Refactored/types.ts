@@ -111,3 +111,47 @@ export interface StorageStats {
   groupMemberCount: number;
   confessionCount: number;
 }
+
+// ============================================
+// CONTACTS FEATURE TYPES
+// ============================================
+
+/**
+ * LocalContact - Represents a device contact synced to SQLite
+ * Stores minimal contact information (name + phone) for privacy
+ */
+export interface LocalContact {
+  id: number; // Auto-increment primary key
+  phone_number: string; // E.164 format (e.g., +917744939966)
+  display_name: string; // Contact's display name
+  email: string | null; // Optional email (for future use)
+  photo_uri: string | null; // Optional base64 photo string
+  synced_at: number; // Unix timestamp of last sync
+}
+
+/**
+ * ContactUserMapping - Maps device contacts to registered Confessr users
+ * Used for user discovery (which contacts are on Confessr)
+ */
+export interface ContactUserMapping {
+  contact_phone: string; // Phone number from device contacts
+  user_id: string; // Confessr user ID (from Supabase users table)
+  user_display_name: string; // User's display name on Confessr
+  user_avatar_url: string | null; // User's avatar URL
+  mapped_at: number; // Unix timestamp when mapping was created
+}
+
+/**
+ * RegisteredContact - Combined view of contact + user data
+ * Used in UI to show which contacts are registered users
+ */
+export interface RegisteredContact {
+  contact_id: number;
+  contact_phone: string;
+  contact_display_name: string;
+  contact_photo_uri: string | null;
+  user_id: string;
+  user_display_name: string;
+  user_avatar_url: string | null;
+  is_registered: true; // Always true for this type
+}
