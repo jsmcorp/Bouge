@@ -2,8 +2,247 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Chat Input Wrapper - Fixed container for reply preview and input bar */
+.chat-input-wrapper {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: 100vw;
+  z-index: 10;
+  pointer-events: none; /* Allow clicks to pass through wrapper */
+}
+
+.chat-input-wrapper > * {
+  pointer-events: auto; /* Re-enable clicks on children */
+}
+
+/* Chat Input Content - Reply preview, image preview, connection status */
+.chat-input-content {
+  position: relative;
+  background: transparent;
+  padding: 0 12px 8px 12px; /* Bottom padding for spacing above input bar */
+  margin-bottom: 0;
+}
+
+/* iOS-Style Input Bar - Premium Design */
+.ios-input-bar {
+  position: relative; /* Changed from fixed - now relative to wrapper */
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: 100vw;
+  height: 68px;
+  padding: 12px 12px calc(env(safe-area-inset-bottom, 0px) + 12px) 12px;
+  background: linear-gradient(to bottom, #FAFAFA 0%, #FFFFFF 100%);
+  border-top: 0.5px solid rgba(0, 0, 0, 0.06);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04), 0 -1px 2px rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+
+/* Ghost Emoji Button - Premium 46×46px */
+.ios-input-bar__emoji-btn {
+  width: 46px;
+  height: 46px;
+  min-width: 46px;
+  min-height: 46px;
+  max-width: 46px;
+  max-height: 46px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  flex-shrink: 0;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease;
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ios-input-bar__emoji-btn:hover {
+  transform: scale(1.1);
+}
+
+.ios-input-bar__emoji-btn:active {
+  transform: scale(0.9);
+  opacity: 0.65;
+}
+
+.ios-input-bar__emoji-btn:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.ios-input-bar__emoji-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Ghost Icon - Custom SVG 34×34px */
+.ios-input-bar__emoji-btn img {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+  transition: filter 0.2s ease, opacity 0.2s ease, transform 0.15s ease;
+}
+
+/* Ghost Mode Active State */
+.ios-input-bar__emoji-btn.ghost-active img {
+  filter: brightness(0) saturate(100%) invert(38%) sepia(98%) saturate(2618%) hue-rotate(201deg) brightness(102%) contrast(101%);
+  opacity: 1;
+}
+
+.ios-input-bar__emoji-btn:not(.ghost-active) img {
+  filter: brightness(0) saturate(100%) invert(47%) sepia(6%) saturate(434%) hue-rotate(182deg) brightness(95%) contrast(88%);
+  opacity: 0.7;
+}
+
+/* Fallback for SVG elements (Keyboard icon) */
+.ios-input-bar__emoji-btn svg {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  flex-shrink: 0;
+  color: #6B7280;
+  transition: color 0.2s ease, opacity 0.2s ease;
+  display: block;
+}
+
+.ios-input-bar__emoji-btn.ghost-active svg {
+  color: #007AFF;
+  opacity: 1;
+}
+
+.ios-input-bar__emoji-btn:not(.ghost-active) svg {
+  opacity: 0.7;
+}
+
+/* Text Input Field - Premium Large */
+.ios-input-bar__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 46px;
+  background: #F5F5F7;
+  border: 2px solid #DCDCE0;
+  border-radius: 23px;
+  padding: 0 20px;
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 46px;
+  color: #000000;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  box-sizing: border-box;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.ios-input-bar__text::placeholder {
+  color: #8E8E93;
+  font-size: 17px;
+  line-height: 46px;
+  font-weight: 400;
+}
+
+.ios-input-bar__text:focus {
+  outline: none;
+  border-color: #007AFF;
+  border-width: 2px;
+  background: #FFFFFF;
+  box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.1), inset 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.ios-input-bar__text:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #F5F5F7;
+}
+
+/* Send Button - Premium Triangle Play */
+.ios-input-bar__send-btn {
+  width: 46px;
+  height: 46px;
+  min-width: 46px;
+  min-height: 46px;
+  background: transparent;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  flex-shrink: 0;
+  box-shadow: none;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ios-input-bar__send-btn:hover:not(:disabled) {
+  transform: scale(1.1);
+}
+
+.ios-input-bar__send-btn:active:not(:disabled) {
+  transform: scale(0.9);
+  opacity: 0.65;
+}
+
+.ios-input-bar__send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.ios-input-bar__send-btn:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.ios-input-bar__send-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Send Icon - Custom SVG 34×34px */
+.ios-input-bar__send-btn img {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+  transition: filter 0.2s ease, transform 0.15s ease;
+}
+
+.ios-input-bar__send-btn:not(:disabled) img {
+  filter: brightness(0) saturate(100%) invert(38%) sepia(98%) saturate(2618%) hue-rotate(201deg) brightness(102%) contrast(101%);
+}
+
+.ios-input-bar__send-btn:disabled img {
+  filter: brightness(0) saturate(100%) invert(47%) sepia(6%) saturate(434%) hue-rotate(182deg) brightness(95%) contrast(88%);
+  opacity: 0.3;
+}
+
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -154,80 +393,49 @@ button:focus-visible {
   background: hsl(var(--muted-foreground) / 0.5);
 }
 
-/* Chat Bubble Styles - Faded Premium Look to Match Image */
+/* Chat Bubble Styles - Premium WhatsApp */
 .chat-bubble-base {
-  border-radius: 1rem;
-  padding: 0.75rem 1rem;
+  border-radius: 7.5px;
+  padding: 6px 7px 8px 9px;
   position: relative;
-  overflow: hidden;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  /* default fade controls */
-  --fade-origin-x: 25%;
-  --fade-strength: 0.67; /* increase = stronger/darker tint, decrease = lighter */
-  --fade-hold: 60%; /* keep solid tint until this percentage of radius */
+  transition: all 0.2s ease;
+  max-width: 75%;
+  min-width: 60px;
+  /* Premium multi-layer shadow */
+  box-shadow:
+    0 1px 0.5px rgba(0, 0, 0, 0.13),
+    0 1px 2px rgba(0, 0, 0, 0.11);
 }
 
-/* Orientation helpers to shift the hotspot without fading text */
-.bubble-left { --fade-origin-x: 10%; }
-.bubble-right { --fade-origin-x: 90%; }
-
-/* Background overlay that tints from a corner but does not fade text */
-.chat-bubble-base::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.35)) 0%,
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 1.25)) calc(var(--fade-hold) - 4%),
-    hsl(var(--bubble-accent) / calc(var(--fade-strength) * 0.50)) calc(var(--fade-hold) + 12%),
-    transparent 100%);
-}
-
-/* Ghost message bubbles - Subtle blue fade like in image */
-
-/* Thread reply bubbles - Even more subtle */
+/* Thread reply bubbles - Slightly smaller and subtle */
 .chat-bubble-thread-reply {
   padding: 0.5rem 0.75rem;
   font-size: 0.875rem;
-  border-radius: 0.75rem;
-  opacity: 0.9;
-  background: linear-gradient(135deg, 
-    rgba(255, 255, 255, 0.008) 0%, 
-    rgba(249, 250, 251, 0.005) 50%, 
-    rgba(243, 244, 246, 0.003) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(15px);
-  -webkit-backdrop-filter: blur(15px);
+  border-radius: 0.875rem;
+  opacity: 0.95;
 }
 
-/* Light mode adjustments for faded look */
-
-
-/* Bubble content animation */
+/* Bubble content */
 .chat-bubble-content {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Very subtle shine effect */
-/* Fading border: strong near the bubble origin, dissolves into background at the fade side */
-.chat-bubble-base::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  /* draw the border via inset shadow so we can mask it */
-  box-shadow: inset 0 0 0 1px hsl(var(--bubble-accent) / 0.14);
-  /* keep border for first ~fade-hold, then fade it out */
-  -webkit-mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
-    #000 calc(var(--fade-hold) - 6%),
-    transparent calc(var(--fade-hold) + 8%));
-  mask-image: radial-gradient(140% 120% at var(--fade-origin-x) 10%,
-    #000 calc(var(--fade-hold) - 6%),
-    transparent calc(var(--fade-hold) + 8%));
+/* Smooth scrolling for messages - WhatsApp style */
+.smooth-scroll-messages {
+  scroll-behavior: instant;
+  -webkit-overflow-scrolling: touch;
+}
+
+.messages-container {
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  /* Bottom padding to prevent last message from being hidden behind fixed input bar */
+  /* Exact input bar height: 68px + safe-area-inset-bottom (no extra spacing) */
+  padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px)) !important;
 }
 
 /* Animations */
@@ -244,19 +452,21 @@ button:focus-visible {
   animation: ghost-glow 3s ease-in-out infinite;
 }
 
-/* Message animations */
+/* Message animations - Premium fade in with scale */
 @keyframes message-slide-in {
   from {
     opacity: 0;
-    transform: translateY(20px);
+    transform: translateY(10px) scale(0.95);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-.message-enter { animation: message-slide-in 0.25s ease-out; }
+.message-enter {
+  animation: message-slide-in 0.3s ease-out;
+}
 
 /* Gradient text */
 .gradient-text {
@@ -401,13 +611,13 @@ button:focus-visible {
   border-radius: 12px;
 }
 
-/* Loading states */
+/* Loading states - Premium subtle animations */
 @keyframes pulse-glow {
   0%, 100% {
-    opacity: 0.4;
+    opacity: 0.5;
   }
   50% {
-    opacity: 0.8;
+    opacity: 0.9;
   }
 }
 
@@ -421,19 +631,33 @@ button:focus-visible {
 }
 
 .loading-pulse {
-  animation: pulse-glow 1.5s ease-in-out infinite;
+  animation: pulse-glow 2s ease-in-out infinite;
 }
 
 .shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
   background-size: 200px 100%;
-  animation: shimmer 1.5s infinite;
+  animation: shimmer 2s infinite;
 }
 
-/* Focus states */
+/* Focus states - iOS style */
 .focus-ring {
   outline: none;
-  box-shadow: 0 0 0 2px hsl(var(--primary)), 0 0 0 4px hsl(var(--background));
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.3);
+}
+
+/* Hover states for all clickable elements */
+button:hover:not(:disabled),
+a:hover,
+[role="button"]:hover {
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+}
+
+/* Focus visible for accessibility */
+*:focus-visible {
+  outline: 2px solid #007AFF;
+  outline-offset: 2px;
 }
 
 /* Ghost mode indicator */
@@ -468,9 +692,15 @@ button:focus-visible {
   border: 1px solid rgba(0, 0, 0, 0.05);
 }
 
-/* Smooth transitions for theme switching */
+/* Smooth transitions for premium feel - 60fps optimized */
 * {
-  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+  transition: background-color 0.25s ease-in-out, border-color 0.25s ease-in-out, color 0.25s ease-in-out;
+}
+
+/* Button active states - subtle scale down */
+button:active:not(:disabled) {
+  transform: scale(0.98);
+  transition: transform 0.1s ease-in-out;
 }
 
 /* Modern button styles */
@@ -606,10 +836,23 @@ button:focus-visible {
   animation-delay: calc(var(--stagger-delay) * 100ms);
 }
 
-/* Performance optimizations for 60fps */
+/* Performance optimizations for 60fps smooth scrolling */
 .gpu-accelerated {
   transform: translateZ(0);
   will-change: transform;
+}
+
+/* Smooth scrolling for chat area */
+.chat-background-gradient {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: instant;
+}
+
+/* Hardware acceleration for bubbles */
+.chat-bubble-base {
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
 
 /* Emoji picker custom styles */
@@ -743,97 +986,188 @@ button:focus-visible {
   color: rgba(59, 130, 246, 0.9);
 }
 
-/* Enhanced chat bubble styles to match the image exactly */
-/* Unified ultra bubble surface using a single accent variable */
+/* Enhanced chat bubble styles - WhatsApp-style compact */
+/* Clean, solid color bubbles with proper shadows */
 .chat-bubble-ghost-ultra,
 .chat-bubble-emma-ultra,
 .chat-bubble-anonymous-ultra,
 .chat-bubble-confession-ultra,
 .chat-bubble-ultra-fade {
-  --bubble-accent: var(--primary);
-  background: rgba(255, 255, 255, 0.006);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  /* real border made transparent; we draw a controlled border with ::before */
-  border: 1px solid transparent;
-  box-shadow:
-    0 1px 3px hsl(var(--bubble-accent) / 0.01),
-    0 1px 2px hsl(var(--bubble-accent) / 0.005),
-    inset 0 0 1px hsl(var(--bubble-accent) / 0.03);
+  border: none;
+  font-size: 14.2px;
+  line-height: 1.35;
+  font-weight: 400;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* Accent assignments */
-.chat-bubble-ghost-ultra { --bubble-accent: 213 94% 68%; }
-.chat-bubble-emma-ultra { --bubble-accent: 156 72% 40%; }
-.chat-bubble-anonymous-ultra { --bubble-accent: 32 95% 62%; }
-.chat-bubble-confession-ultra { --bubble-accent: 220 86% 60%; }
-.chat-bubble-ultra-fade { --bubble-accent: 158 64% 52%; }
+/* Message sender name styling - WhatsApp style */
+.message-sender-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: inherit;
+  opacity: 0.9;
+  margin-bottom: 2px;
+  display: block;
+}
 
-/* Badge styles matching the image */
+/* Sent messages - Bright cyan/turquoise */
+.chat-bubble-emma-ultra {
+  background: #00D4FF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Received messages - Pure white */
+.chat-bubble-anonymous-ultra {
+  background: #FFFFFF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Ghost messages - Bright cyan similar to sent */
+.chat-bubble-ghost-ultra {
+  background: #00D4FF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Confession messages - Keep distinct */
+.chat-bubble-confession-ultra {
+  background: #E8DEF8;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Image messages */
+.chat-bubble-ultra-fade {
+  background: #FFFFFF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Badge styles - Clean and readable */
 /* Unified chip badge base + accent variants */
 .badge-funny-ultra,
 .badge-confession-ultra {
   display: inline-flex;
   align-items: center;
-  font-size: 0.75rem;
+  font-size: 12px;
   font-weight: 500;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.375rem;
+  padding: 4px 8px;
+  border-radius: 6px;
   border-width: 1px;
 }
 
 .badge-funny-ultra {
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, rgba(251, 191, 36, 0.03) 50%, rgba(251, 191, 36, 0.02) 100%);
-  border-color: rgba(251, 191, 36, 0.08);
-  color: rgba(251, 191, 36, 0.85);
+  background: rgba(251, 191, 36, 0.15);
+  border-color: rgba(251, 191, 36, 0.3);
+  color: rgba(180, 130, 0, 1);
 }
 .badge-confession-ultra {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(59, 130, 246, 0.03) 50%, rgba(59, 130, 246, 0.02) 100%);
-  border-color: rgba(59, 130, 246, 0.08);
-  color: rgba(59, 130, 246, 0.85);
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: rgba(0, 80, 200, 1);
 }
 
-/* Light mode adjustments for ultra faded bubbles */
-.light .chat-bubble-base { --fade-strength: 0.10; }
-.light .chat-bubble-ghost-ultra,
-.light .chat-bubble-emma-ultra,
-.light .chat-bubble-anonymous-ultra,
-.light .chat-bubble-confession-ultra,
+/* Light mode - same solid colors */
+.light .chat-bubble-emma-ultra {
+  background: #00D4FF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.light .chat-bubble-anonymous-ultra {
+  background: #FFFFFF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.light .chat-bubble-ghost-ultra {
+  background: #00D4FF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.light .chat-bubble-confession-ultra {
+  background: #E8DEF8;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
 .light .chat-bubble-ultra-fade {
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid hsl(var(--bubble-accent) / 0.01);
-  box-shadow: 
-    0 1px 3px rgba(0, 0, 0, 0.01),
-    0 1px 2px rgba(0, 0, 0, 0.005),
-    inset 0 0 1px rgba(0, 0, 0, 0.02);
+  background: #FFFFFF;
+  color: #1C1C1E;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
-/* Enhanced hover effects for ultra faded bubbles */
+/* Subtle hover effects for bubbles - WhatsApp style (minimal) */
 .chat-bubble-ultra-fade:hover,
 .chat-bubble-ghost-ultra:hover,
 .chat-bubble-emma-ultra:hover,
 .chat-bubble-anonymous-ultra:hover,
 .chat-bubble-confession-ultra:hover {
-  transform: translateY(-1px);
-  box-shadow: 
-    0 4px 12px rgba(0, 0, 0, 0.02),
-    0 2px 4px rgba(0, 0, 0, 0.01),
-    inset 0 0 1px rgba(255, 255, 255, 0.05);
+  transition: all 0.15s ease-in-out;
 }
 
-/* Message input area styling */
+.chat-bubble-emma-ultra:hover,
+.chat-bubble-ghost-ultra:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
+}
+
+.chat-bubble-anonymous-ultra:hover,
+.chat-bubble-ultra-fade:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.14);
+}
+
+.chat-bubble-confession-ultra:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
+}
+
+/* Message input area styling - Frosted white with blur */
 .message-input-area {
-  background: rgba(255, 255, 255, 0.005);
-  backdrop-filter: blur(25px);
-  -webkit-backdrop-filter: blur(25px);
-  border: 1px solid rgba(255, 255, 255, 0.01);
-  border-radius: 1.5rem;
+  background: #FFFFFF;
+  border: 1px solid #E5E5E5;
+  border-radius: 24px;
   overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  transition: all 0.2s ease-in-out;
+}
+
+.message-input-area:focus-within {
+  border-color: #007AFF;
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.15);
 }
 
 .light .message-input-area {
-  background: rgba(255, 255, 255, 0.4);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: #FFFFFF;
+  border: 1px solid #E5E5E5;
+}
+
+/* Input area icon buttons - darker gray for visibility */
+.message-input-area button[type="button"] {
+  color: #5A5A5A;
+  transition: all 0.2s ease-in-out;
+}
+
+.message-input-area button[type="button"]:hover {
+  color: #000000;
+  background-color: #F5F5F5;
+}
+
+.message-input-area button[type="button"]:active {
+  transform: scale(0.98);
+}
+
+/* Text input styling */
+.message-input-area textarea {
+  color: #000000;
+  font-size: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.message-input-area textarea::placeholder {
+  color: #8E8E93;
 }
 
 /* Avatar styling */
@@ -851,11 +1185,11 @@ button:focus-visible {
   border: 2px solid rgba(139, 92, 246, 0.1);
 }
 
-/* Ultra subtle animations */
+/* Premium message fade-in animation */
 @keyframes ultra-fade-in {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.98);
+    transform: translateY(10px) scale(0.95);
   }
   to {
     opacity: 1;
@@ -864,78 +1198,156 @@ button:focus-visible {
 }
 
 .message-ultra-fade-in {
-  animation: ultra-fade-in 0.4s ease-out;
+  animation: ultra-fade-in 0.3s ease-out;
 }
 
-/* Reaction button styling */
+/* Reaction button styling - Clean and responsive */
 .reaction-button {
-  background: rgba(255, 255, 255, 0.005);
+  background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.008);
-  border-radius: 0.5rem;
-  transition: all 0.2s ease;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  transition: all 0.2s ease-in-out;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
 
 .reaction-button:hover {
-  background: rgba(255, 255, 255, 0.01);
-  border: 1px solid rgba(255, 255, 255, 0.015);
+  background: rgba(255, 255, 255, 1);
+  border: 1px solid rgba(0, 0, 0, 0.12);
   transform: scale(1.05);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.reaction-button:active {
+  transform: scale(0.98);
 }
 
 .light .reaction-button {
-  background: rgba(255, 255, 255, 0.3);
-  border: 1px solid rgba(0, 0, 0, 0.05);
-}
-
-.light .reaction-button:hover {
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(0, 0, 0, 0.08);
 }
 
-/* Time stamps styling */
+.light .reaction-button:hover {
+  background: rgba(255, 255, 255, 1);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+/* WhatsApp-style message content wrapper */
+.message-content-wrapper {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* WhatsApp-style message text with inline timestamp */
+.message-text-with-time {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+
+.message-text-with-time > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Inline timestamp - positioned at bottom-right like WhatsApp */
+.message-timestamp-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  align-self: flex-end;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+/* Time stamps styling - WhatsApp pixel-perfect */
 .timestamp {
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 0.65rem;
+  color: rgba(142, 142, 147, 0.9);
+  font-size: 11px;
   font-weight: 400;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .light .timestamp {
-  color: rgba(0, 0, 0, 0.4);
+  color: rgba(142, 142, 147, 0.9);
 }
 
-/* Send button styling */
+/* Timestamp on sent messages (cyan bubbles) */
+.chat-bubble-emma-ultra .timestamp,
+.chat-bubble-ghost-ultra .timestamp {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* Timestamp on received messages (white bubbles) */
+.chat-bubble-anonymous-ultra .timestamp,
+.chat-bubble-ultra-fade .timestamp {
+  color: rgba(142, 142, 147, 0.9);
+}
+
+/* Send button styling - iOS-style blue */
 .send-button {
-  background: linear-gradient(135deg, #10b981, #059669);
+  background: #007AFF;
   border: none;
   border-radius: 50%;
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s ease;
-  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
+  transition: all 0.25s ease-in-out;
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
+  color: #FFFFFF;
 }
 
-.send-button:hover {
-  transform: scale(1.1);
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+.send-button:hover:not(:disabled) {
+  background: #0051D5;
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(0, 122, 255, 0.35);
 }
 
-.send-button:active {
-  transform: scale(0.95);
+.send-button:active:not(:disabled) {
+  transform: scale(0.98);
+  background: #004BB5;
 }
 
-/* Ensure all ultra faded elements blend seamlessly */
-.ultra-blend {
-  background: rgba(255, 255, 255, 0.003);
-  backdrop-filter: blur(40px);
-  -webkit-backdrop-filter: blur(40px);
-  border: 1px solid rgba(255, 255, 255, 0.005);
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.light .ultra-blend {
-  background: rgba(255, 255, 255, 0.2);
-  border: 1px solid rgba(0, 0, 0, 0.03);
+/* Chat background - Premium WhatsApp light theme */
+.chat-background-gradient {
+  background-color: #ECE5DD;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23000000' stroke-width='0.5' opacity='0.03'%3E%3Ccircle cx='15' cy='15' r='8'/%3E%3Cpath d='M35 10 L40 20 L30 20 Z'/%3E%3Crect x='55' y='8' width='12' height='12' rx='2'/%3E%3Cpath d='M78 12 Q82 8 86 12 Q90 16 86 20 Q82 24 78 20 Q74 16 78 12'/%3E%3Cpath d='M8 35 L12 30 L16 35 L12 40 Z'/%3E%3Ccircle cx='35' cy='35' r='6'/%3E%3Cpath d='M55 30 L60 35 L55 40 L50 35 Z'/%3E%3Crect x='75' y='28' width='10' height='14' rx='5'/%3E%3Cpath d='M10 55 Q15 50 20 55 T30 55'/%3E%3Ccircle cx='50' cy='55' r='7'/%3E%3Cpath d='M70 50 L75 55 L80 50 M75 55 L75 62'/%3E%3Crect x='8' y='73' width='14' height='14' rx='7'/%3E%3Cpath d='M35 75 L40 85 L30 85 Z'/%3E%3Ccircle cx='58' cy='80' r='6'/%3E%3Cpath d='M78 75 Q82 75 82 79 Q82 83 78 83 Q74 83 74 79 Q74 75 78 75'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 200px 200px;
+  background-repeat: repeat;
+}
+
+.light .chat-background-gradient {
+  background-color: #ECE5DD;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23000000' stroke-width='0.5' opacity='0.03'%3E%3Ccircle cx='15' cy='15' r='8'/%3E%3Cpath d='M35 10 L40 20 L30 20 Z'/%3E%3Crect x='55' y='8' width='12' height='12' rx='2'/%3E%3Cpath d='M78 12 Q82 8 86 12 Q90 16 86 20 Q82 24 78 20 Q74 16 78 12'/%3E%3Cpath d='M8 35 L12 30 L16 35 L12 40 Z'/%3E%3Ccircle cx='35' cy='35' r='6'/%3E%3Cpath d='M55 30 L60 35 L55 40 L50 35 Z'/%3E%3Crect x='75' y='28' width='10' height='14' rx='5'/%3E%3Cpath d='M10 55 Q15 50 20 55 T30 55'/%3E%3Ccircle cx='50' cy='55' r='7'/%3E%3Cpath d='M70 50 L75 55 L80 50 M75 55 L75 62'/%3E%3Crect x='8' y='73' width='14' height='14' rx='7'/%3E%3Cpath d='M35 75 L40 85 L30 85 Z'/%3E%3Ccircle cx='58' cy='80' r='6'/%3E%3Cpath d='M78 75 Q82 75 82 79 Q82 83 78 83 Q74 83 74 79 Q74 75 78 75'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 200px 200px;
+  background-repeat: repeat;
+}
+
+/* Dark mode - WhatsApp dark theme pattern */
+@media (prefers-color-scheme: dark) {
+  .chat-background-gradient {
+    background-color: #0a1014;
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='0.8' opacity='0.04'%3E%3Ccircle cx='15' cy='15' r='8'/%3E%3Cpath d='M35 10 L40 20 L30 20 Z'/%3E%3Crect x='55' y='8' width='12' height='12' rx='2'/%3E%3Cpath d='M78 12 Q82 8 86 12 Q90 16 86 20 Q82 24 78 20 Q74 16 78 12'/%3E%3Cpath d='M8 35 L12 30 L16 35 L12 40 Z'/%3E%3Ccircle cx='35' cy='35' r='6'/%3E%3Cpath d='M55 30 L60 35 L55 40 L50 35 Z'/%3E%3Crect x='75' y='28' width='10' height='14' rx='5'/%3E%3Cpath d='M10 55 Q15 50 20 55 T30 55'/%3E%3Ccircle cx='50' cy='55' r='7'/%3E%3Cpath d='M70 50 L75 55 L80 50 M75 55 L75 62'/%3E%3Crect x='8' y='73' width='14' height='14' rx='7'/%3E%3Cpath d='M35 75 L40 85 L30 85 Z'/%3E%3Ccircle cx='58' cy='80' r='6'/%3E%3Cpath d='M78 75 Q82 75 82 79 Q82 83 78 83 Q74 83 74 79 Q74 75 78 75'/%3E%3C/g%3E%3C/svg%3E");
+    background-size: 200px 200px;
+    background-repeat: repeat;
+  }
 }

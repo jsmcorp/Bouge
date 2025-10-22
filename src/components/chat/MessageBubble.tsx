@@ -4,37 +4,32 @@ import { useEffect } from 'react';
 import { useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
-import { MessageCircle, MoreHorizontal, Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
-import { motion, useMotionValue, useTransform, useSpring, PanInfo, AnimatePresence } from 'framer-motion';
+import { Reply, Check, Clock, AlertCircle, Image as ImageIcon, Download } from 'lucide-react';
+import { motion, useMotionValue, useTransform, AnimatePresence } from 'framer-motion';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Message, useChatStore } from '@/store/chatStore';
 import { useAuthStore } from '@/store/authStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { PollComponent } from '@/components/chat/PollComponent';
 import { MessageReactions } from '@/components/chat/MessageReactions';
-import { ReactionBar } from '@/components/chat/ui/ReactionBar';
 import { pseudonymService } from '@/lib/pseudonymService';
 import { cn } from '@/lib/utils';
 import { Reaction } from '@/store/chat/reactions';
 
-// Swipe gesture constants
-const TRIGGER_THRESHOLD = 0.3; // 30% of max distance to trigger
-const VERTICAL_CANCEL_THRESHOLD = 20; // 20dp vertical movement cancels gesture
-const MAX_TRANSLATION = 60; // 60dp maximum shift
+// WhatsApp-exact swipe constants - pixel perfect
+const SWIPE_TRIGGER_DISTANCE = 40; // 40px to trigger reply (WhatsApp exact)
+const SWIPE_MAX_DISTANCE = 60; // Maximum swipe distance before resistance
+const SWIPE_VERTICAL_THRESHOLD = 20; // Cancel if vertical movement exceeds this
 
 interface MessageBubbleProps {
   message: Message;
   isThreadOriginal?: boolean;
   isThreadReply?: boolean;
   showInlineReplies?: boolean;
+  showSenderName?: boolean;
+  isNewSender?: boolean;
 }
 
 const CATEGORY_COLORS = {
@@ -44,26 +39,36 @@ const CATEGORY_COLORS = {
   support: 'bg-purple-500/20 text-purple-500 border-purple-500/30',
 };
 
+// Premium WhatsApp colors - simple and clean
+const BUBBLE_COLORS = {
+  sent: { bg: '#D9FDD3', text: '#303030' },      // Light green for sent messages
+  received: { bg: '#FFFFFF', text: '#303030' },  // White for received messages
+  ghost: { bg: '#FFFFFF', text: '#303030' },     // White for ghost messages
+  confession: { bg: '#FFFFFF', text: '#303030' }, // White for confessions
+};
+
 const DeliveryStatusIcon = ({ status }: { status?: string }) => {
   switch (status) {
     case 'sending':
-      return <Clock className="w-3 h-3 text-muted-foreground animate-pulse" />;
+      return <Clock className="w-2.5 h-2.5 text-muted-foreground/60 animate-pulse" />;
     case 'sent':
-      return <Check className="w-3 h-3 text-muted-foreground" />;
+      return <Check className="w-2.5 h-2.5 text-muted-foreground/60" />;
     case 'delivered':
-      return <Check className="w-3 h-3 text-green-500" />;
+      return <Check className="w-2.5 h-2.5 text-green-500/70" />;
     case 'failed':
-      return <AlertCircle className="w-3 h-3 text-red-500" />;
+      return <AlertCircle className="w-2.5 h-2.5 text-red-500/70" />;
     default:
       return null;
   }
 };
 
-export function MessageBubble({ 
-  message, 
+export function MessageBubble({
+  message,
   isThreadOriginal = false,
   isThreadReply = false,
-  showInlineReplies = true 
+  showInlineReplies = true,
+  showSenderName = true,
+  isNewSender = true
 }: MessageBubbleProps) {
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const [hoveredReactionIndex, setHoveredReactionIndex] = useState<number | null>(null);
@@ -71,8 +76,6 @@ export function MessageBubble({
   const longPressTimeoutRef = useRef<number | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
-  const [isSwipeActive, setIsSwipeActive] = useState(false);
-  const [isSwipeCancelled, setIsSwipeCancelled] = useState(false);
   const [ghostPseudonym, setGhostPseudonym] = useState<string>('Ghost');
   
   const navigate = useNavigate();
@@ -96,7 +99,14 @@ export function MessageBubble({
   const hasMoreReplies = message.reply_count && message.reply_count > 3;
   const isOwnMessage = user?.id === message.user_id;
   const isRightAligned = isOwnMessage && !isGhost; // Normal self messages on right; ghost always left
-  
+
+  // Get bubble color based on message type
+  const bubbleColor = isGhost || isConfession
+    ? BUBBLE_COLORS.ghost
+    : isOwnMessage
+      ? BUBBLE_COLORS.sent
+      : BUBBLE_COLORS.received;
+
   // Get reactions for this message
   const reactions = messageReactions[message.id] || [];
   
@@ -109,8 +119,18 @@ export function MessageBubble({
   const REACTION_EMOJIS = ['👍', '❤️', '😂', '😢', '😮', '😡', '🔥', '👏', '🎉', '💯'];
 
   // Fetch pseudonym for ghost messages
+  // CRITICAL FIX: Use pseudonym from message object if available (loaded during lazy load)
+  // This prevents RPC calls for older messages loaded from SQLite
   useEffect(() => {
     if (isGhost && activeGroup?.id && message.user_id) {
+      // If message already has pseudonym (from lazy load), use it immediately
+      if (message.pseudonym) {
+        console.log('🎭 Using pseudonym from message object:', message.pseudonym);
+        setGhostPseudonym(message.pseudonym);
+        return;
+      }
+
+      // Otherwise, fetch from pseudonym service (will check cache and SQLite first)
       const fetchPseudonym = async () => {
         try {
           const pseudonym = await pseudonymService.getPseudonym(activeGroup.id, message.user_id);
@@ -123,112 +143,106 @@ export function MessageBubble({
 
       fetchPseudonym();
     }
-  }, [isGhost, activeGroup?.id, message.user_id]);
+  }, [isGhost, activeGroup?.id, message.user_id, message.pseudonym]);
 
-  // Motion values for swipe gesture
-  const x = useMotionValue(0);
-  const iconOpacity = useTransform(x, [0, MAX_TRANSLATION], [0, 1]);
-  const iconX = useTransform(x, [0, MAX_TRANSLATION], [MAX_TRANSLATION, 0]);
-  const springX = useSpring(x, { stiffness: 500, damping: 50 }); // Increased stiffness and damping
+  // WhatsApp-exact swipe gesture - completely rewritten
+  const swipeX = useMotionValue(0);
+  const replyIconOpacity = useTransform(swipeX, [0, SWIPE_TRIGGER_DISTANCE], [0, 1]);
+  const replyIconScale = useTransform(swipeX, [0, SWIPE_TRIGGER_DISTANCE], [0.5, 1]);
 
-  // Handle instant switching between messages
+  // Touch tracking for swipe
+  const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const isSwiping = useRef(false);
+  const swipeCancelled = useRef(false);
+
+  // Reset swipe when another message is swiped
   useEffect(() => {
-    // If another message is being swiped or swipe interaction ended
-    if (activeSwipeMessageId !== message.id && x.get() !== 0) {
-      // Smoothly reset this message's position
-      x.set(0);
+    if (activeSwipeMessageId !== message.id && swipeX.get() !== 0) {
+      swipeX.set(0);
+      isSwiping.current = false;
     }
-  }, [activeSwipeMessageId, message.id, x]);
+  }, [activeSwipeMessageId, message.id, swipeX]);
 
-  // Handle pan gesture
-  const handlePan = (_: any, info: PanInfo) => {
-    if (!isMobile || isSwipeCancelled || isThreadOriginal || isThreadReply) return;
+  // WhatsApp-exact swipe handlers
+  const handleSwipeStart = (e: React.TouchEvent) => {
+    if (!isMobile || isThreadOriginal || isThreadReply || showReactionPicker) return;
 
-    const { offset } = info;
-    
-    // Check for vertical movement cancellation
-    if (Math.abs(offset.y) > VERTICAL_CANCEL_THRESHOLD) {
-      setIsSwipeCancelled(true);
-      x.set(0);
-      return;
-    }
+    const touch = e.touches[0];
+    touchStartX.current = touch.clientX;
+    touchStartY.current = touch.clientY;
+    isSwiping.current = false;
+    swipeCancelled.current = false;
 
-    // Only allow left-to-right swipe (positive x values)
-    if (offset.x < 0) {
-      x.set(0);
-      return;
-    }
-
-    // Limit the swipe distance
-    const clampedX = Math.min(offset.x, MAX_TRANSLATION);
-    x.set(clampedX);
+    setActiveSwipeMessage(message.id);
   };
 
-  // Handle pan end
-  const handlePanEnd = async (event: any, info: PanInfo) => {
-    if (!isMobile || isSwipeCancelled || isThreadOriginal || isThreadReply) {
-      setIsSwipeActive(false);
-      setIsSwipeCancelled(false);
-      // Clear active swipe state when interaction ends
+  const handleSwipeMove = (e: React.TouchEvent) => {
+    if (!isMobile || isThreadOriginal || isThreadReply || swipeCancelled.current || showReactionPicker) return;
+
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - touchStartX.current;
+    const deltaY = touch.clientY - touchStartY.current;
+
+    // Cancel if vertical movement exceeds threshold
+    if (Math.abs(deltaY) > SWIPE_VERTICAL_THRESHOLD) {
+      swipeCancelled.current = true;
+      swipeX.set(0);
+      isSwiping.current = false;
+      return;
+    }
+
+    // Only allow right swipe (positive deltaX)
+    if (deltaX < 0) {
+      swipeX.set(0);
+      return;
+    }
+
+    // Start swiping if horizontal movement detected
+    if (!isSwiping.current && Math.abs(deltaX) > 5) {
+      isSwiping.current = true;
+    }
+
+    if (isSwiping.current) {
+      // Apply resistance after max distance
+      let newX = deltaX;
+      if (deltaX > SWIPE_MAX_DISTANCE) {
+        const excess = deltaX - SWIPE_MAX_DISTANCE;
+        newX = SWIPE_MAX_DISTANCE + (excess * 0.2); // 80% resistance
+      }
+      swipeX.set(newX);
+    }
+  };
+
+  const handleSwipeEnd = async () => {
+    if (!isMobile || isThreadOriginal || isThreadReply || swipeCancelled.current) {
+      swipeX.set(0);
+      isSwiping.current = false;
+      swipeCancelled.current = false;
       setActiveSwipeMessage(null);
       return;
     }
 
-    const { offset } = info;
-    const swipeDistance = Math.abs(offset.x);
-    const triggerDistance = MAX_TRANSLATION * TRIGGER_THRESHOLD;
+    const currentX = swipeX.get();
 
-    // Check if swipe should trigger reply action
-    if (swipeDistance >= triggerDistance && offset.x > 0) {
+    // Trigger reply if threshold reached
+    if (currentX >= SWIPE_TRIGGER_DISTANCE) {
       try {
-        // Trigger haptic feedback
         await Haptics.impact({ style: ImpactStyle.Light });
-      } catch (error) {
-        // Haptics might not be available in web environment
-        console.log('Haptics not available:', error);
-      }
-      
-      // Trigger reply action
-      handleReply(event);
+      } catch (_) {}
+
+      handleReply();
     }
 
-    // Ensure complete reset to original position
-    x.stop(); // Stop any ongoing animations
-    x.set(0); // Hard reset to zero
-    
-    setIsSwipeActive(false);
-    setIsSwipeCancelled(false);
-    
-    // Clear active swipe state after animation completes
+    // Smooth spring back to 0
+    swipeX.set(0);
+
+    isSwiping.current = false;
+    swipeCancelled.current = false;
+
     setTimeout(() => {
       setActiveSwipeMessage(null);
-    }, 100);
-  };
-
-  // Handle touch events to prevent default system gestures
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (!isMobile) return;
-    
-    // Register this message as the active swipe message
-    setActiveSwipeMessage(message.id);
-    setIsSwipeActive(true);
-    setIsSwipeCancelled(false);
-    
-    // Prevent default to disable system swipe gestures
-    e.stopPropagation();
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (!isMobile || !isSwipeActive) return;
-    
-    // Prevent default scrolling during swipe
-    e.stopPropagation();
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    if (!isMobile) return;
-    
-    e.stopPropagation();
+    }, 150);
   };
 
   // Long-press reaction picker handlers
@@ -246,8 +260,10 @@ export function MessageBubble({
     longPressTimeoutRef.current = window.setTimeout(async () => {
       setShowReactionPicker(true);
       setHoveredReactionIndex(null);
-      setIsSwipeCancelled(true);
-      setIsSwipeActive(false);
+      // Cancel any ongoing swipe
+      swipeCancelled.current = true;
+      isSwiping.current = false;
+      swipeX.set(0);
       try {
         await Haptics.impact({ style: ImpactStyle.Medium });
       } catch (_) {}
@@ -359,44 +375,7 @@ export function MessageBubble({
           {/* Poll Component */}
           <PollComponent poll={message.poll} />
 
-          {/* Message Actions for Polls (React removed) */}
-          {!isThreadOriginal && !isThreadReply && (
-            <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="h-6 px-2 text-xs"
-                onClick={handleReply}
-              >
-                <Reply className="w-3 h-3 mr-1" />
-                Reply
-              </Button>
-              {hasReplies && (
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="h-6 px-2 text-xs text-green-500 hover:text-green-400"
-                  onClick={handleViewThread}
-                >
-                  <MessageCircle className="w-3 h-3 mr-1" />
-                  View Thread
-                </Button>
-              )}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                    <MoreHorizontal className="w-3 h-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem>Copy Message</DropdownMenuItem>
-                  <DropdownMenuItem className="text-destructive">
-                    Report
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )}
+          {/* Message Actions removed - cleaner WhatsApp-style UI */}
 
           {/* Message Reactions for Polls */}
           {reactions.length > 0 && !isThreadReply && (
@@ -442,10 +421,11 @@ export function MessageBubble({
     );
   }
 
-  // Regular message rendering with ultra-faded design
+  // Regular message rendering - WhatsApp style
   return (
     <div className={cn(
-      "group relative mb-1",
+      "group relative mb-0.5",
+      isNewSender ? "mt-3" : "mt-0",
       {
         "bg-card/50 border-l-4 border-l-green-500 pl-4 rounded-lg p-3": isThreadOriginal,
         "ml-8 pl-4 thread-reply-line": isThreadReply,
@@ -454,59 +434,52 @@ export function MessageBubble({
         "border border-red-500/20 bg-red-500/5": message.delivery_status === 'failed'
       }
     )}>
-      {/* Reply Icon - Only show on mobile and when not in thread */}
+      {/* Reply Icon - WhatsApp exact style */}
       {isMobile && !isThreadOriginal && !isThreadReply && (
         <motion.div
-          className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-12 z-10"
-          style={{ opacity: iconOpacity, x: iconX }}
+          className="absolute left-3 top-1/2 -translate-y-1/2 z-10 pointer-events-none"
+          style={{ opacity: replyIconOpacity, scale: replyIconScale }}
         >
-          <div className="flex items-center justify-center w-11 h-11 bg-primary/20 rounded-full backdrop-blur-sm">
-            <Reply className="w-5 h-5 text-primary" />
-          </div>
+          <Reply className="w-5 h-5 text-muted-foreground" />
         </motion.div>
       )}
 
-      {/* Main message content with swipe gesture */}
-      <motion.div
-        style={{ x: springX }}
-        drag={isMobile && !isThreadOriginal && !isThreadReply ? "x" : false}
-        dragConstraints={{ left: 0, right: MAX_TRANSLATION }}
-        dragElastic={0.2}
-        onPan={handlePan}
-        onPanEnd={handlePanEnd}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        className="relative w-full"
-      >
+      {/* Main message content - wrapper for positioning */}
+      <div className="relative w-full">
         {/* Message Container */}
-        <div className={cn(
-          "flex items-start max-w-full gap-3",
-          {
-            "flex-row-reverse": isRightAligned && !isThreadReply,
-          }
-        )}>
+        <motion.div
+          className={cn(
+            "flex items-start max-w-full gap-3",
+            {
+              "flex-row-reverse": isRightAligned && !isThreadReply,
+            }
+          )}
+          style={{ x: swipeX }}
+        >
           {/* Avatar removed for cleaner look as requested */}
 
           {/* Message Content */}
           <div className={cn("flex-1 min-w-0", { "items-end": isRightAligned && !isThreadReply })}>
-            {/* Message Bubble with header inside */}
-            <div
+            {/* Message Bubble - WhatsApp exact swipe */}
+            <motion.div
               ref={bubbleRef}
+              onTouchStart={handleSwipeStart}
+              onTouchMove={handleSwipeMove}
+              onTouchEnd={handleSwipeEnd}
               onPointerDown={startLongPress}
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerCancel}
               onPointerLeave={handlePointerCancel}
               onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
+              style={{
+                backgroundColor: isImage ? undefined : bubbleColor.bg,
+                color: isImage ? undefined : bubbleColor.text,
+              }}
               className={cn(
               "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative",
               "chat-bubble-base",
               {
-                // Apply ultra-faded classes based on message type
-                "chat-bubble-ghost-ultra": isGhost,
-                "chat-bubble-emma-ultra": !isGhost && !isConfession && !isImage && isOwnMessage,
-                "chat-bubble-anonymous-ultra": !isGhost && !isConfession && !isImage && !isOwnMessage,
-                "chat-bubble-confession-ultra": isConfession,
+                // Apply special classes only for image
                 "chat-bubble-ultra-fade": isImage,
                 "chat-bubble-thread-reply": isThreadReply,
               },
@@ -561,17 +534,28 @@ export function MessageBubble({
                 )}
               </AnimatePresence>
               <div className="chat-bubble-content">
-                {/* Header inside bubble */}
-                <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isRightAligned && !isThreadReply })}>
-                  <span className={cn(
-                    "font-bold text-foreground",
-                    isThreadReply ? "text-xs" : "text-sm"
-                  )}>
-                    {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
-                  </span>
-                </div>
+                {/* Header inside bubble - only show if showSenderName is true */}
+                {showSenderName && (
+                  <div className="mb-2">
+                    <div className={cn("flex items-center gap-2 mb-1.5", { "justify-end": isRightAligned && !isThreadReply })}>
+                      <span className={cn(
+                        "message-sender-name",
+                        isThreadReply ? "text-xs" : "text-sm"
+                      )}>
+                        {isGhost ? ghostPseudonym : isConfession ? 'Anonymous' : message.author?.display_name || 'Anonymous'}
+                      </span>
+                    </div>
+                    {/* Premium divider line */}
+                    <div
+                      className="h-px w-full opacity-15"
+                      style={{
+                        background: `linear-gradient(90deg, transparent 0%, ${bubbleColor.text} 50%, transparent 100%)`
+                      }}
+                    />
+                  </div>
+                )}
                 {/* Badges inside bubble */}
-                {!isThreadReply && (
+                {!isThreadReply && showSenderName && (
                   <div className={cn("flex items-center gap-2 mb-1", { "justify-end": isOwnMessage && !isThreadReply })}>
                     {isConfession && (
                       <span className="badge-confession-ultra">Confession</span>
@@ -593,60 +577,68 @@ export function MessageBubble({
                     )}
                   </div>
                 )}
-                {/* Message Content */}
-                {message.image_url ? (
-                  <div className="space-y-2">
-                    <div className="relative group">
-                      <img
-                        src={message.image_url}
-                        alt="Shared image"
-                        className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
-                        onClick={() => window.open(message.image_url!, '_blank')}
-                      />
-                      <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={handleImageDownload}
-                          className="h-8 w-8 p-0 bg-black/50 hover:bg-black/70 border-0"
-                        >
-                          <Download className="w-3 h-3 text-white" />
-                        </Button>
+                {/* Message Content with inline timestamp (WhatsApp style) */}
+                <div className="message-content-wrapper">
+                  {message.image_url ? (
+                    <div className="space-y-2">
+                      <div className="relative group">
+                        <img
+                          src={message.image_url}
+                          alt="Shared image"
+                          className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
+                          onClick={() => window.open(message.image_url!, '_blank')}
+                        />
+                        <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleImageDownload}
+                            className="h-8 w-8 p-0 bg-black/50 hover:bg-black/70 border-0"
+                          >
+                            <Download className="w-3 h-3 text-white" />
+                          </Button>
+                        </div>
                       </div>
+                      {message.content && message.content !== 'Image' && (
+                        <div className="message-text-with-time">
+                          <span className={cn(
+                            "whitespace-pre-wrap break-words break-all text-foreground/90",
+                            isThreadReply ? "text-sm" : "text-sm"
+                          )}>
+                            {message.content}
+                          </span>
+                          <span className="message-timestamp-inline">
+                            <span className="timestamp">
+                              {format(new Date(message.created_at), 'h:mm a')}
+                            </span>
+                            {message.delivery_status && (
+                              <DeliveryStatusIcon status={message.delivery_status} />
+                            )}
+                          </span>
+                        </div>
+                      )}
                     </div>
-                    {message.content && message.content !== 'Image' && (
-                      <div className={cn(
-                        "whitespace-pre-wrap break-words break-all text-foreground/90 overflow-x-hidden",
+                  ) : (
+                    <div className="message-text-with-time">
+                      <span className={cn(
+                        "whitespace-pre-wrap break-words break-all text-foreground/90",
                         isThreadReply ? "text-sm" : "text-sm"
                       )}>
                         {message.content}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className={cn(
-                    "whitespace-pre-wrap break-words break-all text-foreground/90 overflow-x-hidden",
-                    isThreadReply ? "text-sm" : "text-sm"
-                  )}>
-                    {message.content}
-                  </div>
-                )}
+                      </span>
+                      <span className="message-timestamp-inline">
+                        <span className="timestamp">
+                          {format(new Date(message.created_at), 'h:mm a')}
+                        </span>
+                        {message.delivery_status && (
+                          <DeliveryStatusIcon status={message.delivery_status} />
+                        )}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
-              {/* Timestamp and delivery status below content */}
-              <div
-                className={cn(
-                  "mt-1 flex items-center gap-1",
-                  isRightAligned ? "justify-end text-right" : "justify-start text-left"
-                )}
-              >
-                <span className="timestamp">
-                  {format(new Date(message.created_at), 'h:mm a')}
-                </span>
-                {message.delivery_status && (
-                  <DeliveryStatusIcon status={message.delivery_status} />
-                )}
-              </div>
-            </div>
+            </motion.div>
 
             {/* Timestamp moved inside bubble; removing external gap */}
 
@@ -660,51 +652,7 @@ export function MessageBubble({
               </div>
             )}
 
-            {/* Message Actions (React removed) */}
-            {!isThreadOriginal && !isThreadReply && (
-              <div className="hidden group-hover:block">
-                <ReactionBar onReply={handleReply}>
-                  {hasReplies && (
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-6 px-2 text-xs text-green-500 hover:text-green-400 hover:bg-green-500/10"
-                      onClick={handleViewThread}
-                    >
-                      <MessageCircle className="w-3 h-3 mr-1" />
-                      View Thread
-                    </Button>
-                  )}
-                  {message.delivery_status === 'failed' && (
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-6 px-2 text-xs text-red-500 hover:text-red-400 hover:bg-red-500/10"
-                      onClick={() => {
-                        // TODO: Implement retry functionality
-                        console.log('Retry sending message:', message.id);
-                      }}
-                    >
-                      <AlertCircle className="w-3 h-3 mr-1" />
-                      Retry
-                    </Button>
-                  )}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-background/80">
-                        <MoreHorizontal className="w-3 h-3" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem>Copy Message</DropdownMenuItem>
-                      <DropdownMenuItem className="text-destructive">
-                        Report
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </ReactionBar>
-              </div>
-            )}
+            {/* Message Actions removed - cleaner WhatsApp-style UI */}
 
             {/* Inline Replies */}
             {!isThreadReply && !isThreadOriginal && showInlineReplies && message.replies && message.replies.length > 0 && (
@@ -738,8 +686,8 @@ export function MessageBubble({
               </div>
             )}
           </div>
-        </div>
-      </motion.div>
+        </motion.div>
+      </div>
     </div>
   );
 }

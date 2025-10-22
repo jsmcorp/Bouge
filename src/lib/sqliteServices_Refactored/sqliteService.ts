@@ -9,6 +9,7 @@ import { ReactionOperations } from './reactionOperations';
 import { MemberOperations } from './memberOperations';
 import { ConfessionOperations } from './confessionOperations';
 import { UtilityOperations } from './utilityOperations';
+import { ContactOperations } from './contactOperations';
 import {
   LocalMessage,
   LocalPoll,
@@ -20,7 +21,10 @@ import {
   LocalGroupMember,
   LocalUserPseudonym,
   LocalConfession,
-  StorageStats
+  StorageStats,
+  LocalContact,
+  ContactUserMapping,
+  RegisteredContact
 } from './types';
 
 class SQLiteService {
@@ -36,6 +40,7 @@ class SQLiteService {
   private memberOps: MemberOperations;
   private confessionOps: ConfessionOperations;
   private utilityOps: UtilityOperations;
+  private contactOps: ContactOperations;
 
   private constructor() {
     this.dbManager = new DatabaseManager();
@@ -49,6 +54,7 @@ class SQLiteService {
     this.memberOps = new MemberOperations(this.dbManager);
     this.confessionOps = new ConfessionOperations(this.dbManager);
     this.utilityOps = new UtilityOperations(this.dbManager);
+    this.contactOps = new ContactOperations(this.dbManager);
   }
 
   public static getInstance(): SQLiteService {
@@ -238,6 +244,101 @@ class SQLiteService {
 
   public async getStorageStats(): Promise<StorageStats> {
     return this.utilityOps.getStorageStats();
+  }
+
+  // ============================================
+  // CONTACTS OPERATIONS
+  // ============================================
+
+  /**
+   * Save multiple contacts to SQLite (batch insert/update)
+   */
+  public async saveContacts(contacts: Omit<LocalContact, 'id'>[]): Promise<void> {
+    return this.contactOps.saveContacts(contacts);
+  }
+
+  /**
+   * Get all contacts from SQLite
+   */
+  public async getAllContacts(): Promise<LocalContact[]> {
+    return this.contactOps.getAllContacts();
+  }
+
+  /**
+   * Search contacts by name or phone number
+   */
+  public async searchContacts(query: string): Promise<LocalContact[]> {
+    return this.contactOps.searchContacts(query);
+  }
+
+  /**
+   * Get contact by phone number
+   */
+  public async getContactByPhone(phoneNumber: string): Promise<LocalContact | null> {
+    return this.contactOps.getContactByPhone(phoneNumber);
+  }
+
+  /**
+   * Save contact-to-user mappings (batch insert/update)
+   */
+  public async saveContactUserMapping(mappings: ContactUserMapping[]): Promise<void> {
+    return this.contactOps.saveContactUserMapping(mappings);
+  }
+
+  /**
+   * Get all registered contacts (contacts that are Confessr users)
+   */
+  public async getRegisteredContacts(): Promise<RegisteredContact[]> {
+    return this.contactOps.getRegisteredContacts();
+  }
+
+  /**
+   * Get contact count
+   */
+  public async getContactCount(): Promise<number> {
+    return this.contactOps.getContactCount();
+  }
+
+  /**
+   * Get registered contact count
+   */
+  public async getRegisteredContactCount(): Promise<number> {
+    return this.contactOps.getRegisteredContactCount();
+  }
+
+  /**
+   * Check if a phone number is a registered user
+   */
+  public async isRegisteredUser(phoneNumber: string): Promise<boolean> {
+    return this.contactOps.isRegisteredUser(phoneNumber);
+  }
+
+  /**
+   * Get user info for a contact by phone number
+   */
+  public async getUserMappingByPhone(phoneNumber: string): Promise<ContactUserMapping | null> {
+    return this.contactOps.getUserMappingByPhone(phoneNumber);
+  }
+
+  /**
+   * Clear all contacts and mappings
+   */
+  public async clearContacts(): Promise<void> {
+    return this.contactOps.clearContacts();
+  }
+
+  /**
+   * Clear only contact-user mappings (keep contacts)
+   */
+  public async clearContactMappings(): Promise<void> {
+    return this.contactOps.clearMappings();
+  }
+
+  /**
+   * Get last sync timestamp for contacts
+   */
+  public async getContactsLastSyncTime(): Promise<number | null> {
+    return this.contactOps.getLastSyncTime();
   }
 }
 

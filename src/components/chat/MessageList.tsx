@@ -6,14 +6,19 @@ import { TypingIndicator } from '@/components/chat/TypingIndicator';
 import { UnreadMessageSeparator } from '@/components/chat/UnreadMessageSeparator';
 import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
+import { Keyboard as CapacitorKeyboard } from '@capacitor/keyboard';
+import { Capacitor } from '@capacitor/core';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId, unreadCount } = useChatStore();
+  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId, unreadCount, replyingTo } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+  const previousMessagesLength = useRef(messages.length);
+  const previousReplyingTo = useRef(replyingTo);
+  const isLazyLoadingRef = useRef(false); // Track if we're currently lazy loading to prevent auto-scroll
 
   // Debug logging for unread tracking
   useEffect(() => {
@@ -26,26 +31,50 @@ export function MessageList() {
   // WhatsApp-style: automatically load when scrolling near the top
   useEffect(() => {
     const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-    if (!viewport) return;
+    if (!viewport) {
+      console.log('📜 Lazy loading: viewport not found');
+      return;
+    }
+
+    console.log('📜 Lazy loading: scroll listener attached', { hasMoreOlder, isLoadingOlder });
 
     const onScroll = async () => {
+      const scrollTop = viewport.scrollTop;
+      const scrollHeight = viewport.scrollHeight;
+      const clientHeight = viewport.clientHeight;
+
+      console.log('📜 Scroll event:', { scrollTop, scrollHeight, clientHeight, hasMoreOlder, isLoadingOlder, loadingRef: loadingOlderRef.current });
+
       if (!activeGroup || loadingOlderRef.current) return;
+
       // Trigger loading when within 150px of the top (WhatsApp-style threshold)
-      if (viewport.scrollTop <= 150 && hasMoreOlder && !isLoadingOlder) {
+      if (scrollTop <= 150 && hasMoreOlder && !isLoadingOlder) {
+        console.log('📜 Triggering lazy load of older messages...');
         loadingOlderRef.current = true;
+        isLazyLoadingRef.current = true; // Set flag to prevent auto-scroll
         const prevHeight = viewport.scrollHeight;
         const prevTop = viewport.scrollTop;
         try {
           const loaded = await loadOlderMessages(activeGroup.id, 30);
+          console.log(`📜 Loaded ${loaded} older messages`);
           if (loaded > 0) {
             // Preserve scroll position to avoid jump after prepending
             requestAnimationFrame(() => {
               const newHeight = viewport.scrollHeight;
               viewport.scrollTop = newHeight - prevHeight + prevTop;
+              console.log('📜 Scroll position preserved after loading');
+              // Reset flag after scroll position is preserved
+              setTimeout(() => {
+                isLazyLoadingRef.current = false;
+              }, 100);
             });
+          } else {
+            // No messages loaded, reset flag immediately
+            isLazyLoadingRef.current = false;
           }
         } catch (e) {
-          console.warn('Lazy-load older messages failed', e);
+          console.warn('📜 Lazy-load older messages failed', e);
+          isLazyLoadingRef.current = false; // Reset flag on error
         } finally {
           loadingOlderRef.current = false;
         }
@@ -76,17 +105,78 @@ export function MessageList() {
   }, [activeGroup?.id]);
 
   // Auto-scroll to bottom when new messages arrive (only if no unread or already scrolled to unread)
+  // WhatsApp-style: instant scroll to bottom, respecting bottom padding
+  // IMPORTANT: Only scroll when messages actually change, NOT when replyingTo changes
+  // CRITICAL: Do NOT scroll when lazy loading older messages (preserve scroll position)
   useEffect(() => {
-    if (messagesEndRef.current && messages.length > 0 && (!firstUnreadMessageId || hasScrolledToUnread)) {
+    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+
+    // Check if messages actually changed (not just replyingTo)
+    const messagesChanged = messages.length !== previousMessagesLength.current;
+    const replyingToChanged = replyingTo !== previousReplyingTo.current;
+
+    // Update refs
+    previousMessagesLength.current = messages.length;
+    previousReplyingTo.current = replyingTo;
+
+    // Only scroll if:
+    // 1. Messages changed (not just replyingTo)
+    // 2. NOT currently lazy loading (preserve scroll position for older messages)
+    // 3. No unread messages or already scrolled to unread
+    if (viewport && messages.length > 0 && (!firstUnreadMessageId || hasScrolledToUnread) && messagesChanged && !replyingToChanged && !isLazyLoadingRef.current) {
       // Use setTimeout to ensure DOM is updated
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({
-          behavior: 'instant',
-          block: 'end'
-        });
+        // Scroll to the very bottom - the padding-bottom will ensure last message is visible
+        viewport.scrollTop = viewport.scrollHeight;
+        console.log('📍 Auto-scrolled to bottom (new message)');
       }, 0);
     }
-  }, [messages, typingUsers, firstUnreadMessageId, hasScrolledToUnread]);
+  }, [messages, typingUsers, firstUnreadMessageId, hasScrolledToUnread, replyingTo]);
+
+  // Handle keyboard show/hide events on mobile (WhatsApp-style)
+  // When keyboard opens, scroll to show the last message above it
+  // CRITICAL FIX: Wait for viewport to resize before scrolling
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+
+    let keyboardShowHandle: any;
+    let keyboardHideHandle: any;
+
+    CapacitorKeyboard.addListener('keyboardWillShow', (info) => {
+      console.log('⌨️ Keyboard opening, height:', info.keyboardHeight);
+      // CRITICAL: Wait for viewport to resize (Capacitor resize: 'body' mode)
+      // Then scroll to bottom to show latest messages above keyboard
+      if (viewport) {
+        // Wait longer for viewport resize to complete
+        setTimeout(() => {
+          viewport.scrollTop = viewport.scrollHeight;
+          console.log('⌨️ Scrolled to bottom after keyboard opened, scrollTop:', viewport.scrollTop, 'scrollHeight:', viewport.scrollHeight);
+        }, 300); // Increased delay to ensure viewport resize completes
+      }
+    }).then(handle => {
+      keyboardShowHandle = handle;
+    });
+
+    CapacitorKeyboard.addListener('keyboardWillHide', () => {
+      console.log('⌨️ Keyboard closing');
+      // Scroll to bottom when keyboard closes to maintain view
+      if (viewport) {
+        setTimeout(() => {
+          viewport.scrollTop = viewport.scrollHeight;
+          console.log('⌨️ Scrolled to bottom after keyboard closed');
+        }, 300); // Increased delay to ensure viewport resize completes
+      }
+    }).then(handle => {
+      keyboardHideHandle = handle;
+    });
+
+    return () => {
+      if (keyboardShowHandle) keyboardShowHandle.remove();
+      if (keyboardHideHandle) keyboardHideHandle.remove();
+    };
+  }, []);
 
   if (messages.length === 0 && typingUsers.length === 0) {
     return (
@@ -103,10 +193,10 @@ export function MessageList() {
 
   return (
     <ScrollArea
-      className="h-full overflow-x-hidden"
+      className="h-full overflow-x-hidden smooth-scroll-messages"
       ref={scrollAreaRef}
     >
-      <div className="p-2 sm:p-3 md:p-4 space-y-2 sm:space-y-2 overflow-x-hidden">
+      <div className="p-2 sm:p-3 md:p-4 space-y-1 overflow-x-hidden messages-container">
         {/* Loading indicator for older messages - WhatsApp style */}
         {isLoadingOlder && hasMoreOlder && (
           <div className="flex items-center justify-center py-2">
@@ -115,9 +205,16 @@ export function MessageList() {
           </div>
         )}
 
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           // Check if this is the first unread message
           const isFirstUnread = message.id === firstUnreadMessageId;
+
+          // Determine if we should show sender name (WhatsApp-style grouping)
+          // Show name if: first message OR different sender OR ghost mode changed
+          const prevMessage = index > 0 ? messages[index - 1] : null;
+          const showSenderName = !prevMessage ||
+            prevMessage.user_id !== message.user_id ||
+            prevMessage.is_ghost !== message.is_ghost;
 
           return (
             <div key={message.id}>
@@ -127,7 +224,11 @@ export function MessageList() {
                   <UnreadMessageSeparator />
                 </div>
               )}
-              <MessageBubble message={message} />
+              <MessageBubble
+                message={message}
+                showSenderName={showSenderName}
+                isNewSender={showSenderName}
+              />
             </div>
           );
         })}

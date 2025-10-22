@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'r
 import { useEffect, createContext } from 'react';
 import { useAuthStore, initializeAuthListener } from '@/store/authStore';
 import { useChatStore } from '@/store/chatStore';
+import { useContactsStore } from '@/store/contactsStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { sqliteService } from '@/lib/sqliteService';
 import { Capacitor } from '@capacitor/core';
@@ -46,6 +47,7 @@ function AppContent() {
     setupRealtimeSubscription,
     setConnectionStatus
   } = useChatStore();
+  const { initialize: initializeContacts } = useContactsStore();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
 
@@ -128,11 +130,21 @@ function AppContent() {
             console.error('❌ SQLite initialization failed:', error);
             // Continue without SQLite - app should still work with remote data only
           }
-          
+
           // Network status is now handled centrally in main.tsx
           // Set initial connection status to connecting
           setConnectionStatus('connecting');
           console.log('🌐 Network status monitoring handled centrally in main.tsx');
+
+          // Initialize contacts store (load from SQLite + check permission)
+          try {
+            console.log('📇 Initializing contacts store...');
+            await initializeContacts();
+            console.log('✅ Contacts store initialized successfully');
+          } catch (error) {
+            console.error('❌ Contacts store initialization failed:', error);
+            // Continue without contacts - not critical for app functionality
+          }
         }
 
         // Initialize auth listener first

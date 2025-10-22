@@ -72,6 +72,7 @@ export interface Message {
     display_name: string;
     avatar_url: string | null;
   };
+  pseudonym?: string; // CRITICAL: Pseudonym for ghost messages (loaded from SQLite during lazy load to prevent RPC calls)
   reactions?: Reaction[];
   replies?: Message[];
   reply_count?: number;

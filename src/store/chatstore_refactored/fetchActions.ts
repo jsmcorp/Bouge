@@ -110,99 +110,36 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // If we're online, fetch from Supabase
       console.log('🌐 Fetching groups from Supabase...');
 
-      // Check if user is authenticated via Truecaller custom JWT
-      const truecallerToken = localStorage.getItem('truecaller_token');
-      const truecallerUserStr = localStorage.getItem('truecaller_user');
+      // Use Supabase Auth for all users (including Truecaller)
+      console.log('🔑 Fetching groups with Supabase Auth');
+      const { data: { user } } = await supabasePipeline.getUser();
+      if (!user) throw new Error('Not authenticated');
+      const userId = user.id;
 
-      let userId: string;
-      let groups: any[] | null = null;
+      const client = await supabasePipeline.getDirectClient();
+      const { data: memberGroups, error: memberError } = await client
+        .from('group_members')
+        .select('group_id')
+        .eq('user_id', userId);
 
-      if (truecallerToken && truecallerUserStr) {
-        // Truecaller user - use custom JWT with direct API calls
-        console.log('🔐 Fetching groups with Truecaller custom JWT');
-        const truecallerUser = JSON.parse(truecallerUserStr);
-        userId = truecallerUser.id;
+      if (memberError) throw memberError;
 
-        // Make direct REST API calls with custom JWT
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-        const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-        // Fetch group memberships
-        const memberResponse = await fetch(
-          `${supabaseUrl}/rest/v1/group_members?select=group_id&user_id=eq.${userId}`,
-          {
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-
-        if (!memberResponse.ok) {
-          throw new Error(`Failed to fetch group memberships: ${memberResponse.statusText}`);
+      if (!memberGroups || memberGroups.length === 0) {
+        if (!localDataLoaded) {
+          set({ groups: [], isLoading: false });
         }
-
-        const memberGroups = await memberResponse.json();
-
-        if (!memberGroups || memberGroups.length === 0) {
-          if (!localDataLoaded) {
-            set({ groups: [], isLoading: false });
-          }
-          return;
-        }
-
-        const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
-
-        // Fetch groups
-        const groupsResponse = await fetch(
-          `${supabaseUrl}/rest/v1/groups?select=*&id=in.(${groupIds.join(',')})`,
-          {
-            headers: {
-              'apikey': anonKey,
-              'Authorization': `Bearer ${anonKey}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-
-        if (!groupsResponse.ok) {
-          throw new Error(`Failed to fetch groups: ${groupsResponse.statusText}`);
-        }
-
-        groups = await groupsResponse.json();
-      } else {
-        // Regular Supabase Auth user
-        console.log('🔑 Fetching groups with Supabase Auth');
-        const { data: { user } } = await supabasePipeline.getUser();
-        if (!user) throw new Error('Not authenticated');
-        userId = user.id;
-
-        const client = await supabasePipeline.getDirectClient();
-        const { data: memberGroups, error: memberError } = await client
-          .from('group_members')
-          .select('group_id')
-          .eq('user_id', userId);
-
-        if (memberError) throw memberError;
-
-        if (!memberGroups || memberGroups.length === 0) {
-          if (!localDataLoaded) {
-            set({ groups: [], isLoading: false });
-          }
-          return;
-        }
-
-        const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
-
-        const { data: groupsData, error: groupsError } = await client
-          .from('groups')
-          .select('*')
-          .in('id', groupIds);
-
-        if (groupsError) throw groupsError;
-        groups = groupsData;
+        return;
       }
+
+      const groupIds = memberGroups.map((mg: { group_id: string }) => mg.group_id);
+
+      const { data: groupsData, error: groupsError } = await client
+        .from('groups')
+        .select('*')
+        .in('id', groupIds);
+
+      if (groupsError) throw groupsError;
+      const groups = groupsData;
 
       // If SQLite is available, sync groups to local storage first
       if (isSqliteReady) {
@@ -557,23 +494,26 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             messageCache.setCachedMessages(groupId, messages);
 
             // Update UI with local data (only if we didn't already show cached data)
+            const hasMore = messages.length >= 20;
+            console.log(`📊 hasMoreOlder calculation: messages.length=${messages.length}, hasMore=${hasMore}`);
+
             if (!cachedMessages) {
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
+                hasMoreOlder: hasMore // If we got 20 messages, there might be more
               });
-              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite`);
+              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite, hasMoreOlder=${hasMore}`);
             } else {
               // Silently update the UI with fresh data from SQLite
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: messages.length >= 20 // If we got 20 messages, there might be more
+                hasMoreOlder: hasMore // If we got 20 messages, there might be more
               });
-              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite`);
+              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite, hasMoreOlder=${hasMore}`);
             }
             localDataLoaded = true;
 
@@ -1128,7 +1068,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	      try {
   	        const localOlder = await (sqliteService as any).getMessagesBefore(groupId, oldestMs, pageSize);
   	        if (localOlder && localOlder.length > 0) {
-  	          // Batch load authors
+  	          console.log(`📜 loadOlderMessages: Loaded ${localOlder.length} messages from SQLite`);
+
+  	          // Batch load authors for non-ghost messages
   	          const userIds: string[] = Array.from(
 	            new Set<string>(
 	              localOlder
@@ -1144,23 +1086,61 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	            } catch {}
   	          }
 
-  	          const mapped: Message[] = localOlder.map((msg: any) => ({
-  	            id: msg.id,
-  	            group_id: msg.group_id,
-  	            user_id: msg.user_id,
-  	            content: msg.content,
-  	            is_ghost: msg.is_ghost === 1,
-  	            message_type: msg.message_type,
-  	            category: msg.category,
-  	            parent_id: msg.parent_id,
-  	            image_url: msg.image_url,
-  	            created_at: new Date(msg.created_at).toISOString(),
-  	            author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
-  	            reply_count: 0,
-  	            replies: [],
-  	            delivery_status: 'delivered',
-  	            reactions: [],
-  	          }));
+  	          // CRITICAL FIX: Batch load pseudonyms for ghost messages from SQLite
+  	          // This prevents RPC calls when MessageBubble renders
+  	          const ghostUserIds: string[] = Array.from(
+	            new Set<string>(
+	              localOlder
+	                .filter((m: any) => m.is_ghost)
+	                .map((m: any) => String(m.user_id))
+	            )
+	          );
+
+  	          const pseudonymCache = new Map<string, string>();
+  	          if (ghostUserIds.length > 0) {
+  	            try {
+  	              const localPseudonyms = await sqliteService.getUserPseudonyms(groupId);
+  	              console.log(`📜 loadOlderMessages: Loaded ${localPseudonyms.length} pseudonyms from SQLite`);
+
+  	              const now = Date.now();
+  	              const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+  	              for (const p of localPseudonyms) {
+  	                const age = now - p.created_at;
+  	                // Only use pseudonyms that are less than 24 hours old
+  	                if (age < CACHE_DURATION) {
+  	                  pseudonymCache.set(p.user_id, p.pseudonym);
+  	                }
+  	              }
+  	              console.log(`📜 loadOlderMessages: Cached ${pseudonymCache.size} valid pseudonyms`);
+  	            } catch (e) {
+  	              console.warn('⚠️ loadOlderMessages: Failed to load pseudonyms from SQLite', e);
+  	            }
+  	          }
+
+  	          const mapped: Message[] = localOlder.map((msg: any) => {
+  	            const isGhost = msg.is_ghost === 1;
+  	            const pseudonym = isGhost ? pseudonymCache.get(msg.user_id) : undefined;
+
+  	            return {
+  	              id: msg.id,
+  	              group_id: msg.group_id,
+  	              user_id: msg.user_id,
+  	              content: msg.content,
+  	              is_ghost: isGhost,
+  	              message_type: msg.message_type,
+  	              category: msg.category,
+  	              parent_id: msg.parent_id,
+  	              image_url: msg.image_url,
+  	              created_at: new Date(msg.created_at).toISOString(),
+  	              author: isGhost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+  	              pseudonym: pseudonym, // CRITICAL: Attach pseudonym to prevent RPC call
+  	              reply_count: 0,
+  	              replies: [],
+  	              delivery_status: 'delivered',
+  	              reactions: [],
+  	            };
+  	          });
   	          combined = combined.concat(mapped);
   	        }
   	      } catch (e) {
