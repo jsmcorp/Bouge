@@ -36,10 +36,20 @@ export const SetupPage: React.FC = () => {
     {
       id: 'sync',
       title: 'Sync Your Contacts',
-      description: 'Finding your friends who are already on Bouge',
+      description: 'Uploading contacts to find your friends on Bouge',
       icon: <Loader2 className="w-8 h-8 animate-spin" />,
       action: async () => {
-        await smartSync();
+        // Sync contacts to Supabase (this is where the actual sync happens)
+        console.log('📇 [SETUP] Starting contact sync to Supabase...');
+
+        try {
+          // This will upload contacts and match registered users
+          await smartSync();
+          console.log('✅ [SETUP] Contact sync complete');
+        } catch (error) {
+          console.error('❌ [SETUP] Contact sync failed:', error);
+          // Don't throw - allow user to continue even if sync fails
+        }
       },
       status: 'pending'
     },
@@ -67,8 +77,13 @@ export const SetupPage: React.FC = () => {
     }
 
     console.log('📇 Starting first-time setup flow...');
-    // Start setup automatically
-    runSetup();
+    // Start setup automatically with a small delay to ensure page is mounted
+    // This prevents permission dialogs from being skipped
+    const timer = setTimeout(() => {
+      runSetup();
+    }, 300);
+
+    return () => clearTimeout(timer);
   }, []);
 
   const runSetup = async () => {
@@ -110,13 +125,17 @@ export const SetupPage: React.FC = () => {
         // They can sync contacts later from settings
         if (steps[i].id === 'contacts' || steps[i].id === 'sync') {
           console.log('⚠️ [SETUP] Contacts/sync failed, but allowing user to continue');
+          // Mark setup as complete anyway
+          localStorage.setItem('setup_complete', 'true');
+          localStorage.setItem('setup_completed_at', Date.now().toString());
           // Wait a bit to show the error state
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 1000));
           // Navigate to dashboard anyway
           navigate('/dashboard', { replace: true });
+          return;
         }
 
-        // Stop setup on error
+        // For other errors, stop setup
         return;
       }
     }
@@ -125,10 +144,10 @@ export const SetupPage: React.FC = () => {
     console.log('🎉 [SETUP] All steps complete!');
     setSetupComplete(true);
 
-    // Navigate to dashboard after 2 seconds
+    // Navigate to dashboard after 1 second (reduced from 2s for faster UX)
     setTimeout(() => {
       navigate('/dashboard', { replace: true });
-    }, 2000);
+    }, 1000);
   };
 
   const getStepIcon = (step: SetupStep) => {

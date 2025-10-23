@@ -499,17 +499,9 @@ export const useContactsStore = create<ContactsState>()(
 
           console.log('✅ [INIT] Contacts store initialized (loaded from SQLite)');
 
-          // BACKGROUND SYNC: Trigger smart sync in background (non-blocking)
-          // This will update contacts if there are new ones on the device
-          if (get().permissionGranted) {
-            console.log('📇 [INIT] Starting background smart sync...');
-            get().smartSync().catch(error => {
-              console.error('📇 [INIT] Background sync failed:', error);
-              // Silent failure - don't disrupt user experience
-            });
-          } else {
-            console.log('📇 [INIT] Permission not granted - skipping background sync');
-          }
+          // DO NOT auto-sync here - sync will happen on SetupPage
+          // This prevents double sync and allows user to control when sync happens
+          console.log('📇 [INIT] Skipping auto-sync - will sync on SetupPage');
         } catch (error) {
           console.error('📇 [INIT] ❌ Error initializing contacts store:', error);
           console.error('📇 [INIT] ❌ Error details:', {

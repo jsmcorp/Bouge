@@ -17,10 +17,10 @@ import { ConnectionStatus, DebugConnectionStatus } from '@/components/Connection
 export const MobileContext = createContext(false);
 
 // Auth pages
+import WelcomePage from '@/pages/onboarding/WelcomePage';
 import LoginPage from '@/pages/auth/LoginPage';
 import VerifyPage from '@/pages/auth/VerifyPage';
 import OnboardingNamePage from '@/pages/onboarding/NamePage';
-import OnboardingAvatarPage from '@/pages/onboarding/AvatarPage';
 import { SetupPage } from '@/pages/onboarding/SetupPage';
 
 // Main app pages
@@ -236,6 +236,22 @@ function AppContent() {
     <MobileContext.Provider value={isMobile}>
       <div className="min-h-screen bg-background text-foreground">
         <Routes>
+          {/* Welcome page - First screen for new users */}
+          <Route
+            path="/welcome"
+            element={
+              user ? (
+                user.is_onboarded ? (
+                  <Navigate to="/dashboard" replace />
+                ) : (
+                  <Navigate to="/onboarding/name" replace />
+                )
+              ) : (
+                <WelcomePage />
+              )
+            }
+          />
+
           {/* Public routes */}
           <Route
             path="/auth/login"
@@ -272,14 +288,6 @@ function AppContent() {
             element={
               <ProtectedRoute requireOnboarding={false}>
                 <OnboardingNamePage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/onboarding/avatar"
-            element={
-              <ProtectedRoute requireOnboarding={false}>
-                <OnboardingAvatarPage />
               </ProtectedRoute>
             }
           />
@@ -363,10 +371,10 @@ function AppContent() {
             element={
               <Navigate
                 to={
-                  !user 
-                    ? "/auth/login" 
-                    : user.is_onboarded 
-                      ? "/dashboard" 
+                  !user
+                    ? "/welcome"
+                    : user.is_onboarded
+                      ? "/dashboard"
                       : "/onboarding/name"
                 }
                 replace
@@ -380,10 +388,10 @@ function AppContent() {
             element={
               <Navigate
                 to={
-                  !user 
-                    ? "/auth/login" 
-                    : user.is_onboarded 
-                      ? "/dashboard" 
+                  !user
+                    ? "/welcome"
+                    : user.is_onboarded
+                      ? "/dashboard"
                       : "/onboarding/name"
                 }
                 replace

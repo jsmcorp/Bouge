@@ -60,6 +60,7 @@
     "firebase": "^11.10.0",
     "framer-motion": "^11.5.4",
     "input-otp": "^1.2.4",
+    "libphonenumber-js": "^1.12.24",
     "lucide-react": "^0.446.0",
     "next-themes": "^0.3.0",
     "react": "^18.3.1",

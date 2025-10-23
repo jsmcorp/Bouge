@@ -4,6 +4,7 @@ import { sqliteService } from './sqliteServices_Refactored/sqliteService';
 import { supabasePipeline } from './supabasePipeline';
 import { contactMatchingService } from './contactMatchingService';
 import { LocalContact, ContactUserMapping, RegisteredContact } from './sqliteServices_Refactored/types';
+import { normalizePhoneNumber } from './phoneNormalization';
 
 /**
  * ContactsService - Handles device contacts sync and user discovery
@@ -88,53 +89,18 @@ class ContactsService {
   }
 
   /**
-   * Normalize phone number to E.164 format
-   * 
+   * Normalize phone number to E.164 format using libphonenumber-js
+   *
    * E.164 format: +[country code][number] (e.g., +917744939966)
-   * 
-   * Simple normalization:
-   * - Remove all non-digit characters except leading +
-   * - Ensure starts with +
-   * - If no country code, assume +91 (India) as default
-   * 
-   * Note: For production, consider using libphonenumber-js for robust normalization
-   * 
+   *
+   * Uses libphonenumber-js for robust parsing and validation
+   *
    * @param phone - Raw phone number from device contacts
-   * @returns Normalized phone number in E.164 format
+   * @returns Normalized phone number in E.164 format or empty string if invalid
    */
-  public normalizePhoneNumber(phone: string): string {
-    if (!phone) return '';
-
-    // Remove all whitespace, dashes, parentheses, etc.
-    let normalized = phone.replace(/[\s\-\(\)\.]/g, '');
-
-    // If starts with +, keep it
-    if (normalized.startsWith('+')) {
-      return normalized;
-    }
-
-    // If starts with 00, replace with +
-    if (normalized.startsWith('00')) {
-      return '+' + normalized.substring(2);
-    }
-
-    // If starts with 0 (local number), remove leading 0 and add +91 (India)
-    if (normalized.startsWith('0')) {
-      return '+91' + normalized.substring(1);
-    }
-
-    // If 10 digits (Indian mobile), add +91
-    if (normalized.length === 10 && /^\d{10}$/.test(normalized)) {
-      return '+91' + normalized;
-    }
-
-    // If already has country code without +, add +
-    if (/^\d{11,15}$/.test(normalized)) {
-      return '+' + normalized;
-    }
-
-    // Return as-is if can't normalize
-    return normalized;
+  public normalizePhoneNumberLegacy(phone: string): string {
+    const normalized = normalizePhoneNumber(phone);
+    return normalized || '';
   }
 
   /**
@@ -190,8 +156,8 @@ class ContactsService {
           const rawPhone = phoneEntry.number;
           if (!rawPhone) continue;
 
-          // Normalize phone number to E.164 format
-          const normalizedPhone = this.normalizePhoneNumber(rawPhone);
+          // Normalize phone number to E.164 format using libphonenumber-js
+          const normalizedPhone = normalizePhoneNumber(rawPhone);
           if (!normalizedPhone) continue;
 
           // Only add if not already in map (first occurrence wins)
@@ -259,10 +225,17 @@ class ContactsService {
     console.log(`📇 Checking ${contactsToCheck.length} contacts for registered users...`);
 
     try {
-      // Extract unique phone numbers
-      const phoneNumbers = [...new Set(contactsToCheck.map(c => c.phone_number))];
-      console.log(`📇 Querying Supabase for ${phoneNumbers.length} unique phone numbers...`);
-      console.log(`📇 Sample phone numbers:`, phoneNumbers.slice(0, 5));
+      // Extract and normalize phone numbers
+      const rawPhoneNumbers = [...new Set(contactsToCheck.map(c => c.phone_number))];
+      console.log(`📇 [CLIENT-SIDE] Normalizing ${rawPhoneNumbers.length} unique phone numbers...`);
+
+      const phoneNumbers = rawPhoneNumbers
+        .map(phone => normalizePhoneNumber(phone))
+        .filter((phone): phone is string => phone !== null);
+
+      console.log(`📇 [CLIENT-SIDE] ${phoneNumbers.length} valid normalized numbers (${rawPhoneNumbers.length - phoneNumbers.length} invalid)`);
+      console.log(`📇 [CLIENT-SIDE] Querying Supabase for ${phoneNumbers.length} phone numbers...`);
+      console.log(`📇 [CLIENT-SIDE] Sample normalized numbers:`, phoneNumbers.slice(0, 5));
 
       // BATCH QUERIES: Split into chunks to avoid URL length limits
       // Supabase .in() creates a URL query param, which has limits (~2000 chars)
@@ -420,26 +393,28 @@ class ContactsService {
     console.log(`📇 [SERVER-SIDE] Checking ${contactsToCheck.length} contacts for registered users...`);
 
     try {
-      // Prepare contacts with names and phone numbers
+      // Contacts are already normalized when saved to SQLite (in syncContacts method)
+      // No need to normalize again - just prepare for upload
       const contactsData = contactsToCheck.map(c => ({
         name: c.display_name,
-        phone: c.phone_number
+        phone: c.phone_number  // Already in E.164 format from SQLite
       }));
-      console.log(`📇 [SERVER-SIDE] Syncing ${contactsData.length} contacts...`);
+
+      console.log(`📇 [SERVER-SIDE] Uploading ${contactsData.length} contacts to Supabase...`);
+
+      if (contactsData.length === 0) {
+        console.warn('⚠️ [SERVER-SIDE] No contacts to sync');
+        return [];
+      }
 
       // Report initial progress
       if (onProgress) {
         onProgress(0, 1); // 1 step: sync and match
       }
 
-      // Sync contacts and get registered users (with timeout)
-      console.log('📇 [SERVER-SIDE] Starting sync with 30s timeout...');
-      const syncPromise = contactMatchingService.syncContacts(contactsData);
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Sync timeout after 30 seconds')), 30000)
-      );
-
-      const registeredUsers = await Promise.race([syncPromise, timeoutPromise]) as any[];
+      // Sync contacts and get registered users
+      console.log('📇 [SERVER-SIDE] Calling sync_contacts RPC...');
+      const registeredUsers = await contactMatchingService.syncContacts(contactsData);
       console.log('✅ [SERVER-SIDE] Sync complete');
 
       // Report final progress
@@ -448,6 +423,20 @@ class ContactsService {
       }
 
       console.log(`✅ [SERVER-SIDE] Found ${registeredUsers.length} registered users`);
+
+      // Log matched users for debugging
+      if (registeredUsers.length > 0) {
+        console.log('📋 [SERVER-SIDE] Matched users:');
+        registeredUsers.forEach((user: any, index: number) => {
+          console.log(`  ${index + 1}. ${user.display_name} (${user.phone_number}) - Contact: ${user.contact_name}`);
+        });
+      } else {
+        console.warn('⚠️ [SERVER-SIDE] No registered users found in contacts');
+        console.log('💡 [SERVER-SIDE] This could mean:');
+        console.log('   1. None of your contacts are registered on Confessr');
+        console.log('   2. Phone numbers in users table are not normalized to E.164 format');
+        console.log('   3. Phone number formats don\'t match between contacts and users table');
+      }
 
       if (registeredUsers.length > 0) {
         // Step 1: Save users to SQLite first (required for foreign key constraint)
@@ -562,7 +551,7 @@ class ContactsService {
           const rawPhone = phoneEntry.number;
           if (!rawPhone) continue;
 
-          const normalizedPhone = this.normalizePhoneNumber(rawPhone);
+          const normalizedPhone = normalizePhoneNumber(rawPhone);
           if (!normalizedPhone) continue;
 
           // Only add if it's a new contact (not in SQLite)

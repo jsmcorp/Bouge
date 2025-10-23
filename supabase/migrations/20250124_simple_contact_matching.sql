@@ -21,6 +21,43 @@ DROP FUNCTION IF EXISTS normalize_phone_number(TEXT);
 ALTER TABLE users DROP COLUMN IF EXISTS phone_hash;
 
 -- ============================================
+-- NORMALIZE EXISTING USER PHONE NUMBERS
+-- ============================================
+
+-- Normalize all existing phone numbers in users table to E.164 format
+-- This ensures consistent matching with contacts
+
+-- Step 1: Add '+' prefix to numbers missing it (Indian numbers)
+UPDATE users
+SET phone_number = '+' || phone_number
+WHERE phone_number NOT LIKE '+%'
+  AND LENGTH(phone_number) >= 10;
+
+-- Step 2: Remove any spaces, dashes, parentheses from phone numbers
+UPDATE users
+SET phone_number = regexp_replace(phone_number, '[^0-9+]', '', 'g');
+
+-- Step 3: Handle 00 prefix (international format)
+UPDATE users
+SET phone_number = '+' || substring(phone_number from 3)
+WHERE phone_number LIKE '00%';
+
+-- Log normalization results
+DO $$
+DECLARE
+  total_users INTEGER;
+  normalized_users INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO total_users FROM users;
+  SELECT COUNT(*) INTO normalized_users FROM users WHERE phone_number LIKE '+%';
+
+  RAISE NOTICE 'Phone number normalization complete:';
+  RAISE NOTICE '  Total users: %', total_users;
+  RAISE NOTICE '  Normalized (E.164): %', normalized_users;
+  RAISE NOTICE '  Needs manual review: %', total_users - normalized_users;
+END $$;
+
+-- ============================================
 -- NEW SIMPLE TABLES
 -- ============================================
 
