@@ -1,3 +1,4 @@
+
 import { supabasePipeline } from './supabasePipeline';
 
 /**
@@ -154,17 +155,11 @@ class ContactMatchingService {
     try {
       const startTime = performance.now();
 
-      const client = await supabasePipeline.getDirectClient();
-      const { data: { user } } = await client.auth.getUser();
-      if (!user) {
-        throw new Error('User not authenticated');
-      }
-
       console.log('📇 [V3] Calling discover_contacts_v3 RPC...');
       console.log(`📇 [V3] Sample contacts:`, contacts.slice(0, 3));
 
-      // Call optimized RPC function with JSONB
-      const { data, error } = await client.rpc('discover_contacts_v3', {
+      // Call optimized RPC function with JSONB using supabasePipeline.rpc() for timeout protection
+      const { data, error } = await supabasePipeline.rpc<any[]>('discover_contacts_v3', {
         p_contacts: contacts
       });
 

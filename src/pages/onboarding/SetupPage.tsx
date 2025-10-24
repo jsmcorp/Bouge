@@ -4,6 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Check, Loader2, Users, Shield } from 'lucide-react';
 import { useContactsStore } from '../../store/contactsStore';
 import { useAuthStore } from '../../store/authStore';
+import { supabasePipeline } from '../../lib/supabasePipeline';
+
 
 interface SetupStep {
   id: string;
@@ -17,7 +19,7 @@ interface SetupStep {
 export const SetupPage: React.FC = () => {
   const navigate = useNavigate();
   const { requestPermission, syncContacts, discoverInBackgroundV3, syncProgress } = useContactsStore();
-  const { user } = useAuthStore();
+  const { user, isInitialized: authInitialized } = useAuthStore();
   const [setupComplete, setSetupComplete] = useState(false);
   const [steps, setSteps] = useState<SetupStep[]>([
     {
@@ -94,7 +96,14 @@ export const SetupPage: React.FC = () => {
       return;
     }
 
-    console.log('📇 Starting first-time setup flow...');
+    // Prefer token-gated start: proceed if we already have an access token snapshot
+    const tokenSnap = (supabasePipeline as any)?.getCachedAccessToken?.();
+    if (!authInitialized && !tokenSnap) {
+      console.log('📇 Waiting for auth or token before starting setup...');
+      return;
+    }
+
+    console.log('📇 Auth/token ready, starting first-time setup flow...');
     // Start setup automatically with a small delay to ensure page is mounted
     // This prevents permission dialogs from being skipped
     const timer = setTimeout(() => {
@@ -102,7 +111,7 @@ export const SetupPage: React.FC = () => {
     }, 300);
 
     return () => clearTimeout(timer);
-  }, []);
+  }, [authInitialized]); // Re-run when authInitialized changes
 
   const runSetup = async () => {
     for (let i = 0; i < steps.length; i++) {
@@ -225,7 +234,7 @@ export const SetupPage: React.FC = () => {
                   <p className="text-sm text-muted-foreground mt-1">
                     {step.description}
                   </p>
-                  
+
                   {/* Progress bar for sync step */}
                   {step.id === 'sync' && step.status === 'in_progress' && syncProgress && (
                     <div className="mt-3 space-y-2">
@@ -241,8 +250,8 @@ export const SetupPage: React.FC = () => {
                         <motion.div
                           className="h-full bg-primary"
                           initial={{ width: 0 }}
-                          animate={{ 
-                            width: `${(syncProgress.current / syncProgress.total) * 100}%` 
+                          animate={{
+                            width: `${(syncProgress.current / syncProgress.total) * 100}%`
                           }}
                           transition={{ duration: 0.3 }}
                         />

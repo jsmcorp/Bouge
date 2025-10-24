@@ -15,8 +15,6 @@ export default function VerifyPage() {
   const [countdown, setCountdown] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
-  const { setUser } = useAuthStore();
-  
   const phone = location.state?.phone;
 
   useEffect(() => {
@@ -25,7 +23,6 @@ export default function VerifyPage() {
       return;
     }
 
-    // Start countdown
     setCountdown(60);
     const timer = setInterval(() => {
       setCountdown((prev) => {
@@ -53,49 +50,29 @@ export default function VerifyPage() {
       }
 
       if (data.session && data.user) {
-        // Check if user exists in our users table
-        const client = await supabasePipeline.getDirectClient();
-        const { data: userData, error: userError } = await client
-          .from('users')
-          .select('*')
-          .eq('id', data.user.id)
-          .single();
+        // Ingest the session into the pipeline immediately to avoid any event race
+        // Use internal cache updater to store tokens and user id
+        (supabasePipeline as any).updateSessionCache?.(data.session);
 
-        if (userError) {
-          // Only handle PGRST116 (no rows found) as expected for new users
-          if (userError.code === 'PGRST116') {
-            // User doesn't exist, create new user record
-            const { data: newUser, error: createError } = await client
-              .from('users')
-              .insert({
-                id: data.user.id,
-                phone_number: phone,
-                display_name: 'New User',
-                is_onboarded: false,
-              })
-              .select()
-              .single();
+        // Best-effort: kick the client to hydrate its internal session, but don't block on it
+        try {
+          const client = await supabasePipeline.getDirectClient();
+          await client.auth.getSession();
+        } catch {}
 
-            if (createError) {
-              toast.error('Failed to create user profile');
-              return;
-            }
-
-            setUser(newUser);
-            toast.success('Phone verified successfully!');
-            navigate('/onboarding/name');
-          } else {
-            // Handle other database errors
-            toast.error('Failed to fetch user profile');
-            return;
-          }
-        } else if (userData) {
-          setUser(userData);
-          toast.success('Welcome back!');
-          navigate(userData.is_onboarded ? '/dashboard' : '/onboarding/name');
+        // Ensure the application user row exists before proceeding
+        try {
+          await useAuthStore.getState().syncUserProfile(data.user);
+        } catch (e) {
+          console.warn('Profile sync after OTP failed (non-fatal):', e);
         }
+
+        // Proceed to onboarding name screen
+        toast.success('Phone verified successfully!');
+        navigate('/onboarding/name');
       }
     } catch (error: any) {
+      console.error('❌ Verification error:', error);
       toast.error('Something went wrong. Please try again.');
     } finally {
       setIsLoading(false);
@@ -137,7 +114,6 @@ export default function VerifyPage() {
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-background via-background to-primary/5 flex items-center justify-center p-4 relative overflow-hidden">
-      {/* Background decorations */}
       <div className="absolute inset-0 overflow-hidden">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-primary/10 rounded-full blur-3xl"></div>
         <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-chart-2/10 rounded-full blur-3xl"></div>
@@ -162,11 +138,7 @@ export default function VerifyPage() {
             <motion.div
               initial={{ scale: 0, rotate: -180 }}
               animate={{ scale: 1, rotate: 0 }}
-              transition={{ 
-                delay: 0.2, 
-                type: 'spring', 
-                stiffness: 200 
-              }}
+              transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
               className="relative inline-block mb-4 mx-auto"
             >
               <div className="absolute inset-0 bg-gradient-to-r from-primary to-chart-2 rounded-2xl blur-xl opacity-30 animate-pulse"></div>

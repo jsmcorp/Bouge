@@ -167,9 +167,12 @@ function AppContent() {
           console.log('📇 Contacts initialization block completed');
         }
 
-        // Initialize auth listener first
-        const cleanup = initializeAuthListener();
-        
+        // Initialize auth listener first and WAIT for it to be fully set up
+        // This ensures the listener is ready to receive SIGNED_IN events during OTP verification
+        console.log('🎧 Initializing auth listener...');
+        const cleanup = await initializeAuthListener();
+        console.log('✅ Auth listener initialized');
+
         // Then initialize auth state
         await initializeAuth();
         
