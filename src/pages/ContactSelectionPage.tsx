@@ -30,7 +30,7 @@ export default function ContactSelectionPage() {
     error,
     syncProgress,
     requestPermission,
-    smartSync,
+    discoverInBackgroundV3,
     searchContacts,
   } = useContactsStore();
 
@@ -105,7 +105,7 @@ export default function ContactSelectionPage() {
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      await smartSync();
+      await discoverInBackgroundV3();
       toast.success('Contacts synced successfully');
     } catch (error) {
       console.error('Failed to sync contacts:', error);

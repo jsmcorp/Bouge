@@ -412,6 +412,34 @@ class SQLiteService {
   }
 
   /**
+   * Get contacts checksum (for delta sync)
+   */
+  public async getContactsChecksum(): Promise<string | null> {
+    return this.syncMetadataOps.getContactsChecksum();
+  }
+
+  /**
+   * Set contacts checksum
+   */
+  public async setContactsChecksum(checksum: string): Promise<void> {
+    return this.syncMetadataOps.setContactsChecksum(checksum);
+  }
+
+  /**
+   * Get last delta sync timestamp
+   */
+  public async getLastDeltaSyncTime(): Promise<number | null> {
+    return this.syncMetadataOps.getLastDeltaSyncTime();
+  }
+
+  /**
+   * Set last delta sync timestamp
+   */
+  public async setLastDeltaSyncTime(timestamp: number): Promise<void> {
+    return this.syncMetadataOps.setLastDeltaSyncTime(timestamp);
+  }
+
+  /**
    * Get all sync metadata (for debugging)
    */
   public async getAllSyncMetadata(): Promise<Record<string, string>> {

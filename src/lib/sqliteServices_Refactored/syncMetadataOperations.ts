@@ -116,6 +116,35 @@ export class SyncMetadataOperations {
   }
 
   /**
+   * Get contacts checksum (for delta sync optimization)
+   */
+  public async getContactsChecksum(): Promise<string | null> {
+    return await this.getSyncMetadata('contacts_checksum');
+  }
+
+  /**
+   * Set contacts checksum
+   */
+  public async setContactsChecksum(checksum: string): Promise<void> {
+    await this.setSyncMetadata('contacts_checksum', checksum);
+  }
+
+  /**
+   * Get last delta sync timestamp
+   */
+  public async getLastDeltaSyncTime(): Promise<number | null> {
+    const value = await this.getSyncMetadata('last_delta_sync');
+    return value ? parseInt(value, 10) : null;
+  }
+
+  /**
+   * Set last delta sync timestamp
+   */
+  public async setLastDeltaSyncTime(timestamp: number): Promise<void> {
+    await this.setSyncMetadata('last_delta_sync', timestamp.toString());
+  }
+
+  /**
    * Clear all sync metadata (for testing/reset)
    */
   public async clearAllSyncMetadata(): Promise<void> {

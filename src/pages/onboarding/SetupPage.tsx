@@ -16,7 +16,7 @@ interface SetupStep {
 
 export const SetupPage: React.FC = () => {
   const navigate = useNavigate();
-  const { requestPermission, smartSync, syncProgress } = useContactsStore();
+  const { requestPermission, syncContacts, discoverInBackgroundV3, syncProgress } = useContactsStore();
   const { user } = useAuthStore();
   const [setupComplete, setSetupComplete] = useState(false);
   const [steps, setSteps] = useState<SetupStep[]>([
@@ -36,18 +36,36 @@ export const SetupPage: React.FC = () => {
     {
       id: 'sync',
       title: 'Sync Your Contacts',
-      description: 'Uploading contacts to find your friends on Bouge',
+      description: 'Finding your friends on Bouge',
       icon: <Loader2 className="w-8 h-8 animate-spin" />,
       action: async () => {
-        // Sync contacts to Supabase (this is where the actual sync happens)
-        console.log('📇 [SETUP] Starting contact sync to Supabase...');
+        console.log('📇 [SETUP] Starting contact sync and discovery...');
 
         try {
-          // This will upload contacts and match registered users
-          await smartSync();
-          console.log('✅ [SETUP] Contact sync complete');
+          // STEP 1: Fetch contacts from device and save to SQLite (batched transaction)
+          console.log('📇 [SETUP] Fetching contacts from device...');
+          await syncContacts();
+
+          // Get contact count for validation
+          const { contacts } = useContactsStore.getState();
+          if (contacts.length === 0) {
+            console.warn('⚠️ [SETUP] No contacts found on device');
+            console.warn('⚠️ [SETUP] User may not have any contacts or permission was revoked');
+            // Continue anyway - user might genuinely have no contacts
+          } else {
+            console.log(`✅ [SETUP] Synced ${contacts.length} contacts from device to local SQLite`);
+          }
+
+          // STEP 2: Discover registered users from synced contacts (V3 with exponential backoff)
+          console.log('📇 [SETUP] Discovering registered users...');
+          await discoverInBackgroundV3();
+
+          // Get registered user count for validation
+          const { registeredUsers } = useContactsStore.getState();
+          console.log(`✅ [SETUP] Found ${registeredUsers.length} registered users`);
+
         } catch (error) {
-          console.error('❌ [SETUP] Contact sync failed:', error);
+          console.error('❌ [SETUP] Contact sync/discovery failed:', error);
           // Don't throw - allow user to continue even if sync fails
         }
       },

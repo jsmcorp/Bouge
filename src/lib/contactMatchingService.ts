@@ -129,6 +129,69 @@ class ContactMatchingService {
   }
 
   /**
+   * ✅ PRODUCTION: WhatsApp-like contact discovery with names
+   * Improvements over V2:
+   * - Preserves original contact names
+   * - Efficient MERGE (no full delete churn)
+   * - Returns contact names with matches
+   *
+   * @param contacts - Array of {phone: string, name: string}
+   * @returns Array of matched users with contact names
+   */
+  public async discoverContactsV3(contacts: Array<{phone: string, name: string}>): Promise<any[]> {
+    console.log(`📇 [V3] Starting optimized discovery for ${contacts.length} contacts...`);
+
+    if (contacts.length === 0) {
+      console.log('📇 [V3] No contacts to discover');
+      return [];
+    }
+
+    // Validate max limit
+    if (contacts.length > 5000) {
+      throw new Error(`Too many contacts (max 5000, got ${contacts.length})`);
+    }
+
+    try {
+      const startTime = performance.now();
+
+      const client = await supabasePipeline.getDirectClient();
+      const { data: { user } } = await client.auth.getUser();
+      if (!user) {
+        throw new Error('User not authenticated');
+      }
+
+      console.log('📇 [V3] Calling discover_contacts_v3 RPC...');
+      console.log(`📇 [V3] Sample contacts:`, contacts.slice(0, 3));
+
+      // Call optimized RPC function with JSONB
+      const { data, error } = await client.rpc('discover_contacts_v3', {
+        p_contacts: contacts
+      });
+
+      if (error) {
+        console.error('❌ [V3] RPC error:', error);
+        throw error;
+      }
+
+      const endTime = performance.now();
+      const duration = Math.round(endTime - startTime);
+
+      const matches = data || [];
+      console.log(`✅ [V3] Discovery complete in ${duration}ms`);
+      console.log(`✅ [V3] Found ${matches.length} registered users`);
+
+      if (matches.length > 0) {
+        console.log('📋 [V3] Sample matches:', matches.slice(0, 3));
+      }
+
+      return matches;
+    } catch (error) {
+      console.error('📇 [V3] Error in discoverContactsV3:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Clear all uploaded contacts for current user
    * Useful for testing or when user wants to re-sync
    */
