@@ -50,7 +50,7 @@ export function ContactPicker({
     permissionGranted,
     error,
     requestPermission,
-    fullSync,
+    discoverInBackgroundV3,
     searchContacts,
   } = useContactsStore();
 
@@ -109,7 +109,7 @@ export function ContactPicker({
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      await fullSync();
+      await discoverInBackgroundV3();
     } catch (error) {
       console.error('Failed to sync contacts:', error);
     } finally {

@@ -1,8 +1,11 @@
+
 import { Capacitor } from '@capacitor/core';
 import { Contacts, GetContactsResult, PermissionStatus } from '@capacitor-community/contacts';
 import { sqliteService } from './sqliteServices_Refactored/sqliteService';
-import { supabasePipeline } from './supabasePipeline';
+import { contactMatchingService } from './contactMatchingService';
 import { LocalContact, ContactUserMapping, RegisteredContact } from './sqliteServices_Refactored/types';
+import { normalizePhoneNumber } from './phoneNormalization';
+import { computeContactsChecksum } from './checksumUtils';
 
 /**
  * ContactsService - Handles device contacts sync and user discovery
@@ -87,64 +90,30 @@ class ContactsService {
   }
 
   /**
-   * Normalize phone number to E.164 format
-   * 
+   * Normalize phone number to E.164 format using libphonenumber-js
+   *
    * E.164 format: +[country code][number] (e.g., +917744939966)
-   * 
-   * Simple normalization:
-   * - Remove all non-digit characters except leading +
-   * - Ensure starts with +
-   * - If no country code, assume +91 (India) as default
-   * 
-   * Note: For production, consider using libphonenumber-js for robust normalization
-   * 
+   *
+   * Uses libphonenumber-js for robust parsing and validation
+   *
    * @param phone - Raw phone number from device contacts
-   * @returns Normalized phone number in E.164 format
+   * @returns Normalized phone number in E.164 format or empty string if invalid
    */
-  public normalizePhoneNumber(phone: string): string {
-    if (!phone) return '';
-
-    // Remove all whitespace, dashes, parentheses, etc.
-    let normalized = phone.replace(/[\s\-\(\)\.]/g, '');
-
-    // If starts with +, keep it
-    if (normalized.startsWith('+')) {
-      return normalized;
-    }
-
-    // If starts with 00, replace with +
-    if (normalized.startsWith('00')) {
-      return '+' + normalized.substring(2);
-    }
-
-    // If starts with 0 (local number), remove leading 0 and add +91 (India)
-    if (normalized.startsWith('0')) {
-      return '+91' + normalized.substring(1);
-    }
-
-    // If 10 digits (Indian mobile), add +91
-    if (normalized.length === 10 && /^\d{10}$/.test(normalized)) {
-      return '+91' + normalized;
-    }
-
-    // If already has country code without +, add +
-    if (/^\d{11,15}$/.test(normalized)) {
-      return '+' + normalized;
-    }
-
-    // Return as-is if can't normalize
-    return normalized;
+  public normalizePhoneNumberLegacy(phone: string): string {
+    const normalized = normalizePhoneNumber(phone);
+    return normalized || '';
   }
 
   /**
-   * Sync device contacts to SQLite
-   * 
+   * Sync device contacts to SQLite (full sync)
+   *
    * Steps:
    * 1. Check permission
    * 2. Fetch contacts from device (name + phones only)
    * 3. Normalize phone numbers
-   * 4. Save to SQLite
-   * 
+   * 4. Deduplicate phone numbers
+   * 5. Save to SQLite
+   *
    * @returns Array of synced contacts
    */
   public async syncContacts(): Promise<LocalContact[]> {
@@ -163,6 +132,8 @@ class ContactsService {
     try {
       // Fetch contacts from device (only name and phones for privacy)
       console.log('📇 Fetching contacts from device...');
+      const fetchStartTime = performance.now();
+
       const result: GetContactsResult = await Contacts.getContacts({
         projection: {
           name: true,
@@ -171,11 +142,20 @@ class ContactsService {
         }
       });
 
-      console.log(`📇 Fetched ${result.contacts.length} contacts from device`);
+      const fetchDuration = Math.round(performance.now() - fetchStartTime);
+      console.log(`📇 Fetched ${result.contacts.length} contacts from device in ${fetchDuration}ms`);
 
-      // Transform to LocalContact format
+      if (result.contacts.length === 0) {
+        console.warn('⚠️ No contacts found on device');
+        console.warn('⚠️ This could mean:');
+        console.warn('   1. User has no contacts saved');
+        console.warn('   2. Permission was revoked');
+        console.warn('   3. Device contacts are empty');
+      }
+
+      // Transform to LocalContact format with deduplication
       const now = Date.now();
-      const localContacts: Omit<LocalContact, 'id'>[] = [];
+      const uniqueContacts = new Map<string, Omit<LocalContact, 'id'>>();
 
       for (const contact of result.contacts) {
         // Get display name
@@ -183,26 +163,32 @@ class ContactsService {
 
         // Get phone numbers (contacts can have multiple)
         const phones = contact.phones || [];
-        
+
         for (const phoneEntry of phones) {
           const rawPhone = phoneEntry.number;
           if (!rawPhone) continue;
 
-          // Normalize phone number to E.164 format
-          const normalizedPhone = this.normalizePhoneNumber(rawPhone);
+          // Normalize phone number to E.164 format using libphonenumber-js
+          const normalizedPhone = normalizePhoneNumber(rawPhone);
           if (!normalizedPhone) continue;
 
-          localContacts.push({
-            phone_number: normalizedPhone,
-            display_name: displayName,
-            email: null, // Not requesting emails for privacy
-            photo_uri: null, // Not requesting photos for performance
-            synced_at: now
-          });
+          // Only add if not already in map (first occurrence wins)
+          // This prevents duplicate phone numbers from being saved
+          if (!uniqueContacts.has(normalizedPhone)) {
+            uniqueContacts.set(normalizedPhone, {
+              phone_number: normalizedPhone,
+              display_name: displayName,
+              email: null, // Not requesting emails for privacy
+              photo_uri: null, // Not requesting photos for performance
+              synced_at: now
+            });
+          }
         }
       }
 
-      console.log(`📇 Normalized ${localContacts.length} phone numbers from ${result.contacts.length} contacts`);
+      const localContacts = Array.from(uniqueContacts.values());
+      console.log(`📇 Normalized ${result.contacts.length} contacts → ${localContacts.length} unique phone numbers (deduplicated)`);
+      console.log(`📇 Deduplication saved ${uniqueContacts.size - localContacts.length} duplicate operations`);
 
       // Save to SQLite (batch insert/update)
       if (localContacts.length > 0) {
@@ -217,103 +203,264 @@ class ContactsService {
       return allContacts;
     } catch (error) {
       console.error('📇 Error syncing contacts:', error);
+
+      // Check if it's a permission error
+      if (error instanceof Error && error.message?.toLowerCase().includes('permission')) {
+        throw new Error('Contacts permission was revoked. Please grant permission in Settings.');
+      }
+
       throw error;
     }
   }
 
   /**
-   * Discover which contacts are registered Confessr users
-   * 
-   * Steps:
-   * 1. Extract unique phone numbers from contacts
-   * 2. Query Supabase users table for matching phone numbers
-   * 3. Create contact-user mappings
-   * 4. Save mappings to SQLite
-   * 5. Return registered contacts
-   * 
-   * @param contacts - Array of contacts to check (optional, uses all if not provided)
-   * @returns Array of contacts that are registered users
+   * Incremental sync: Only sync new/modified contacts since last sync
+   * Much faster than full sync for subsequent syncs
+   *
+   * Note: The Capacitor Contacts plugin doesn't support filtering by modification date,
+   * so we implement a simple optimization:
+   * 1. Get all contacts from device
+   * 2. Compare with SQLite to find new/modified ones
+   * 3. Only save the delta
+   *
+   * @param lastSyncTime - Unix timestamp of last sync (optional)
+   * @returns Array of all contacts (including previously synced)
    */
-  public async discoverRegisteredUsers(contacts?: LocalContact[]): Promise<RegisteredContact[]> {
-    console.log('📇 Starting user discovery...');
-
-    // Get contacts from parameter or SQLite
-    const contactsToCheck = contacts || await sqliteService.getAllContacts();
-    
-    if (contactsToCheck.length === 0) {
-      console.log('📇 No contacts to check');
-      return [];
+  public async incrementalSync(lastSyncTime?: number | null): Promise<LocalContact[]> {
+    if (!this.isAvailable()) {
+      throw new Error('Contacts feature is only available on mobile devices');
     }
 
-    console.log(`📇 Checking ${contactsToCheck.length} contacts for registered users...`);
+    console.log('📇 Starting incremental contact sync...');
+    if (lastSyncTime) {
+      console.log(`📇 Last sync: ${new Date(lastSyncTime).toISOString()}`);
+    }
+
+    // Check permission first
+    const hasPermission = await this.checkPermission();
+    if (!hasPermission) {
+      throw new Error('Contacts permission not granted');
+    }
 
     try {
-      // Extract unique phone numbers
-      const phoneNumbers = [...new Set(contactsToCheck.map(c => c.phone_number))];
-      console.log(`📇 Querying Supabase for ${phoneNumbers.length} unique phone numbers...`);
+      // Fetch contacts from device
+      console.log('📇 Fetching contacts from device...');
+      const result: GetContactsResult = await Contacts.getContacts({
+        projection: {
+          name: true,
+          phones: true,
+        }
+      });
 
-      // Query Supabase users table for matching phone numbers
-      // Use .in() to batch query all phone numbers at once
-      const client = await supabasePipeline.getDirectClient();
-      const { data: users, error } = await client
-        .from('users')
-        .select('id, phone_number, display_name, avatar_url')
-        .in('phone_number', phoneNumbers);
+      console.log(`📇 Fetched ${result.contacts.length} contacts from device`);
 
-      if (error) {
-        console.error('📇 Error querying Supabase users:', error);
-        throw error;
+      // Get existing contacts from SQLite for comparison
+      const existingContacts = await sqliteService.getAllContacts();
+      const existingPhones = new Set(existingContacts.map(c => c.phone_number));
+
+      // Transform to LocalContact format and filter for new/modified
+      const now = Date.now();
+      const newContacts: Omit<LocalContact, 'id'>[] = [];
+
+      for (const contact of result.contacts) {
+        const displayName = contact.name?.display || 'Unknown';
+        const phones = contact.phones || [];
+
+        for (const phoneEntry of phones) {
+          const rawPhone = phoneEntry.number;
+          if (!rawPhone) continue;
+
+          const normalizedPhone = normalizePhoneNumber(rawPhone);
+          if (!normalizedPhone) continue;
+
+          // Only add if it's a new contact (not in SQLite)
+          if (!existingPhones.has(normalizedPhone)) {
+            newContacts.push({
+              phone_number: normalizedPhone,
+              display_name: displayName,
+              email: null,
+              photo_uri: null,
+              synced_at: now
+            });
+          }
+        }
       }
 
-      if (!users || users.length === 0) {
-        console.log('📇 No registered users found in contacts');
+      console.log(`📇 Found ${newContacts.length} new contacts (${existingContacts.length} already synced)`);
+
+      // Save only new contacts to SQLite
+      if (newContacts.length > 0) {
+        await sqliteService.saveContacts(newContacts);
+        console.log(`✅ Saved ${newContacts.length} new contacts to SQLite`);
+      } else {
+        console.log('📇 No new contacts to sync');
+      }
+
+      // Return all contacts from SQLite
+      const allContacts = await sqliteService.getAllContacts();
+      console.log(`📇 Total contacts in SQLite: ${allContacts.length}`);
+
+      return allContacts;
+    } catch (error) {
+      console.error('📇 Error in incremental sync:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * ✅ PRODUCTION: WhatsApp-like background discovery with names
+   *
+   * Improvements over V2:
+   * - Preserves original contact names
+   * - Efficient MERGE (no full delete churn)
+   * - Exponential backoff on RPC failure (no immediate fallback)
+   * - Returns contact names with matches
+   *
+   * @param onProgress - Optional progress callback
+   * @param retryCount - Internal retry counter (default: 0)
+   * @returns Array of registered contacts
+   */
+  public async discoverInBackgroundV3(
+    onProgress?: (current: number, total: number) => void,
+    retryCount: number = 0
+  ): Promise<RegisteredContact[]> {
+    console.log('📇 [V3] Starting background discovery...');
+
+    try {
+      // Step 1: Get contacts from SQLite (already normalized to E.164)
+      const contacts = await sqliteService.getAllContacts();
+
+      if (contacts.length === 0) {
+        console.warn('⚠️ [V3] No contacts in SQLite - did you forget to call syncContacts() first?');
+        console.warn('⚠️ [V3] Discovery requires contacts to be synced from device before running');
+        console.log('📇 [V3] No contacts to discover');
         return [];
       }
 
-      console.log(`📇 Found ${users.length} registered users in contacts`);
-
-      // Create contact-user mappings
-      const now = Date.now();
-      const mappings: ContactUserMapping[] = users.map((user: any) => ({
-        contact_phone: user.phone_number,
-        user_id: user.id,
-        user_display_name: user.display_name || 'Unknown',
-        user_avatar_url: user.avatar_url || null,
-        mapped_at: now
+      // Prepare contacts with names for V3 RPC
+      const contactsWithNames = contacts.map(c => ({
+        phone: c.phone_number,
+        name: c.display_name
       }));
 
-      // Save mappings to SQLite
-      await sqliteService.saveContactUserMapping(mappings);
-      console.log(`✅ Saved ${mappings.length} contact-user mappings to SQLite`);
+      console.log(`📇 [V3] Loaded ${contactsWithNames.length} contacts from SQLite`);
 
-      // Get and return registered contacts (with full contact + user info)
+      // Step 2: Compute checksum (only phone numbers, not names)
+      const phoneNumbers = contacts.map(c => c.phone_number);
+      const currentChecksum = computeContactsChecksum(phoneNumbers);
+      const lastChecksum = await sqliteService.getContactsChecksum();
+
+      console.log(`📇 [V3] Checksum - Current: ${currentChecksum}, Last: ${lastChecksum}`);
+
+      // Step 3: Check if contacts changed
+      if (lastChecksum && currentChecksum === lastChecksum) {
+        console.log('📇 [V3] ✅ Contacts unchanged (checksum match), using cache');
+
+        // Return cached registered contacts
+        const registeredContacts = await sqliteService.getRegisteredContacts();
+        console.log(`📇 [V3] Returning ${registeredContacts.length} cached registered users`);
+
+        return registeredContacts;
+      }
+
+      console.log('📇 [V3] Contacts changed, starting discovery...');
+
+      // Step 4: Report progress
+      if (onProgress) {
+        onProgress(0, 1);
+      }
+
+      // Step 5: Call optimized RPC V3 with exponential backoff
+      const startTime = performance.now();
+      let matches: any[];
+
+      try {
+        matches = await contactMatchingService.discoverContactsV3(contactsWithNames);
+      } catch (rpcError) {
+        console.error(`📇 [V3] ❌ RPC failed (attempt ${retryCount + 1}):`, rpcError);
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+        const maxRetries = 5;
+        if (retryCount < maxRetries) {
+          const backoffMs = Math.pow(2, retryCount) * 1000;
+          console.log(`📇 [V3] ⏳ Retrying in ${backoffMs}ms...`);
+
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+
+          // Recursive retry with incremented count
+          return this.discoverInBackgroundV3(onProgress, retryCount + 1);
+        } else {
+          console.error(`📇 [V3] ❌ Max retries (${maxRetries}) exceeded, giving up`);
+          console.error(`📇 [V3] ⚠️ NOT falling back to batched GET (would block UI)`);
+
+          // Return cached data instead of failing completely
+          const cachedContacts = await sqliteService.getRegisteredContacts();
+          console.log(`📇 [V3] Returning ${cachedContacts.length} cached contacts (stale)`);
+          return cachedContacts;
+        }
+      }
+
+      const duration = Math.round(performance.now() - startTime);
+      console.log(`📇 [V3] RPC completed in ${duration}ms, found ${matches.length} matches`);
+
+      // Step 6: Save matches to SQLite
+      if (matches.length > 0) {
+        const now = Date.now();
+
+        // Save users first (for foreign key constraint)
+        for (const match of matches) {
+          try {
+            await sqliteService.saveUser({
+              id: match.user_id,
+              display_name: match.display_name || 'Unknown',
+              phone_number: match.phone_number,
+              avatar_url: match.avatar_url || null,
+              is_onboarded: 1,
+              created_at: now
+            });
+          } catch (error) {
+            console.error(`⚠️ [V3] Failed to save user ${match.user_id}:`, error);
+          }
+        }
+
+        // Create contact-user mappings with original contact names
+        const mappings: ContactUserMapping[] = matches.map(match => ({
+          contact_phone: match.phone_e164 || match.phone_number,
+          user_id: match.user_id,
+          user_display_name: match.display_name || 'Unknown',
+          user_avatar_url: match.avatar_url || null,
+          mapped_at: now
+        }));
+
+        // Save mappings
+        await sqliteService.saveContactUserMapping(mappings);
+        console.log(`✅ [V3] Saved ${mappings.length} contact-user mappings`);
+      }
+
+      // Step 7: Update checksum
+      await sqliteService.setContactsChecksum(currentChecksum);
+      await sqliteService.setLastDeltaSyncTime(Date.now());
+
+      console.log(`✅ [V3] Checksum updated: ${currentChecksum}`);
+
+      // Step 8: Report final progress
+      if (onProgress) {
+        onProgress(1, 1);
+      }
+
+      // Step 9: Return registered contacts from SQLite
       const registeredContacts = await sqliteService.getRegisteredContacts();
-      console.log(`📇 Returning ${registeredContacts.length} registered contacts`);
+      console.log(`✅ [V3] Discovery complete: ${registeredContacts.length} registered users`);
 
       return registeredContacts;
     } catch (error) {
-      console.error('📇 Error discovering registered users:', error);
-      throw error;
+      console.error('📇 [V3] ❌ Background discovery failed:', error);
+
+      // Return cached data instead of throwing
+      const cachedContacts = await sqliteService.getRegisteredContacts();
+      console.log(`📇 [V3] Returning ${cachedContacts.length} cached contacts (error fallback)`);
+      return cachedContacts;
     }
-  }
-
-  /**
-   * Full sync: Sync contacts + discover registered users
-   * 
-   * @returns Array of registered contacts
-   */
-  public async fullSync(): Promise<RegisteredContact[]> {
-    console.log('📇 Starting full contact sync...');
-
-    // Step 1: Sync contacts from device
-    const contacts = await this.syncContacts();
-
-    // Step 2: Discover registered users
-    const registeredContacts = await this.discoverRegisteredUsers(contacts);
-
-    console.log(`✅ Full sync complete: ${contacts.length} contacts, ${registeredContacts.length} registered users`);
-
-    return registeredContacts;
   }
 
   /**
@@ -328,4 +475,5 @@ class ContactsService {
 }
 
 export const contactsService = ContactsService.getInstance();
+
 

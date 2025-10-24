@@ -19,8 +19,7 @@ import { LocalContact, RegisteredContact } from '@/lib/sqliteServices_Refactored
  * - requestPermission: Request READ_CONTACTS permission
  * - syncContacts: Sync contacts from device
  * - loadFromSQLite: Load contacts from local database
- * - discoverUsers: Discover registered users
- * - fullSync: Complete sync (contacts + user discovery)
+ * - discoverInBackgroundV3: Discover registered users (V3 - production)
  * - searchContacts: Search contacts by name or phone
  * - clearContacts: Clear all contact data
  */
@@ -30,10 +29,18 @@ interface ContactsState {
   contacts: LocalContact[];
   registeredUsers: RegisteredContact[];
   isLoading: boolean;
+  isDiscovering: boolean; // V2: Background discovery state
   permissionGranted: boolean;
   lastSyncTime: number | null;
   error: string | null;
   isInitialized: boolean;
+
+  // Sync progress (for UI progress bar)
+  syncProgress: {
+    current: number;
+    total: number;
+    message: string;
+  } | null;
 
   // Actions
   setContacts: (contacts: LocalContact[]) => void;
@@ -49,8 +56,7 @@ interface ContactsState {
   checkPermission: () => Promise<boolean>;
   syncContacts: () => Promise<void>;
   loadFromSQLite: () => Promise<void>;
-  discoverUsers: () => Promise<void>;
-  fullSync: () => Promise<void>;
+  discoverInBackgroundV3: () => Promise<void>;
   searchContacts: (query: string) => LocalContact[];
   clearContacts: () => Promise<void>;
   initialize: () => Promise<void>;
@@ -63,10 +69,12 @@ export const useContactsStore = create<ContactsState>()(
       contacts: [],
       registeredUsers: [],
       isLoading: false,
+      isDiscovering: false,
       permissionGranted: false,
       lastSyncTime: null,
       error: null,
       isInitialized: false,
+      syncProgress: null,
 
       // Setters
       setContacts: (contacts) => {
@@ -239,88 +247,6 @@ export const useContactsStore = create<ContactsState>()(
         }
       },
 
-      // Discover which contacts are registered Confessr users
-      discoverUsers: async () => {
-        console.log('📇 Discovering registered users...');
-
-        try {
-          set({ isLoading: true, error: null });
-
-          // Get current contacts
-          const { contacts } = get();
-          
-          if (contacts.length === 0) {
-            console.log('📇 No contacts to check');
-            set({ isLoading: false });
-            return;
-          }
-
-          // Discover registered users
-          const registeredUsers = await contactsService.discoverRegisteredUsers(contacts);
-          
-          // Update state
-          set({ 
-            registeredUsers,
-            isLoading: false 
-          });
-
-          console.log(`✅ Found ${registeredUsers.length} registered users`);
-        } catch (error) {
-          console.error('📇 Error discovering users:', error);
-          set({ 
-            error: error instanceof Error ? error.message : 'Failed to discover users',
-            isLoading: false 
-          });
-          throw error;
-        }
-      },
-
-      // Full sync: Sync contacts + discover users
-      fullSync: async () => {
-        console.log('📇 Starting full sync...');
-
-        if (!contactsService.isAvailable()) {
-          const errorMsg = 'Contacts feature is only available on mobile devices';
-          console.log('📇', errorMsg);
-          set({ error: errorMsg });
-          return;
-        }
-
-        try {
-          set({ isLoading: true, error: null });
-
-          // Check permission first
-          const hasPermission = await get().checkPermission();
-          if (!hasPermission) {
-            throw new Error('Contacts permission not granted');
-          }
-
-          // Full sync (contacts + user discovery)
-          const registeredUsers = await contactsService.fullSync();
-          
-          // Load all contacts from SQLite
-          const contacts = await sqliteService.getAllContacts();
-          
-          // Update state
-          const now = Date.now();
-          set({ 
-            contacts,
-            registeredUsers,
-            lastSyncTime: now,
-            isLoading: false 
-          });
-
-          console.log(`✅ Full sync complete: ${contacts.length} contacts, ${registeredUsers.length} registered users`);
-        } catch (error) {
-          console.error('📇 Error during full sync:', error);
-          set({ 
-            error: error instanceof Error ? error.message : 'Failed to sync contacts',
-            isLoading: false 
-          });
-          throw error;
-        }
-      },
-
       // Search contacts by name or phone number
       searchContacts: (query: string) => {
         const { contacts } = get();
@@ -337,6 +263,47 @@ export const useContactsStore = create<ContactsState>()(
         );
       },
 
+      // ✅ PRODUCTION: Background discovery with names + exponential backoff
+      // Features: Preserves contact names, efficient MERGE, no batched GET fallback
+      discoverInBackgroundV3: async () => {
+        console.log('📇 [V3] Starting background discovery...');
+
+        try {
+          set({ isDiscovering: true, error: null });
+
+          // Call optimized discovery V3
+          const registeredUsers = await contactsService.discoverInBackgroundV3(
+            (current, total) => {
+              set({
+                syncProgress: {
+                  current,
+                  total,
+                  message: 'Discovering registered users...'
+                }
+              });
+            }
+          );
+
+          // Update state
+          set({
+            registeredUsers,
+            isDiscovering: false,
+            syncProgress: null,
+            lastSyncTime: Date.now()
+          });
+
+          console.log(`✅ [V3] Background discovery complete: ${registeredUsers.length} registered users`);
+        } catch (error) {
+          console.error('📇 [V3] ❌ Background discovery failed:', error);
+          set({
+            error: error instanceof Error ? error.message : 'Discovery failed',
+            isDiscovering: false,
+            syncProgress: null
+          });
+          // Don't throw - background discovery failure should not crash app
+        }
+      },
+
       // Clear all contact data
       clearContacts: async () => {
         console.log('📇 Clearing all contact data...');
@@ -346,58 +313,71 @@ export const useContactsStore = create<ContactsState>()(
 
           // Clear from SQLite
           await contactsService.clearAllContacts();
-          
+
           // Clear state
-          set({ 
+          set({
             contacts: [],
             registeredUsers: [],
             lastSyncTime: null,
-            isLoading: false 
+            isLoading: false
           });
 
           console.log('✅ All contact data cleared');
         } catch (error) {
           console.error('📇 Error clearing contacts:', error);
-          set({ 
+          set({
             error: error instanceof Error ? error.message : 'Failed to clear contacts',
-            isLoading: false 
+            isLoading: false
           });
           throw error;
         }
       },
 
-      // Initialize contacts store (load from SQLite + check permission)
+      // Initialize contacts store (instant load from SQLite ONLY - no network)
+      // ✅ WhatsApp-like: Render UI from local cache immediately
+      // ❌ NO auto-sync, NO permission requests, NO network calls
       initialize: async () => {
-        console.log('📇 Initializing contacts store...');
+        console.log('📇 [INIT] Starting contacts store initialization...');
 
         try {
           set({ isLoading: true, isInitialized: false, error: null });
 
           // Check if contacts feature is available
-          if (!contactsService.isAvailable()) {
-            console.log('📇 Contacts not available on this platform');
-            set({ 
-              isLoading: false, 
+          const isAvailable = contactsService.isAvailable();
+          console.log('📇 [INIT] Contacts available:', isAvailable);
+
+          if (!isAvailable) {
+            console.log('📇 [INIT] Contacts not available on this platform');
+            set({
+              isLoading: false,
               isInitialized: true,
-              permissionGranted: false 
+              permissionGranted: false
             });
             return;
           }
 
-          // Check permission status
+          // ✅ ONLY check permission status (no request)
           await get().checkPermission();
 
-          // Load contacts from SQLite (for offline access)
+          // ✅ INSTANT LOAD: Load contacts from SQLite (no network delay)
+          console.log('📇 [INIT] Loading contacts from SQLite...');
           await get().loadFromSQLite();
+          console.log('📇 [INIT] Loaded:', get().contacts.length, 'contacts,', get().registeredUsers.length, 'registered');
 
-          console.log('✅ Contacts store initialized');
-        } catch (error) {
-          console.error('📇 Error initializing contacts store:', error);
-          set({ 
-            error: error instanceof Error ? error.message : 'Failed to initialize contacts',
-          });
-        } finally {
+          // Mark as initialized - UI can now render
           set({ isLoading: false, isInitialized: true });
+
+          console.log('✅ [INIT] Contacts store initialized (<100ms target)');
+
+          // ❌ REMOVED: Auto-sync, permission requests, network calls
+          // Discovery happens later in background after first paint
+        } catch (error) {
+          console.error('📇 [INIT] ❌ Error:', error);
+          set({
+            error: error instanceof Error ? error.message : 'Failed to initialize contacts',
+            isLoading: false,
+            isInitialized: true
+          });
         }
       },
     }),

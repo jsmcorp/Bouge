@@ -1194,6 +1194,7 @@ class SupabasePipeline {
 
       return null;
     }
+
   }
 
   /**
@@ -1508,7 +1509,7 @@ class SupabasePipeline {
    */
   public async updateUser(userId: string, updates: Database['public']['Tables']['users']['Update']): Promise<{ data: any | null; error: any }> {
     return this.executeQuery(async () => {
-      const client = await this.getClient();
+      const client = await this.getClientWithValidToken();
       return client
         .from('users')
         .update(updates)
@@ -1595,14 +1596,96 @@ class SupabasePipeline {
 
 
 
+
   /**
    * Call RPC function
+   * CRITICAL: Uses getClientWithValidToken() to ensure auth session is ready before making RPC call
+   * This fixes first-time login flow where getClient() returns immediately but session is not ready yet
    */
   public async rpc<T>(functionName: string, params?: any): Promise<{ data: T | null; error: any }> {
-    return this.executeQuery(async () => {
-      const client = await this.getClient();
-      return client.rpc(functionName, params);
+    // First try the normal SDK path with our auth-ready client and bounded timeout
+    const primary = await this.executeQuery<T>(async () => {
+      const client = await this.getClientWithValidToken();
+      return (await client.rpc(functionName, params)) as { data: T; error: any };
     }, `RPC ${functionName}`);
+
+    if (!primary.error) return primary;
+
+    // If we hit a timeout or an auth hydration symptom, fall back to direct REST
+    const msg = String((primary.error && (primary.error.message || primary.error)) || '');
+    const shouldFallback =
+      msg.includes('timeout') ||
+      msg.includes('getSession') ||
+      msg.includes('setSession') ||
+      msg.includes('postgrest') ||
+      msg.includes('Network request failed');
+
+    if (shouldFallback) {
+      this.log(`⚡ rpc() fallback via direct REST for ${functionName} due to: ${msg.slice(0, 180)}`);
+      const direct = await this.rpcDirect<T>(functionName, params);
+      if (!direct.error) return direct;
+      this.log(`❌ rpcDirect fallback also failed for ${functionName}: ${stringifyError(direct.error)}`);
+      return direct;
+    }
+
+    return primary as { data: T | null; error: any };
+  }
+
+  /**
+   * Direct REST RPC call that bypasses the Supabase JS client's PostgREST wrapper.
+   * Used as a fallback during first-time auth hydration when SDK requests can hang.
+   */
+  public async rpcDirect<T>(functionName: string, params?: any, timeoutMs: number = this.config.sendTimeoutMs): Promise<{ data: T | null; error: any }> {
+    try {
+      if (!this.isInitialized || !this.supabaseUrl || !this.supabaseAnonKey) {
+        await this.initialize();
+      }
+
+      const token = this.lastKnownAccessToken;
+      if (!token) {
+        this.log(`⚠️ rpcDirect(${functionName}) aborted: no access token`);
+        return { data: null, error: new Error('No access token available for rpcDirect') };
+      }
+
+      const url = `${this.supabaseUrl}/rest/v1/rpc/${functionName}`;
+      const controller = new AbortController();
+      const abortId = setTimeout(() => controller.abort(), timeoutMs);
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'apikey': this.supabaseAnonKey,
+        'Authorization': `Bearer ${token}`,
+      };
+
+      this.log(`🔗 rpcDirect POST ${url}`);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(params || {}),
+        signal: controller.signal,
+      });
+      clearTimeout(abortId);
+
+      if (!res.ok) {
+        let text = '';
+        try { text = await res.text(); } catch (_) {}
+        const message = text || res.statusText || `HTTP ${res.status}`;
+        this.log(`❌ rpcDirect error ${res.status}: ${message.substring(0, 200)}`);
+        return { data: null, error: new Error(message) };
+      }
+
+      let json: any = null;
+      try { json = await res.json(); } catch (_) { json = null; }
+      return { data: json as T, error: null };
+    } catch (e: any) {
+      // Normalize AbortError into timeout message for consistency
+      if (e?.name === 'AbortError') {
+        return { data: null, error: new Error(`rpcDirect ${functionName} timeout after ${timeoutMs}ms`) };
+      }
+      this.log(`💥 rpcDirect exception for ${functionName}: ${stringifyError(e)}`);
+      return { data: null, error: e };
+    }
   }
 
   /**
@@ -2715,7 +2798,65 @@ class SupabasePipeline {
       this.log('✅ Token exists, using cached token (no proactive refresh)');
     }
 
-    this.log('🔑 Returning client with best available token');
+    // CRITICAL FIX: Ensure the Supabase client's internal session is ready
+    // Root cause: Having tokens in pipeline cache doesn't mean the Supabase client's internal auth state is ready
+    // During first-time login, the client's onAuthStateChange event hasn't fired yet
+    // This causes RPC calls to hang waiting for the internal auth state
+    // Solution: Check if client has an internal session, and if not, set it up with cached tokens
+    try {
+      this.log('🔑 Checking if Supabase client has internal session...');
+      const getSessionPromise = this.client!.auth.getSession();
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('getSession timeout')), 3000)
+      );
+
+      let sessionData: any;
+      try {
+        const result: any = await Promise.race([getSessionPromise, timeoutPromise]);
+        sessionData = result?.data;
+      } catch (e: any) {
+        if (e && e.message === 'getSession timeout') {
+          this.log('⚠️ getSession timed out after 3s, will attempt to set session');
+          sessionData = null;
+        } else {
+          throw e;
+        }
+      }
+
+      const session = sessionData?.session;
+
+      if (!session && this.lastKnownAccessToken && this.lastKnownRefreshToken) {
+        this.log('⚠️ Client has no internal session, setting it up with cached tokens');
+
+        const setSessionPromise = this.client!.auth.setSession({
+          access_token: this.lastKnownAccessToken,
+          refresh_token: this.lastKnownRefreshToken,
+        });
+        const setSessionTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('setSession timeout')), 5000)
+        );
+
+        try {
+          await Promise.race([setSessionPromise, setSessionTimeout]);
+          this.log('✅ Client internal session established successfully');
+        } catch (e: any) {
+          if (e && e.message === 'setSession timeout') {
+            this.log('⚠️ setSession timed out after 5s, proceeding anyway');
+          } else {
+            this.log('⚠️ setSession failed:', e?.message || String(e));
+          }
+        }
+      } else if (session) {
+        this.log('✅ Client already has internal session ready');
+      } else {
+        this.log('⚠️ No cached tokens available to set up internal session');
+      }
+    } catch (error) {
+      this.log('⚠️ Failed to check/set client session:', stringifyError(error));
+      // Continue anyway - the RPC call will fail with proper error if session is not ready
+    }
+
+    this.log('🔑 Returning client with internal session ready');
     return this.client!;
   }
 

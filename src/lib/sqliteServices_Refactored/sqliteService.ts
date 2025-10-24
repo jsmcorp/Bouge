@@ -10,6 +10,7 @@ import { MemberOperations } from './memberOperations';
 import { ConfessionOperations } from './confessionOperations';
 import { UtilityOperations } from './utilityOperations';
 import { ContactOperations } from './contactOperations';
+import { SyncMetadataOperations } from './syncMetadataOperations';
 import {
   LocalMessage,
   LocalPoll,
@@ -41,6 +42,7 @@ class SQLiteService {
   private confessionOps: ConfessionOperations;
   private utilityOps: UtilityOperations;
   private contactOps: ContactOperations;
+  private syncMetadataOps: SyncMetadataOperations;
 
   private constructor() {
     this.dbManager = new DatabaseManager();
@@ -55,6 +57,7 @@ class SQLiteService {
     this.confessionOps = new ConfessionOperations(this.dbManager);
     this.utilityOps = new UtilityOperations(this.dbManager);
     this.contactOps = new ContactOperations(this.dbManager);
+    this.syncMetadataOps = new SyncMetadataOperations(this.dbManager);
   }
 
   public static getInstance(): SQLiteService {
@@ -339,6 +342,115 @@ class SQLiteService {
    */
   public async getContactsLastSyncTime(): Promise<number | null> {
     return this.contactOps.getLastSyncTime();
+  }
+
+  // ============================================
+  // SYNC METADATA OPERATIONS
+  // ============================================
+
+  /**
+   * Get last full sync timestamp
+   */
+  public async getLastFullSyncTime(): Promise<number | null> {
+    return this.syncMetadataOps.getLastFullSyncTime();
+  }
+
+  /**
+   * Set last full sync timestamp
+   */
+  public async setLastFullSyncTime(timestamp: number): Promise<void> {
+    return this.syncMetadataOps.setLastFullSyncTime(timestamp);
+  }
+
+  /**
+   * Get last incremental sync timestamp
+   */
+  public async getLastIncrementalSyncTime(): Promise<number | null> {
+    return this.syncMetadataOps.getLastIncrementalSyncTime();
+  }
+
+  /**
+   * Set last incremental sync timestamp
+   */
+  public async setLastIncrementalSyncTime(timestamp: number): Promise<void> {
+    return this.syncMetadataOps.setLastIncrementalSyncTime(timestamp);
+  }
+
+  /**
+   * Get total contacts synced count
+   */
+  public async getTotalContactsSynced(): Promise<number> {
+    return this.syncMetadataOps.getTotalContactsSynced();
+  }
+
+  /**
+   * Set total contacts synced count
+   */
+  public async setTotalContactsSynced(count: number): Promise<void> {
+    return this.syncMetadataOps.setTotalContactsSynced(count);
+  }
+
+  /**
+   * Get device contact count from last sync
+   */
+  public async getLastDeviceContactCount(): Promise<number> {
+    return this.syncMetadataOps.getLastDeviceContactCount();
+  }
+
+  /**
+   * Set device contact count
+   */
+  public async setLastDeviceContactCount(count: number): Promise<void> {
+    return this.syncMetadataOps.setLastDeviceContactCount(count);
+  }
+
+  /**
+   * Check if this is the first sync
+   */
+  public async isFirstSync(): Promise<boolean> {
+    return this.syncMetadataOps.isFirstSync();
+  }
+
+  /**
+   * Get contacts checksum (for delta sync)
+   */
+  public async getContactsChecksum(): Promise<string | null> {
+    return this.syncMetadataOps.getContactsChecksum();
+  }
+
+  /**
+   * Set contacts checksum
+   */
+  public async setContactsChecksum(checksum: string): Promise<void> {
+    return this.syncMetadataOps.setContactsChecksum(checksum);
+  }
+
+  /**
+   * Get last delta sync timestamp
+   */
+  public async getLastDeltaSyncTime(): Promise<number | null> {
+    return this.syncMetadataOps.getLastDeltaSyncTime();
+  }
+
+  /**
+   * Set last delta sync timestamp
+   */
+  public async setLastDeltaSyncTime(timestamp: number): Promise<void> {
+    return this.syncMetadataOps.setLastDeltaSyncTime(timestamp);
+  }
+
+  /**
+   * Get all sync metadata (for debugging)
+   */
+  public async getAllSyncMetadata(): Promise<Record<string, string>> {
+    return this.syncMetadataOps.getAllSyncMetadata();
+  }
+
+  /**
+   * Clear all sync metadata (for testing/reset)
+   */
+  public async clearAllSyncMetadata(): Promise<void> {
+    return this.syncMetadataOps.clearAllSyncMetadata();
   }
 }
 

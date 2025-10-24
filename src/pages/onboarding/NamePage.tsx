@@ -20,9 +20,14 @@ export default function OnboardingNamePage() {
 
     setIsLoading(true);
     try {
-      await updateUser({ display_name: name.trim() });
+      // Update user with name and mark as onboarded
+      await updateUser({
+        display_name: name.trim(),
+        is_onboarded: true
+      });
       toast.success('Name saved successfully!');
-      navigate('/onboarding/avatar');
+      // Skip avatar page and go directly to setup
+      navigate('/setup');
     } catch (error) {
       toast.error('Failed to save name. Please try again.');
     } finally {

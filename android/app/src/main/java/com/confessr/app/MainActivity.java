@@ -9,6 +9,7 @@ import android.os.Bundle;
 
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.Plugin;
+import getcapacitor.community.contacts.ContactsPlugin;
 
 import java.util.ArrayList;
 
@@ -19,6 +20,7 @@ public class MainActivity extends BridgeActivity {
   @Override
   public void onCreate(Bundle savedInstanceState) {
     registerPlugin(TruecallerPlugin.class);
+    registerPlugin(ContactsPlugin.class);
     super.onCreate(savedInstanceState);
     createDefaultNotificationChannel();
   }

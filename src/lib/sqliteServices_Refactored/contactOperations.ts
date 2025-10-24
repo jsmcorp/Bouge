@@ -15,8 +15,11 @@ export class ContactOperations {
 
   /**
    * Save multiple contacts to SQLite (batch insert/update)
-   * Uses INSERT OR REPLACE to handle duplicates based on phone_number UNIQUE constraint
-   * 
+   * Uses executeSet with transaction for optimal performance
+   *
+   * Performance: Batch writes in a single transaction avoid per-row open/commit overhead
+   * This is the recommended pattern for Capacitor SQLite plugin
+   *
    * @param contacts - Array of contacts to save
    */
   public async saveContacts(contacts: Omit<LocalContact, 'id'>[]): Promise<void> {
@@ -28,25 +31,30 @@ export class ContactOperations {
       return;
     }
 
-    console.log(`📇 Saving ${contacts.length} contacts to SQLite...`);
+    console.log(`📇 Saving ${contacts.length} contacts to SQLite (batched transaction)...`);
+    const startTime = performance.now();
 
-    // Batch insert for performance
-    const sql = `
-      INSERT OR REPLACE INTO contacts (phone_number, display_name, email, photo_uri, synced_at)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-
-    for (const contact of contacts) {
-      await db.run(sql, [
+    // Prepare batch statements for executeSet
+    const statements = contacts.map(contact => ({
+      statement: `
+        INSERT OR REPLACE INTO contacts (phone_number, display_name, email, photo_uri, synced_at)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      values: [
         contact.phone_number,
         contact.display_name,
         contact.email,
         contact.photo_uri,
         contact.synced_at
-      ]);
-    }
+      ]
+    }));
 
-    console.log(`✅ Saved ${contacts.length} contacts to SQLite`);
+    // Execute all inserts in a single transaction
+    // The 'true' parameter enables transaction mode for atomic batch execution
+    await db.executeSet(statements, true);
+
+    const duration = Math.round(performance.now() - startTime);
+    console.log(`✅ Saved ${contacts.length} contacts to SQLite in ${duration}ms (batched)`);
   }
 
   /**
@@ -112,8 +120,9 @@ export class ContactOperations {
 
   /**
    * Save contact-to-user mappings (batch insert/update)
+   * Uses executeSet with transaction for optimal performance
    * Maps device contacts to registered Confessr users
-   * 
+   *
    * @param mappings - Array of contact-user mappings
    */
   public async saveContactUserMapping(mappings: ContactUserMapping[]): Promise<void> {
@@ -125,25 +134,30 @@ export class ContactOperations {
       return;
     }
 
-    console.log(`📇 Saving ${mappings.length} contact-user mappings...`);
+    console.log(`📇 Saving ${mappings.length} contact-user mappings (batched transaction)...`);
+    const startTime = performance.now();
 
-    const sql = `
-      INSERT OR REPLACE INTO contact_user_mapping 
-      (contact_phone, user_id, user_display_name, user_avatar_url, mapped_at)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-
-    for (const mapping of mappings) {
-      await db.run(sql, [
+    // Prepare batch statements for executeSet
+    const statements = mappings.map(mapping => ({
+      statement: `
+        INSERT OR REPLACE INTO contact_user_mapping
+        (contact_phone, user_id, user_display_name, user_avatar_url, mapped_at)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      values: [
         mapping.contact_phone,
         mapping.user_id,
         mapping.user_display_name,
         mapping.user_avatar_url,
         mapping.mapped_at
-      ]);
-    }
+      ]
+    }));
 
-    console.log(`✅ Saved ${mappings.length} contact-user mappings`);
+    // Execute all inserts in a single transaction
+    await db.executeSet(statements, true);
+
+    const duration = Math.round(performance.now() - startTime);
+    console.log(`✅ Saved ${mappings.length} contact-user mappings in ${duration}ms (batched)`);
   }
 
   /**

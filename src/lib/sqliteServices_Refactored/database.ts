@@ -1,7 +1,6 @@
 import { CapacitorSQLite, SQLiteConnection, SQLiteDBConnection } from '@capacitor-community/sqlite';
 import { Capacitor } from '@capacitor/core';
 import { initEncryptionSecret } from '../sqliteSecret';
-import { LocalUser, LocalMessage } from './types';
 
 export class DatabaseManager {
   private sqlite: SQLiteConnection;
@@ -43,12 +42,12 @@ export class DatabaseManager {
       
       /* 5️⃣ Open the encrypted database with secret mode */
       await this.openEncryptedDatabase();
-      
+
       this.isInitialized = true;
       console.log('✅ Encrypted SQLite ready');
-      
-      // Run a test to verify the database is working
-      await this.testLocalStorage();
+
+      // ❌ REMOVED: Test inserts during boot (adds I/O overhead)
+      // Database is verified by schema creation success
     } catch (err) {
       console.error('💥 SQLite init failed:', err);
       throw err;
@@ -66,15 +65,19 @@ export class DatabaseManager {
         this.dbVersion,
         false  // not readonly
       );
-      
+
       // Open the unencrypted database
       await unencryptedConn.open();
       console.log('✅ Unencrypted database created');
-      
+
       // Close the unencrypted connection
       await unencryptedConn.close();
       console.log('✅ Unencrypted connection closed');
-      
+
+      // Remove the connection from the pool before creating encrypted connection
+      await this.sqlite.closeConnection(this.dbName, false);
+      console.log('✅ Unencrypted connection removed from pool');
+
       /* 4️⃣ Now encrypt the database */
       console.log('🔐 Encrypting database...');
       const encryptConn = await this.sqlite.createConnection(
@@ -84,14 +87,18 @@ export class DatabaseManager {
         this.dbVersion,
         false  // not readonly
       );
-      
+
       // Open to encrypt the database
       await encryptConn.open();
       console.log('✅ Database encrypted successfully');
-      
+
       // Close the encryption connection
       await encryptConn.close();
       console.log('✅ Encryption connection closed');
+
+      // Remove the encryption connection from the pool
+      await this.sqlite.closeConnection(this.dbName, false);
+      console.log('✅ Encryption connection removed from pool');
     } catch (error: any) {
       console.error('❌ Error creating/encrypting database:', error);
       throw new Error(`Failed to create/encrypt database: ${error.message || error}`);
@@ -275,6 +282,13 @@ export class DatabaseManager {
         FOREIGN KEY (user_id) REFERENCES users(id)
       );
 
+      /* Sync metadata - tracks sync state and timestamps */
+      CREATE TABLE IF NOT EXISTS sync_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
       /* indexes */
       CREATE INDEX IF NOT EXISTS idx_msg_group_date_asc
         ON messages(group_id, created_at ASC);
@@ -388,100 +402,9 @@ export class DatabaseManager {
     }
   }
 
-  private async testLocalStorage(): Promise<void> {
-    try {
-      console.log('🧪 Testing local storage...');
-      
-      // Test user data
-      const testUser: LocalUser = {
-        id: 'test-user-id',
-        display_name: 'Test User',
-        phone_number: '+1234567890',
-        avatar_url: null,
-        is_onboarded: 1,
-        created_at: Date.now()
-      };
-      
-      // Save test user
-      const sql = `
-        INSERT OR REPLACE INTO users (id, display_name, phone_number, avatar_url, is_onboarded, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `;
-      await this.db!.run(sql, [
-        testUser.id,
-        testUser.display_name,
-        testUser.phone_number,
-        testUser.avatar_url,
-        testUser.is_onboarded,
-        testUser.created_at
-      ]);
-      console.log('✅ Test user saved');
-      
-      // Retrieve test user
-      const result = await this.db!.query('SELECT * FROM users WHERE id = ?', [testUser.id]);
-      const retrievedUser = result.values?.[0] || null;
-      console.log('📋 Retrieved user:', retrievedUser);
-      
-      if (retrievedUser && retrievedUser.id === testUser.id) {
-        console.log('✅ Local storage test passed! Data was successfully saved and retrieved.');
-      } else {
-        console.error('❌ Local storage test failed! Retrieved data does not match saved data.');
-      }
-      
-      // Test message data
-      const testMessage: Omit<LocalMessage, 'local_id'> = {
-        id: 'test-message-id',
-        group_id: 'test-group-id',
-        user_id: 'test-user-id',
-        content: 'Test message content',
-        is_ghost: 0,
-        message_type: 'text',
-        category: null,
-        parent_id: null,
-        image_url: null,
-        created_at: Date.now()
-      };
-      
-      // Save test message
-      await this.db!.run(
-        `INSERT OR REPLACE INTO messages
-         (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        [
-          testMessage.id,
-          testMessage.group_id,
-          testMessage.user_id,
-          testMessage.content,
-          testMessage.is_ghost,
-          testMessage.message_type,
-          testMessage.category,
-          testMessage.parent_id,
-          testMessage.image_url,
-          testMessage.created_at,
-          testMessage.updated_at || null,
-          testMessage.deleted_at || null
-        ]
-      );
-      console.log('✅ Test message saved');
-      
-      // Retrieve test message
-      const msgResult = await this.db!.query(
-        `SELECT * FROM messages WHERE group_id = ? ORDER BY created_at ASC LIMIT 50 OFFSET 0`,
-        [testMessage.group_id]
-      );
-      const messages = msgResult.values || [];
-      console.log('📋 Retrieved messages:', messages);
-      
-      if (messages.length > 0 && messages.some(m => m.id === testMessage.id)) {
-        console.log('✅ Message storage test passed! Message was successfully saved and retrieved.');
-      } else {
-        console.error('❌ Message storage test failed! Could not retrieve the saved message.');
-      }
-      
-    } catch (error) {
-      console.error('❌ Local storage test failed with error:', error);
-    }
-  }
+  // ❌ REMOVED: testLocalStorage() method
+  // This was adding unnecessary I/O during boot with test inserts
+  // Database integrity is verified by successful schema creation
 
   public async isReady(): Promise<boolean> {
     return this.isInitialized && this.db !== null;
@@ -505,6 +428,10 @@ export class DatabaseManager {
     if (!this.db) {
       throw new Error('Database connection not available');
     }
+    return this.db;
+  }
+
+  public getDb(): SQLiteDBConnection | null {
     return this.db;
   }
 
