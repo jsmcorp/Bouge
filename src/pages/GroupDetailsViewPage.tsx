@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import {
@@ -15,16 +15,49 @@ import {
   LogOut,
   Bell,
   Ghost,
-  Check
+  Check,
+  Edit2,
+  MoreVertical,
+  UserMinus
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { FixedSizeList as List } from 'react-window';
+import AutoSizer from 'react-virtualized-auto-sizer';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useChatStore } from '@/store/chatStore';
+import { useAuthStore } from '@/store/authStore';
 import { toast } from 'sonner';
 
 export default function GroupDetailsViewPage() {
@@ -40,10 +73,26 @@ export default function GroupDetailsViewPage() {
     fetchGroupMedia,
     isLoadingGroupDetails,
     mainChatGhostMode,
-    toggleMainChatGhostMode
+    toggleMainChatGhostMode,
+    updateGroup,
+    removeGroupMember
   } = useChatStore();
 
+  const { user } = useAuthStore();
+
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [memberToRemove, setMemberToRemove] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Check if current user is admin
+  const isAdmin = activeGroup && user && (
+    activeGroup.created_by === user.id ||
+    groupMembers.some(m => m.user_id === user.id && m.role === 'admin')
+  );
 
   useEffect(() => {
     if (groupId) {
@@ -57,10 +106,17 @@ export default function GroupDetailsViewPage() {
 
   useEffect(() => {
     if (activeGroup?.id) {
+      console.log('[GroupDetailsViewPage] Fetching members for group:', activeGroup.id);
       fetchGroupMembers(activeGroup.id);
       fetchGroupMedia(activeGroup.id);
     }
   }, [activeGroup?.id, fetchGroupMembers, fetchGroupMedia]);
+
+  // Debug logging
+  useEffect(() => {
+    console.log('[GroupDetailsViewPage] groupMembers updated:', groupMembers);
+    console.log('[GroupDetailsViewPage] groupMembers.length:', groupMembers.length);
+  }, [groupMembers]);
 
   const handleBack = () => {
     if (groupId) {
@@ -89,8 +145,65 @@ export default function GroupDetailsViewPage() {
   };
 
   const handleAddMember = () => {
-    // TODO: Navigate to add member page
-    toast.info('Add member functionality coming soon');
+    // Navigate to contact selection page for adding members
+    if (activeGroup) {
+      navigate(`/groups/${activeGroup.id}/add-members`);
+    }
+  };
+
+  const handleEditGroup = () => {
+    if (activeGroup) {
+      setEditName(activeGroup.name);
+      setEditDescription(activeGroup.description || '');
+      setShowEditDialog(true);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!activeGroup || !editName.trim()) {
+      toast.error('Group name is required');
+      return;
+    }
+
+    setIsUpdating(true);
+    try {
+      await updateGroup(activeGroup.id, {
+        name: editName.trim(),
+        description: editDescription.trim() || undefined,
+      });
+      toast.success('Group updated successfully');
+      setShowEditDialog(false);
+    } catch (error) {
+      console.error('Error updating group:', error);
+      toast.error('Failed to update group');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAvatarUpload = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !activeGroup) return;
+
+    // TODO: Implement file upload to storage and update group avatar
+    toast.info('Avatar upload functionality coming soon');
+  };
+
+  const handleRemoveMember = async (userId: string) => {
+    if (!activeGroup) return;
+
+    try {
+      await removeGroupMember(activeGroup.id, userId);
+      toast.success('Member removed successfully');
+      setMemberToRemove(null);
+    } catch (error) {
+      console.error('Error removing member:', error);
+      toast.error('Failed to remove member');
+    }
   };
 
   const photoMedia = groupMedia.filter(m => m.type === 'photo');
@@ -109,16 +222,29 @@ export default function GroupDetailsViewPage() {
   return (
     <div className="h-screen w-screen bg-background flex flex-col">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center px-4 py-3 border-b border-border/50 bg-background/95 backdrop-blur-sm sticky top-0 z-10">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleBack}
-          className="mr-3 h-10 w-10"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </Button>
-        <h1 className="font-semibold text-lg">Group Info</h1>
+      <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border/50 bg-background/95 backdrop-blur-sm sticky top-0 z-10">
+        <div className="flex items-center">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleBack}
+            className="mr-3 h-10 w-10"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </Button>
+          <h1 className="font-semibold text-lg">Group Info</h1>
+        </div>
+        {isAdmin && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleEditGroup}
+            className="gap-2"
+          >
+            <Edit2 className="w-4 h-4" />
+            Edit
+          </Button>
+        )}
       </div>
 
       {/* Content */}
@@ -140,13 +266,25 @@ export default function GroupDetailsViewPage() {
                     {activeGroup.name.charAt(0).toUpperCase()}
                   </AvatarFallback>
                 </Avatar>
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  className="absolute bottom-0 right-0 h-10 w-10 rounded-full shadow-md border-2 border-background"
-                >
-                  <Camera className="w-5 h-5" />
-                </Button>
+                {isAdmin && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      size="icon"
+                      onClick={handleAvatarUpload}
+                      className="absolute bottom-0 right-0 h-10 w-10 rounded-full shadow-md border-2 border-background"
+                    >
+                      <Camera className="w-5 h-5" />
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleFileChange}
+                    />
+                  </>
+                )}
               </div>
 
               {/* Group Name */}
@@ -264,22 +402,24 @@ export default function GroupDetailsViewPage() {
               <h3 className="text-base font-semibold">{groupMembers.length} participants</h3>
             </div>
 
-            {/* Add Member Button */}
-            <button
-              onClick={handleAddMember}
-              className="w-full flex items-center gap-4 p-3 hover:bg-muted/50 rounded-lg transition-colors mb-2"
-            >
-              <div className="flex items-center justify-center w-12 h-12 bg-green-500/10 rounded-full">
-                <UserPlus className="w-5 h-5 text-green-600 dark:text-green-500" />
-              </div>
-              <span className="text-sm font-medium text-green-600 dark:text-green-500">Add participant</span>
-            </button>
+            {/* Add Member Button - Only for admins */}
+            {isAdmin && (
+              <button
+                onClick={handleAddMember}
+                className="w-full flex items-center gap-4 p-3 hover:bg-muted/50 rounded-lg transition-colors mb-2"
+              >
+                <div className="flex items-center justify-center w-12 h-12 bg-green-500/10 rounded-full">
+                  <UserPlus className="w-5 h-5 text-green-600 dark:text-green-500" />
+                </div>
+                <span className="text-sm font-medium text-green-600 dark:text-green-500">Add participant</span>
+              </button>
+            )}
 
-            {/* Members List */}
-            <div className="space-y-1">
-              {isLoadingGroupDetails ? (
-                // Loading skeleton
-                Array.from({ length: 3 }).map((_, i) => (
+            {/* Members List - Virtualized */}
+            {isLoadingGroupDetails ? (
+              // Loading skeleton
+              <div className="space-y-1">
+                {Array.from({ length: 3 }).map((_, i) => (
                   <div key={i} className="flex items-center gap-4 p-3 animate-pulse">
                     <div className="w-12 h-12 bg-muted rounded-full" />
                     <div className="flex-1 space-y-2">
@@ -287,42 +427,83 @@ export default function GroupDetailsViewPage() {
                       <div className="h-3 bg-muted rounded w-1/2" />
                     </div>
                   </div>
-                ))
-              ) : (
-                groupMembers.map((member) => (
-                  <div
-                    key={member.id}
-                    className="flex items-center gap-4 p-3 hover:bg-muted/30 rounded-lg transition-colors"
-                  >
-                    <Avatar className="w-12 h-12">
-                      <AvatarImage src={member.user.avatar_url || ''} />
-                      <AvatarFallback className="text-base font-medium">
-                        {member.user.display_name.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
+                ))}
+              </div>
+            ) : groupMembers.length > 0 ? (
+              <div style={{ height: Math.min(groupMembers.length * 72, 400) }}>
+                <AutoSizer>
+                  {({ height, width }) => (
+                    <List
+                      height={height}
+                      itemCount={groupMembers.length}
+                      itemSize={72}
+                      width={width}
+                    >
+                      {({ index, style }) => {
+                        const member = groupMembers[index];
+                        const isCreator = activeGroup?.created_by === member.user_id;
+                        const isCurrentUser = user?.id === member.user_id;
+                        const canManage = isAdmin && !isCurrentUser && !isCreator;
 
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <p className="text-sm font-medium truncate">
-                          {member.user.display_name}
-                        </p>
-                        {member.role === 'admin' && (
-                          <Badge variant="secondary" className="text-xs px-2 py-0.5 gap-1">
-                            <Crown className="w-3 h-3" />
-                            Admin
-                          </Badge>
-                        )}
-                      </div>
+                        return (
+                          <div style={style} className="px-1">
+                            <div className="flex items-center gap-4 p-3 hover:bg-muted/30 rounded-lg transition-colors">
+                              <Avatar className="w-12 h-12">
+                                <AvatarImage src={member.user.avatar_url || ''} />
+                                <AvatarFallback className="text-base font-medium">
+                                  {member.user.display_name.charAt(0).toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
 
-                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                        <Phone className="w-3 h-3" />
-                        <span>{member.user.phone_number}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <p className="text-sm font-medium truncate">
+                                    {member.user.display_name}
+                                    {isCurrentUser && ' (You)'}
+                                  </p>
+                                  {member.role === 'admin' && (
+                                    <Badge variant="secondary" className="text-xs px-2 py-0.5 gap-1">
+                                      <Crown className="w-3 h-3" />
+                                      Admin
+                                    </Badge>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                  <Phone className="w-3 h-3" />
+                                  <span>{member.user.phone_number}</span>
+                                </div>
+                              </div>
+
+                              {canManage && (
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button variant="ghost" size="icon" className="h-8 w-8">
+                                      <MoreVertical className="w-4 h-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem
+                                      onClick={() => setMemberToRemove(member.user_id)}
+                                      className="text-destructive focus:text-destructive"
+                                    >
+                                      <UserMinus className="w-4 h-4 mr-2" />
+                                      Remove from group
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </List>
+                  )}
+                </AutoSizer>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-8">No members found</p>
+            )}
           </div>
 
           <Separator className="my-2" />
@@ -380,6 +561,74 @@ export default function GroupDetailsViewPage() {
           </div>
         </div>
       </ScrollArea>
+
+      {/* Edit Group Dialog */}
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Edit Group</DialogTitle>
+            <DialogDescription>
+              Update your group's name and description
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="name">Group Name</Label>
+              <Input
+                id="name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Enter group name"
+                maxLength={50}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="description">Description (Optional)</Label>
+              <Textarea
+                id="description"
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                placeholder="Enter group description"
+                rows={3}
+                maxLength={200}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowEditDialog(false)}
+              disabled={isUpdating}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSaveEdit} disabled={isUpdating || !editName.trim()}>
+              {isUpdating ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Member Confirmation Dialog */}
+      <AlertDialog open={!!memberToRemove} onOpenChange={() => setMemberToRemove(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Member</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove this member from the group? They will no longer have access to group messages.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => memberToRemove && handleRemoveMember(memberToRemove)}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

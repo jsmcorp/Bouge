@@ -1324,6 +1324,35 @@ class SupabasePipeline {
   }
 
   /**
+   * Remove a member from a group (bounded timeout via executeQuery)
+   */
+  public async removeGroupMember(groupId: string, userId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('group_members')
+        .delete()
+        .eq('group_id', groupId)
+        .eq('user_id', userId);
+    }, 'remove group member');
+  }
+
+  /**
+   * Update group details (bounded timeout via executeQuery)
+   */
+  public async updateGroup(groupId: string, updates: { name?: string; description?: string; avatar_url?: string }): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('groups')
+        .update(updates)
+        .eq('id', groupId)
+        .select()
+        .single();
+    }, 'update group');
+  }
+
+  /**
    * Fetch a user profile by id (bounded timeout)
    */
   public async fetchUserProfile(userId: string): Promise<{ data: any | null; error: any }> {

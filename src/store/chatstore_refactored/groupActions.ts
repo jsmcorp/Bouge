@@ -17,6 +17,9 @@ export interface GroupActions {
   fetchGroupMembers: (groupId: string) => Promise<void>;
   fetchGroupMedia: (groupId: string) => Promise<void>;
   openGroupDetailsMobile: (groupId: string) => void;
+  updateGroup: (groupId: string, updates: { name?: string; description?: string; avatar_url?: string }) => Promise<void>;
+  addGroupMember: (groupId: string, userId: string) => Promise<void>;
+  removeGroupMember: (groupId: string, userId: string) => Promise<void>;
 }
 
 export const createGroupActions = (set: any, get: any): GroupActions => ({
@@ -170,24 +173,41 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
 
       const { data, error } = await supabasePipeline.fetchGroupMembers(groupId);
 
+      console.log('[GroupActions] fetchGroupMembers - groupId:', groupId);
+      console.log('[GroupActions] fetchGroupMembers - data:', data);
+      console.log('[GroupActions] fetchGroupMembers - error:', error);
+
       if (error) throw error;
 
-      const members: GroupMember[] = (data || []).map((member) => ({
-        id: `${member.group_id}-${member.user_id}`,
-        user_id: member.user_id,
-        group_id: member.group_id,
-        role: 'participant', // Default role, will be enhanced later
-        joined_at: member.joined_at,
-        user: {
-          display_name: member.users.display_name,
-          phone_number: member.users.phone_number,
-          avatar_url: member.users.avatar_url,
-        },
-      }));
+      // Get the current group to determine who is the creator (admin)
+      const currentGroup = get().groups.find((g: Group) => g.id === groupId);
+      const creatorId = currentGroup?.created_by;
+
+      console.log('[GroupActions] fetchGroupMembers - creatorId:', creatorId);
+
+      const members: GroupMember[] = (data || []).map((member) => {
+        // Determine role: creator is admin, others are participants
+        const role = member.user_id === creatorId ? 'admin' : 'participant';
+
+        return {
+          id: `${member.group_id}-${member.user_id}`,
+          user_id: member.user_id,
+          group_id: member.group_id,
+          role,
+          joined_at: member.joined_at || new Date().toISOString(),
+          user: {
+            display_name: member.users?.display_name || 'Unknown User',
+            phone_number: member.users?.phone_number || '',
+            avatar_url: member.users?.avatar_url || null,
+          },
+        };
+      });
+
+      console.log('[GroupActions] fetchGroupMembers - mapped members:', members);
 
       set({ groupMembers: members });
     } catch (error) {
-      console.error('Error fetching group members:', error);
+      console.error('[GroupActions] Error fetching group members:', error);
       set({ groupMembers: [] });
     } finally {
       set({ isLoadingGroupDetails: false });
@@ -249,5 +269,82 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
     // Load group members and media
     get().fetchGroupMembers(groupId);
     get().fetchGroupMedia(groupId);
+  },
+
+  updateGroup: async (groupId: string, updates: { name?: string; description?: string; avatar_url?: string }) => {
+    try {
+      const { error } = await supabasePipeline.updateGroup(groupId, updates);
+
+      if (error) throw error;
+
+      // Update the group in the store
+      const updatedGroups = get().groups.map((g: Group) =>
+        g.id === groupId ? { ...g, ...updates } : g
+      );
+      set({ groups: updatedGroups });
+
+      // Update active group if it's the one being updated
+      const { activeGroup } = get();
+      if (activeGroup && activeGroup.id === groupId) {
+        set({ activeGroup: { ...activeGroup, ...updates } });
+      }
+
+      // Update SQLite if available
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+      if (isSqliteReady) {
+        const group = updatedGroups.find((g: Group) => g.id === groupId);
+        if (group) {
+          await sqliteService.saveGroup({
+            id: group.id,
+            name: group.name,
+            description: group.description || null,
+            invite_code: group.invite_code || 'offline',
+            created_by: group.created_by || '',
+            created_at: new Date(group.created_at).getTime(),
+            last_sync_timestamp: Date.now(),
+            avatar_url: group.avatar_url || null,
+            is_archived: 0
+          });
+        }
+      }
+
+      console.log('✅ Group updated successfully');
+    } catch (error) {
+      console.error('Error updating group:', error);
+      throw error;
+    }
+  },
+
+  addGroupMember: async (groupId: string, userId: string) => {
+    try {
+      const { error } = await supabasePipeline.addGroupMember(groupId, userId);
+
+      if (error) throw error;
+
+      // Refresh the members list
+      await get().fetchGroupMembers(groupId);
+
+      console.log('✅ Member added successfully');
+    } catch (error) {
+      console.error('Error adding group member:', error);
+      throw error;
+    }
+  },
+
+  removeGroupMember: async (groupId: string, userId: string) => {
+    try {
+      const { error } = await supabasePipeline.removeGroupMember(groupId, userId);
+
+      if (error) throw error;
+
+      // Refresh the members list
+      await get().fetchGroupMembers(groupId);
+
+      console.log('✅ Member removed successfully');
+    } catch (error) {
+      console.error('Error removing group member:', error);
+      throw error;
+    }
   },
 });
