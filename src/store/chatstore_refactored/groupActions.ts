@@ -36,30 +36,19 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
 
       if (error) throw error;
 
-      // Add user as group member via direct client
-      const client = await supabasePipeline.getDirectClient();
-      const { error: memberError } = await client
-        .from('group_members')
-        .insert({
-          group_id: data.id,
-          user_id: user.id,
-        });
-
-      if (memberError) throw memberError;
+      // Add user as group member via pipeline (bounded timeout)
+      const { error: memberAddError } = await supabasePipeline.addGroupMember(data.id, user.id);
+      if (memberAddError) throw memberAddError;
 
       // Add selected contacts as group members (only registered users)
       if (selectedContacts && selectedContacts.length > 0) {
-        const registeredContacts = selectedContacts.filter(c => c.isRegistered && c.userId);
+        const registeredContacts = selectedContacts.filter(c => c.isRegistered && c.userId && c.userId !== user.id);
 
         if (registeredContacts.length > 0) {
-          const memberInserts = registeredContacts.map(contact => ({
-            group_id: data.id,
-            user_id: contact.userId!,
-          }));
-
-          const { error: bulkMemberError } = await client
-            .from('group_members')
-            .insert(memberInserts);
+          const { error: bulkMemberError } = await supabasePipeline.addGroupMembers(
+            data.id,
+            registeredContacts.map(c => c.userId!)
+          );
 
           if (bulkMemberError) {
             console.error('Error adding selected members:', bulkMemberError);
@@ -93,12 +82,7 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
         const { data: { user } } = await supabasePipeline.getUser();
         if (user) {
           // Get user profile data
-          const client = await supabasePipeline.getDirectClient();
-          const { data: userProfile } = await client
-            .from('users')
-            .select('*')
-            .eq('id', user.id)
-            .single();
+          const { data: userProfile } = await supabasePipeline.fetchUserProfile(user.id);
 
           if (userProfile) {
             await sqliteService.saveUser({

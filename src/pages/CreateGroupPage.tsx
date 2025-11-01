@@ -75,6 +75,7 @@ export default function CreateGroupPage() {
       // Navigate to the new group
       navigate(`/groups/${group.id}`, { replace: true });
     } catch (error) {
+      console.error('CreateGroupPage: group creation failed', error);
       toast.error('Failed to create group. Please try again.');
     } finally {
       setIsLoading(false);

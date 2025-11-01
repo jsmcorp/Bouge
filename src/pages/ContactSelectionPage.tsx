@@ -1,10 +1,12 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Search, RefreshCw, Share2, Check, UserCircle } from 'lucide-react';
+import { ArrowLeft, Search, RefreshCw, Share2, Check, UserCircle, CheckCircle2, Circle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import type { VariableSizeList as RVList, ListOnItemsRenderedProps, ListChildComponentProps } from 'react-window';
+import { VariableSizeList } from 'react-window';
 import { useContactsStore } from '@/store/contactsStore';
 import { PermissionRequest } from '@/components/contacts/PermissionRequest';
 import { RegisteredContact, LocalContact } from '@/lib/sqliteServices_Refactored/types';
@@ -38,8 +40,9 @@ export default function ContactSelectionPage() {
   const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Get previously selected contacts from navigation state
-  const previouslySelected = (location.state as any)?.selectedContacts as SelectedContact[] || [];
+  // Get previously selected contacts from navigation state (typed)
+  const navState = location.state as { selectedContacts?: SelectedContact[] } | null;
+  const previouslySelected = navState?.selectedContacts ?? [];
 
   // Initialize selected contacts from previous selection
   useEffect(() => {
@@ -47,7 +50,7 @@ export default function ContactSelectionPage() {
       const ids = new Set(previouslySelected.map(c => c.contactId));
       setSelectedContactIds(ids);
     }
-  }, []);
+  }, [previouslySelected]);
 
   // Filter contacts based on search query
   const filteredContacts = useMemo(() => {
@@ -86,6 +89,110 @@ export default function ContactSelectionPage() {
     return { registeredContacts: registered, nonRegisteredContacts: nonRegistered };
   }, [filteredContacts, registeredUserMap]);
 
+  // Group contacts alphabetically (A-Z) by display name
+  const groupedRegistered = useMemo(() => {
+    const groups: Record<string, LocalContact[]> = {};
+    for (const c of registeredContacts) {
+      const letter = (c.display_name?.[0] || '#').toUpperCase();
+      const key = /[A-Z]/.test(letter) ? letter : '#';
+      (groups[key] ||= []).push(c);
+    }
+    Object.keys(groups).forEach(k => groups[k].sort((a, b) => a.display_name.localeCompare(b.display_name)));
+    return groups;
+  }, [registeredContacts]);
+
+  const groupedNonRegistered = useMemo(() => {
+    const groups: Record<string, LocalContact[]> = {};
+    for (const c of nonRegisteredContacts) {
+      const letter = (c.display_name?.[0] || '#').toUpperCase();
+      const key = /[A-Z]/.test(letter) ? letter : '#';
+      (groups[key] ||= []).push(c);
+    }
+    Object.keys(groups).forEach(k => groups[k].sort((a, b) => a.display_name.localeCompare(b.display_name)));
+    return groups;
+  }, [nonRegisteredContacts]);
+
+  // Build a single virtualized list of items: section titles, letters, and contacts
+  type Item =
+    | { type: 'section'; title: string }
+    | { type: 'letter'; letter: string; group: 'registered' | 'non' }
+    | { type: 'contact'; contact: LocalContact; registeredUser?: RegisteredContact; group: 'registered' | 'non' };
+
+  const listItems: Item[] = useMemo(() => {
+    const items: Item[] = [];
+    if (registeredContacts.length > 0) {
+      items.push({ type: 'section', title: `On Bouge (${registeredContacts.length})` });
+      const letters = Object.keys(groupedRegistered).sort();
+      for (const letter of letters) {
+        items.push({ type: 'letter', letter, group: 'registered' });
+        for (const c of groupedRegistered[letter]) {
+          items.push({ type: 'contact', contact: c, registeredUser: registeredUserMap.get(c.id), group: 'registered' });
+        }
+      }
+    }
+    if (nonRegisteredContacts.length > 0) {
+      items.push({ type: 'section', title: `Invite to Bouge (${nonRegisteredContacts.length})` });
+      const letters = Object.keys(groupedNonRegistered).sort();
+      for (const letter of letters) {
+        items.push({ type: 'letter', letter, group: 'non' });
+        for (const c of groupedNonRegistered[letter]) {
+          items.push({ type: 'contact', contact: c, group: 'non' });
+        }
+      }
+    }
+    return items;
+  }, [registeredContacts, groupedRegistered, nonRegisteredContacts, groupedNonRegistered, registeredUserMap]);
+
+  // Map registered letters to their first index in the flat list for fast scroll
+  const registeredLetterIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < listItems.length; i++) {
+      const it = listItems[i];
+      if (it.type === 'letter' && it.group === 'registered' && !map.has(it.letter)) {
+        map.set(it.letter, i);
+      }
+    }
+    return map;
+  }, [listItems]);
+
+  // Virtual row sizing
+  const SECTION_HEIGHT = 40;
+  const LETTER_HEIGHT = 32;
+  const CONTACT_HEIGHT = 60;
+  const getItemSize = (index: number) => {
+    const it = listItems[index];
+    if (it.type === 'section') return SECTION_HEIGHT;
+    if (it.type === 'letter') return LETTER_HEIGHT;
+    return CONTACT_HEIGHT;
+  };
+
+  // Virtual list ref and scroll helper
+  const listRef = useRef<RVList | null>(null);
+  const scrollToLetter = (letter: string) => {
+    const idx = registeredLetterIndexMap.get(letter);
+    if (idx != null && listRef.current) listRef.current.scrollToItem(idx, 'start');
+  };
+
+  const presentLetters = useMemo(() => Object.keys(groupedRegistered).sort(), [groupedRegistered]);
+  const [visibleIndex, setVisibleIndex] = useState(0);
+  const currentLetter = useMemo(() => {
+    for (let i = visibleIndex; i >= 0; i--) {
+      const it = listItems[i];
+      if (it?.type === 'letter' && it.group === 'registered') return it.letter;
+      if (it?.type === 'section' && it.title.startsWith('Invite')) break;
+    }
+    return null as string | null;
+  }, [visibleIndex, listItems]);
+
+
+
+  // Keyboard accessibility for selection rows
+  const onRowKeyDown = (e: React.KeyboardEvent, contactId: number) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleToggleContact(contactId);
+    }
+  };
   const handleBack = () => {
     navigate(-1);
   };
@@ -137,13 +244,13 @@ export default function ContactSelectionPage() {
 
   const handleDone = () => {
     const selected: SelectedContact[] = [];
-    
+
     selectedContactIds.forEach(contactId => {
       const contact = contacts.find(c => c.id === contactId);
       if (!contact) return;
 
       const registeredUser = registeredUserMap.get(contactId);
-      
+
       selected.push({
         contactId: contact.id,
         phoneNumber: contact.phone_number,
@@ -176,23 +283,13 @@ export default function ContactSelectionPage() {
           <div className="flex-1">
             <h1 className="text-lg font-semibold">Select Contacts</h1>
             <p className="text-xs text-muted-foreground">
-              {selectedContactIds.size > 0 
+              {selectedContactIds.size > 0
                 ? `${selectedContactIds.size} selected`
                 : `${registeredContacts.length} on Bouge`
               }
             </p>
           </div>
         </div>
-        {selectedContactIds.size > 0 && (
-          <Button
-            onClick={handleDone}
-            size="sm"
-            className="bg-green-600 hover:bg-green-700"
-          >
-            <Check className="h-4 w-4 mr-2" />
-            Done
-          </Button>
-        )}
       </div>
 
       {/* Permission Request Screen */}
@@ -209,7 +306,7 @@ export default function ContactSelectionPage() {
       ) : (
         <>
           {/* Search Bar & Sync */}
-          <div className="px-4 py-3 space-y-3 border-b">
+          <div className="px-4 py-3 space-y-3 border-b sticky top-0 z-20 bg-background">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
@@ -219,7 +316,7 @@ export default function ContactSelectionPage() {
                 className="pl-10 h-11"
               />
             </div>
-            
+
             <div className="flex items-center justify-between">
               <p className="text-sm text-muted-foreground">
                 {filteredContacts.length} contact{filteredContacts.length !== 1 ? 's' : ''}
@@ -246,8 +343,8 @@ export default function ContactSelectionPage() {
             </div>
           )}
 
-          {/* Contact List */}
-          <ScrollArea className="flex-1">
+          {/* Contact List (virtualized) */}
+          <div className="flex-1 min-h-0">
             {isLoading ? (
               <div className="space-y-4 p-4">
                 {/* Progress Bar */}
@@ -285,90 +382,114 @@ export default function ContactSelectionPage() {
                 </div>
               </div>
             ) : (
-              <div className="pb-4">
-                {/* Registered Contacts Section */}
-                {registeredContacts.length > 0 && (
-                  <div>
-                    <div className="px-4 py-2 bg-muted/50 sticky top-0 z-10">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                        On Bouge ({registeredContacts.length})
-                      </p>
-                    </div>
-                    <div className="px-4 py-2 space-y-1">
-                      {registeredContacts.map(contact => {
-                        const registeredUser = registeredUserMap.get(contact.id);
-                        const isSelected = selectedContactIds.has(contact.id);
-                        
-                        return (
-                          <button
-                            key={contact.id}
-                            onClick={() => handleToggleContact(contact.id)}
-                            className="w-full flex items-center space-x-3 p-2 rounded-lg hover:bg-muted/50 transition-colors"
-                          >
-                            <div className={`flex items-center justify-center w-5 h-5 rounded border-2 flex-shrink-0 ${
-                              isSelected 
-                                ? 'bg-green-600 border-green-600' 
-                                : 'border-muted-foreground/30'
-                            }`}>
-                              {isSelected && <Check className="h-3 w-3 text-white" />}
-                            </div>
-                            <div className="flex items-center justify-center w-12 h-12 bg-green-500/20 rounded-full flex-shrink-0">
-                              {registeredUser?.user_avatar_url ? (
-                                <img
-                                  src={registeredUser.user_avatar_url}
-                                  alt={contact.display_name}
-                                  className="w-12 h-12 rounded-full object-cover"
-                                />
-                              ) : (
-                                <UserCircle className="w-12 h-12 text-green-600" />
-                              )}
-                            </div>
-                            <div className="flex-1 text-left min-w-0">
-                              <p className="text-sm font-medium truncate">{contact.display_name}</p>
-                              <p className="text-xs text-muted-foreground truncate">{contact.phone_number}</p>
-                            </div>
-                          </button>
-                        );
-                      })}
+              <div className="h-full relative">
+                {currentLetter && (
+                  <div className="absolute top-0 left-0 right-0 z-10 pointer-events-none">
+                    <div className="px-4 py-2 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                      <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">{currentLetter}</p>
                     </div>
                   </div>
                 )}
-
-                {/* Non-Registered Contacts Section */}
-                {nonRegisteredContacts.length > 0 && (
-                  <div className="mt-2">
-                    <div className="px-4 py-2 bg-muted/50 sticky top-0 z-10">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                        Invite to Bouge ({nonRegisteredContacts.length})
-                      </p>
-                    </div>
-                    <div className="px-4 py-2 space-y-1">
-                      {nonRegisteredContacts.map(contact => (
-                        <div
-                          key={contact.id}
-                          className="flex items-center space-x-3 p-2 rounded-lg hover:bg-muted/30 transition-colors"
-                        >
-                          <div className="flex items-center justify-center w-12 h-12 bg-muted rounded-full flex-shrink-0">
-                            <UserCircle className="w-12 h-12 text-muted-foreground" />
-                          </div>
-                          <div className="flex-1 text-left min-w-0">
-                            <p className="text-sm font-medium truncate">{contact.display_name}</p>
-                            <p className="text-xs text-muted-foreground truncate">{contact.phone_number}</p>
-                          </div>
-                          <Button
-                            variant="default"
-                            size="sm"
-                            onClick={() => handleInvite(contact)}
-                            className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white"
-                          >
-                            <Share2 className="h-4 w-4 mr-1" />
-                            Invite
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <AutoSizer>
+                  {({ height, width }) => (
+                    <VariableSizeList
+                      ref={listRef}
+                      height={height}
+                      width={width}
+                      itemCount={listItems.length}
+                      itemSize={getItemSize}
+                      estimatedItemSize={CONTACT_HEIGHT}
+                      onItemsRendered={(info: ListOnItemsRenderedProps) => setVisibleIndex(info.visibleStartIndex)}
+                    >
+                      {({ index, style }: ListChildComponentProps) => {
+                        const it = listItems[index];
+                        if (it.type === 'section') {
+                          return (
+                            <div style={style} className="px-4 py-2 bg-muted/50">
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{it.title}</p>
+                            </div>
+                          );
+                        }
+                        if (it.type === 'letter') {
+                          return (
+                            <div style={style} className="px-4 py-2 bg-background">
+                              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">{it.letter}</p>
+                            </div>
+                          );
+                        }
+                        if (it.type === 'contact') {
+                          const contact = it.contact;
+                          const isSelected = selectedContactIds.has(contact.id);
+                          if (it.group === 'registered') {
+                            const registeredUser = it.registeredUser;
+                            return (
+                              <div style={style} className="w-full">
+                                <div
+                                  role="checkbox"
+                                  aria-checked={isSelected}
+                                  tabIndex={0}
+                                  onKeyDown={(e) => onRowKeyDown(e, contact.id)}
+                                  onClick={() => handleToggleContact(contact.id)}
+                                  className={`group w-full flex items-center justify-between px-4 py-3 transition-colors min-h-[56px] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                                    isSelected ? 'bg-green-50 dark:bg-green-950/20' : 'hover:bg-muted/50 active:bg-muted/70'
+                                  }`}
+                                >
+                                  <div className="flex items-center space-x-3 min-w-0">
+                                    <div className="w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                                      {registeredUser?.user_avatar_url ? (
+                                        <img src={registeredUser.user_avatar_url} alt={contact.display_name} className="w-12 h-12 object-cover" />
+                                      ) : (
+                                        <UserCircle className="w-7 h-7 text-green-600" />
+                                      )}
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="text-[15px] font-medium truncate">{contact.display_name}</p>
+                                      <p className="text-xs text-muted-foreground truncate">{contact.phone_number}</p>
+                                    </div>
+                                  </div>
+                                  <div className="ml-3 flex-shrink-0">
+                                    {isSelected ? (
+                                      <CheckCircle2 className="h-5 w-5 text-green-600 transition-opacity" />
+                                    ) : (
+                                      <Circle className="h-5 w-5 text-muted-foreground/50 transition-opacity" />
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+                          // non-registered contact row
+                          return (
+                            <div style={style} className="w-full">
+                              <div className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors min-h-[56px]">
+                                <div className="flex items-center space-x-3 min-w-0">
+                                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
+                                    <UserCircle className="w-7 h-7 text-muted-foreground" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="text-[15px] font-medium truncate">{contact.display_name}</p>
+                                    <p className="text-xs text-muted-foreground truncate">{contact.phone_number}</p>
+                                  </div>
+                                </div>
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  onClick={() => handleInvite(contact)}
+                                  className="flex-shrink-0"
+                                  aria-label={`Invite ${contact.display_name} to Bouge`}
+                                >
+                                  <Share2 className="h-4 w-4 mr-1" />
+                                  Invite
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }}
+                    </VariableSizeList>
+                  )}
+                </AutoSizer>
 
                 {/* Empty State */}
                 {filteredContacts.length === 0 && !isLoading && (
@@ -395,7 +516,35 @@ export default function ContactSelectionPage() {
                 )}
               </div>
             )}
-          </ScrollArea>
+          </div>
+          {/* Fast scroll index (registered letters) */}
+          {presentLetters.length > 0 && (
+            <div className="fixed right-1 top-28 bottom-24 z-30 flex flex-col items-center justify-center gap-1 pointer-events-auto">
+              {presentLetters.map((letter) => (
+                <button
+                  key={letter}
+                  onClick={() => scrollToLetter(letter)}
+                  className="text-[11px] leading-none px-1.5 py-1 rounded text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`Jump to ${letter}`}
+                >
+                  {letter}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* FAB - confirm selection */}
+          {selectedContactIds.size > 0 && (
+            <Button
+              type="button"
+              onClick={handleDone}
+              className="fixed bottom-6 right-5 h-14 w-14 rounded-full shadow-lg bg-green-600 hover:bg-green-700 text-white"
+              aria-label={`Add ${selectedContactIds.size} contact${selectedContactIds.size !== 1 ? 's' : ''}`}
+            >
+              <Check className="h-6 w-6" />
+            </Button>
+          )}
+
         </>
       )}
     </div>
