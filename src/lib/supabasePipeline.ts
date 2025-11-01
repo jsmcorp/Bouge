@@ -1296,6 +1296,50 @@ class SupabasePipeline {
   }
 
   /**
+   * Add a single member to a group (bounded timeout via executeQuery)
+   */
+  public async addGroupMember(groupId: string, userId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('group_members')
+        .insert({ group_id: groupId, user_id: userId })
+        .select()
+        .single();
+    }, 'add group member');
+  }
+
+  /**
+   * Add multiple members to a group in bulk (bounded timeout via executeQuery)
+   */
+  public async addGroupMembers(groupId: string, userIds: string[]): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      const inserts = userIds.map(uid => ({ group_id: groupId, user_id: uid }));
+      return client
+        .from('group_members')
+        .insert(inserts)
+        .select();
+    }, 'add group members');
+  }
+
+  /**
+   * Fetch a user profile by id (bounded timeout)
+   */
+  public async fetchUserProfile(userId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+    }, 'fetch user profile');
+  }
+
+
+
+  /**
    * Join group by invite code
    */
   public async joinGroup(inviteCode: string, userId: string): Promise<{ data: any | null; error: any }> {
