@@ -997,7 +997,7 @@ class SupabasePipeline {
       // Add timeout protection to prevent hanging
       const sessionPromise = client.auth.getSession();
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Session fetch timeout')), 3000);
+        setTimeout(() => reject(new Error('Session fetch timeout')), 8000);
       });
 
       const result = await Promise.race([sessionPromise, timeoutPromise]);
