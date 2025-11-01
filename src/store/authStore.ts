@@ -198,12 +198,62 @@ export const useAuthStore = create<AuthState>()(
 
           // Check Supabase Auth session (works for all users including Truecaller)
           console.log('🔑 Checking Supabase Auth session...');
-          const { data: { session }, error: sessionError } = await supabasePipeline.getSession();
+
+          let session: any = null;
+          let sessionError: any = null;
+          try {
+            const res = await supabasePipeline.getSession();
+            session = res?.data?.session || null;
+            sessionError = (res as any)?.error || null;
+          } catch (e: any) {
+            sessionError = e;
+          }
 
           if (sessionError) {
-            console.error('❌ Session fetch error:', sessionError);
-            set({ user: null, session: null });
-            return;
+            const msg = String(sessionError?.message || sessionError);
+            if (/timeout/i.test(msg)) {
+              console.warn('⏳ Session fetch timed out, attempting recovery from persisted tokens...');
+
+              // Try to recover from persisted Supabase auth storage
+              try {
+                const supaUrl = (import.meta as any).env.VITE_SUPABASE_URL as string;
+                if (supaUrl) {
+                  const ref = new URL(supaUrl).host.split('.')[0];
+                  const key = `sb-${ref}-auth-token`;
+                  const raw = localStorage.getItem(key);
+                  if (raw) {
+                    const parsed = JSON.parse(raw);
+                    const persistedSession = parsed?.currentSession || parsed?.session || null;
+                    if (persistedSession?.access_token) {
+                      (supabasePipeline as any).updateSessionCache?.(persistedSession);
+                      await supabasePipeline.recoverSession();
+                    }
+                  }
+                }
+              } catch (e) {
+                console.warn('⚠️ Persisted session recovery failed:', e);
+              }
+
+              // Retry once after recovery attempt
+              try {
+                const retry = await supabasePipeline.getSession();
+                const retrySession = retry?.data?.session;
+                if (retrySession?.user) {
+                  console.log('👤 Active session recovered for user:', retrySession.user.id);
+                  set({ session: retrySession });
+                  await get().syncUserProfile(retrySession.user);
+                  return;
+                }
+              } catch {}
+
+              // Do not clear user on timeout — allow app to proceed while SDK hydrates
+              console.warn('⏳ Proceeding without clearing user due to session timeout; SDK will hydrate later');
+              return;
+            } else {
+              console.error('❌ Session fetch error:', sessionError);
+              set({ user: null, session: null });
+              return;
+            }
           }
 
           if (session?.user) {

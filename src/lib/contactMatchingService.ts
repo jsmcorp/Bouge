@@ -158,10 +158,20 @@ class ContactMatchingService {
       console.log('📇 [V3] Calling discover_contacts_v3 RPC...');
       console.log(`📇 [V3] Sample contacts:`, contacts.slice(0, 3));
 
-      // Call optimized RPC function with JSONB using supabasePipeline.rpc() for timeout protection
-      const { data, error } = await supabasePipeline.rpc<any[]>('discover_contacts_v3', {
-        p_contacts: contacts
-      });
+      // Prefer direct REST RPC during first-time setup to avoid SDK hydration delays
+      const preferDirect = localStorage.getItem('setup_complete') !== 'true';
+      let rpcResult: { data: any[] | null; error: any };
+      if (preferDirect) {
+        console.log('📇 [V3] Using primary-direct REST RPC for first-flow discovery...');
+        rpcResult = await supabasePipeline.rpcDirect<any[]>('discover_contacts_v3', { p_contacts: contacts });
+        if (rpcResult.error) {
+          console.warn('⚠️ [V3] Direct RPC failed, falling back to SDK rpc...', rpcResult.error);
+          rpcResult = await supabasePipeline.rpc<any[]>('discover_contacts_v3', { p_contacts: contacts });
+        }
+      } else {
+        rpcResult = await supabasePipeline.rpc<any[]>('discover_contacts_v3', { p_contacts: contacts });
+      }
+      const { data, error } = rpcResult;
 
       if (error) {
         console.error('❌ [V3] RPC error:', error);

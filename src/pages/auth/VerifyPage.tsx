@@ -50,15 +50,6 @@ export default function VerifyPage() {
       }
 
       if (data.session && data.user) {
-        // Ingest the session into the pipeline immediately to avoid any event race
-        // Use internal cache updater to store tokens and user id
-        (supabasePipeline as any).updateSessionCache?.(data.session);
-
-        // Best-effort: kick the client to hydrate its internal session, but don't block on it
-        try {
-          const client = await supabasePipeline.getDirectClient();
-          await client.auth.getSession();
-        } catch {}
 
         // Ensure the application user row exists before proceeding
         try {

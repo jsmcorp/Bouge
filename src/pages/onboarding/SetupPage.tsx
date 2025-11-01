@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Check, Loader2, Users, Shield } from 'lucide-react';
 import { useContactsStore } from '../../store/contactsStore';
 import { useAuthStore } from '../../store/authStore';
-import { supabasePipeline } from '../../lib/supabasePipeline';
+
 
 
 interface SetupStep {
@@ -96,14 +96,12 @@ export const SetupPage: React.FC = () => {
       return;
     }
 
-    // Prefer token-gated start: proceed if we already have an access token snapshot
-    const tokenSnap = (supabasePipeline as any)?.getCachedAccessToken?.();
-    if (!authInitialized && !tokenSnap) {
-      console.log('📇 Waiting for auth or token before starting setup...');
+    if (!authInitialized) {
+      console.log('📇 Waiting for auth before starting setup...');
       return;
     }
 
-    console.log('📇 Auth/token ready, starting first-time setup flow...');
+    console.log('📇 Auth ready, starting first-time setup flow...');
     // Start setup automatically with a small delay to ensure page is mounted
     // This prevents permission dialogs from being skipped
     const timer = setTimeout(() => {
