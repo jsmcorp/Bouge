@@ -19,7 +19,9 @@ export interface GroupActions {
   openGroupDetailsMobile: (groupId: string) => void;
   updateGroup: (groupId: string, updates: { name?: string; description?: string; avatar_url?: string }) => Promise<void>;
   addGroupMember: (groupId: string, userId: string) => Promise<void>;
+  addGroupMembers: (groupId: string, userIds: string[]) => Promise<void>;
   removeGroupMember: (groupId: string, userId: string) => Promise<void>;
+  leaveGroup: (groupId: string, userId: string) => Promise<void>;
 }
 
 export const createGroupActions = (set: any, get: any): GroupActions => ({
@@ -344,6 +346,48 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
       console.log('✅ Member removed successfully');
     } catch (error) {
       console.error('Error removing group member:', error);
+      throw error;
+    }
+  },
+
+  addGroupMembers: async (groupId: string, userIds: string[]) => {
+    try {
+      const { error } = await supabasePipeline.addGroupMembers(groupId, userIds);
+
+      if (error) throw error;
+
+      // Refresh the members list
+      await get().fetchGroupMembers(groupId);
+
+      console.log(`✅ ${userIds.length} member(s) added successfully`);
+    } catch (error) {
+      console.error('Error adding group members:', error);
+      throw error;
+    }
+  },
+
+  leaveGroup: async (groupId: string, userId: string) => {
+    try {
+      const { error } = await supabasePipeline.leaveGroup(groupId, userId);
+
+      if (error) throw error;
+
+      // Remove the group from the local groups array
+      const updatedGroups = get().groups.filter((g: Group) => g.id !== groupId);
+      set({ groups: updatedGroups });
+
+      // Clear active group if it's the one being left
+      const { activeGroup } = get();
+      if (activeGroup && activeGroup.id === groupId) {
+        set({ activeGroup: null });
+      }
+
+      // Note: SQLite cleanup will happen on next sync
+      // The group will no longer appear in the user's groups list
+
+      console.log('✅ Left group successfully');
+    } catch (error) {
+      console.error('Error leaving group:', error);
       throw error;
     }
   },

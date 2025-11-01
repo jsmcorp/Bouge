@@ -1338,6 +1338,20 @@ class SupabasePipeline {
   }
 
   /**
+   * Leave a group (remove current user from group_members)
+   */
+  public async leaveGroup(groupId: string, userId: string): Promise<{ data: any | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClient();
+      return client
+        .from('group_members')
+        .delete()
+        .eq('group_id', groupId)
+        .eq('user_id', userId);
+    }, 'leave group');
+  }
+
+  /**
    * Update group details (bounded timeout via executeQuery)
    */
   public async updateGroup(groupId: string, updates: { name?: string; description?: string; avatar_url?: string }): Promise<{ data: any | null; error: any }> {

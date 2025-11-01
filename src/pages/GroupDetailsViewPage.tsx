@@ -75,7 +75,8 @@ export default function GroupDetailsViewPage() {
     mainChatGhostMode,
     toggleMainChatGhostMode,
     updateGroup,
-    removeGroupMember
+    removeGroupMember,
+    leaveGroup
   } = useChatStore();
 
   const { user } = useAuthStore();
@@ -86,6 +87,8 @@ export default function GroupDetailsViewPage() {
   const [editDescription, setEditDescription] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<string | null>(null);
+  const [showExitDialog, setShowExitDialog] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Check if current user is admin
@@ -140,8 +143,26 @@ export default function GroupDetailsViewPage() {
   };
 
   const handleExitGroup = () => {
-    // TODO: Implement leave group functionality
-    toast.info('Leave group functionality coming soon');
+    setShowExitDialog(true);
+  };
+
+  const handleConfirmExit = async () => {
+    if (!activeGroup || !user) return;
+
+    setIsLeaving(true);
+    try {
+      await leaveGroup(activeGroup.id, user.id);
+      toast.success('You have left the group');
+
+      // Navigate back to dashboard
+      navigate('/dashboard', { replace: true });
+    } catch (error) {
+      console.error('Error leaving group:', error);
+      toast.error('Failed to leave group. Please try again.');
+    } finally {
+      setIsLeaving(false);
+      setShowExitDialog(false);
+    }
   };
 
   const handleAddMember = () => {
@@ -625,6 +646,28 @@ export default function GroupDetailsViewPage() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Exit Group Confirmation Dialog */}
+      <AlertDialog open={showExitDialog} onOpenChange={setShowExitDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Exit Group</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to leave this group? You will no longer receive messages from this group.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isLeaving}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmExit}
+              disabled={isLeaving}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isLeaving ? 'Leaving...' : 'Exit Group'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
