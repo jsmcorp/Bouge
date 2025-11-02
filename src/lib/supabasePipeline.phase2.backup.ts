@@ -160,103 +160,23 @@ class SupabasePipeline {
   }
 
   /**
-   * PHASE 3: Unified session refresh method
-   * Consolidates all session refresh logic into one method with configurable options
-   * Replaces: refreshSessionDirect, refreshSessionInBackground, refreshQuickBounded, refreshSession
-   */
-  private async refreshSessionUnified(options: {
-    timeout?: number;
-    background?: boolean;
-  } = {}): Promise<boolean> {
-    const { timeout = 5000, background = false } = options;
-    const started = Date.now();
-    const mode = background ? 'background' : 'direct';
-
-    this.log(`🔄 refreshSessionUnified(${mode}, timeout=${timeout}ms) start`);
-
-    try {
-      const client = await this.getClient();
-
-      // Strategy 1: Try setSession() with cached tokens first (most reliable)
-      if (this.sessionState.accessToken && this.sessionState.refreshToken) {
-        this.log(`🔄 Attempting setSession() with cached tokens`);
-        try {
-          const setSessionPromise = client.auth.setSession({
-            access_token: this.sessionState.accessToken,
-            refresh_token: this.sessionState.refreshToken
-          });
-
-          const setSessionTimeout = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('setSession timeout')), Math.min(timeout, 3000));
-          });
-
-          const setSessionResult = await Promise.race([setSessionPromise, setSessionTimeout]);
-
-          if (setSessionResult?.data?.session) {
-            // Update session cache (includes realtime token update)
-            this.updateSessionCache(setSessionResult.data.session);
-            this.sessionState.consecutiveFailures = 0;
-
-            const took = Date.now() - started;
-            this.log(`🔄 refreshSessionUnified: ✅ SUCCESS via setSession() in ${took}ms`);
-            return true;
-          }
-        } catch (setSessionError: any) {
-          if (setSessionError?.message !== 'setSession timeout') {
-            this.log(`🔄 setSession() error: ${stringifyError(setSessionError)}`);
-          }
-          // Fall through to refreshSession()
-        }
-      }
-
-      // Strategy 2: Fall back to refreshSession()
-      this.log(`🔄 Attempting refreshSession() as fallback`);
-      const refreshPromise = client.auth.refreshSession();
-      const refreshTimeout = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('refreshSession timeout')), timeout);
-      });
-
-      let result: any;
-      try {
-        result = await Promise.race([refreshPromise, refreshTimeout]);
-      } catch (err: any) {
-        if (err?.message === 'refreshSession timeout') {
-          this.log(`🔄 refreshSessionUnified: ❌ TIMEOUT after ${timeout}ms`);
-          this.sessionState.consecutiveFailures++;
-          return false;
-        }
-        throw err;
-      }
-
-      const success = !result?.error && result?.data?.session;
-
-      if (success) {
-        // Update session cache (includes realtime token update)
-        this.updateSessionCache(result.data.session);
-        this.sessionState.consecutiveFailures = 0;
-
-        const took = Date.now() - started;
-        this.log(`🔄 refreshSessionUnified: ✅ SUCCESS via refreshSession() in ${took}ms`);
-      } else {
-        this.sessionState.consecutiveFailures++;
-        this.log(`🔄 refreshSessionUnified: ❌ FAILED - ${result?.error?.message || 'unknown error'}`);
-      }
-
-      return success;
-    } catch (error) {
-      const took = Date.now() - started;
-      this.log(`🔄 refreshSessionUnified error after ${took}ms: ${stringifyError(error)}`);
-      this.sessionState.consecutiveFailures++;
-      return false;
-    }
-  }
-
-  /**
    * Quick, bounded refresh attempt (stale-while-refresh policy)
-   * PHASE 3: Now delegates to refreshSessionUnified
    */
   private async refreshQuickBounded(maxMs: number = 1000): Promise<boolean> {
-    return await this.refreshSessionUnified({ timeout: maxMs, background: true });
+    const started = Date.now();
+    this.log(`🔄 refreshQuickBounded(${maxMs}ms) start`);
+    try {
+      const refreshPromise = this.refreshSessionDirect();
+      const timed = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), maxMs));
+      const ok = await Promise.race([refreshPromise, timed]);
+      const took = Date.now() - started;
+      this.log(`🔄 refreshQuickBounded result=${!!ok} in ${took}ms`);
+      return !!ok;
+    } catch (e) {
+      const took = Date.now() - started;
+      this.log(`🔄 refreshQuickBounded error after ${took}ms: ${stringifyError(e)}`);
+      return false;
+    }
   }
 
   /**
@@ -466,10 +386,31 @@ class SupabasePipeline {
 
   /**
    * Non-blocking session refresh - runs in background
-   * PHASE 3: Now delegates to refreshSessionUnified
    */
   private async refreshSessionInBackground(): Promise<void> {
-    await this.refreshSessionUnified({ timeout: 5000, background: true });
+    try {
+      if (!this.client?.auth) return;
+
+      // If we have cached tokens, try to refresh with them
+      if (this.sessionState.accessToken && this.sessionState.refreshToken) {
+        this.log('🔄 Starting background session refresh with cached tokens');
+        const { data, error } = await this.client.auth.setSession({
+          access_token: this.sessionState.accessToken,
+          refresh_token: this.sessionState.refreshToken
+        });
+
+        if (!error && data?.session) {
+          this.log('✅ Background session refresh successful');
+          // Update cached tokens
+          this.sessionState.accessToken = data.session.access_token;
+          this.sessionState.refreshToken = data.session.refresh_token;
+        } else {
+          this.log('⚠️ Background session refresh failed, will retry on next attempt');
+        }
+      }
+    } catch (error) {
+      this.log('❌ Background session refresh error:', error);
+    }
   }
 
 
@@ -601,28 +542,172 @@ class SupabasePipeline {
 
   /**
    * Use cached tokens to recover session instead of calling getSession()
-   * PHASE 3: Now delegates to refreshSessionUnified with longer timeout for recovery
    */
   public async recoverSession(): Promise<boolean> {
     this.log('🔄 Recovering session using cached tokens...');
-    // Use 10s timeout for recovery (longer than normal refresh)
-    return await this.refreshSessionUnified({ timeout: 10000, background: false });
+    try {
+      const client = await this.getClient();
+
+      // Use cached tokens if available
+      if (this.sessionState.accessToken && this.sessionState.refreshToken) {
+        this.log('🔄 Using cached tokens to recover session');
+
+        try {
+          // Use setSession with cached tokens instead of getSession(), but bound it with a timeout
+          const setSessionPromise = client.auth.setSession({
+            access_token: this.sessionState.accessToken,
+            refresh_token: this.sessionState.refreshToken,
+          });
+          // CRITICAL FIX: Increased timeout from 3s to 10s (LOG46 Phase 2)
+          // Root cause: 3s timeout was too aggressive and caused realtime death
+          // When token recovery times out, realtime subscription loses auth and dies
+          // 10s gives enough time for setSession() to complete without hanging forever
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('setSession timeout')), 10000)
+          );
+          let data: any;
+          try {
+            const result: any = await Promise.race([setSessionPromise, timeoutPromise]);
+            data = result?.data;
+            if (result?.error) {
+              this.log('🔄 Cached token recovery failed:', result.error.message || String(result.error));
+              return false;
+            }
+          } catch (e: any) {
+            if (e && e.message === 'setSession timeout') {
+              this.log('🔄 Token recovery timed out after 10s');
+              return false;
+            }
+            throw e;
+          }
+
+          if (data?.session) {
+            this.log('✅ Session recovered using cached tokens');
+            this.updateSessionCache(data.session);
+            return true;
+          }
+        } catch (error) {
+          this.log('🔄 Token recovery error:', stringifyError(error));
+        }
+      }
+
+      // Fallback: try refresh if we have refresh token
+      if (this.sessionState.refreshToken) {
+        this.log('🔄 Attempting token refresh as fallback');
+        return await this.refreshSessionDirect();
+      }
+
+      this.log('🔄 No cached tokens available for recovery');
+      return false;
+    } catch (error) {
+      this.log('🔄 Session recovery failed:', stringifyError(error));
+      return false;
+    }
   }
 
   /**
    * Direct session refresh without pre-checks
-   * PHASE 3: Now delegates to refreshSessionUnified
+   * CRITICAL FIX: Try setSession() with cached tokens first, then fall back to refreshSession()
+   * This prevents hanging when refreshSession() is stuck (e.g., after long backgrounding)
    */
   public async refreshSessionDirect(): Promise<boolean> {
-    const success = await this.refreshSessionUnified({ timeout: 5000, background: false });
+    this.log('🔄 Direct session refresh...');
+    try {
+      const client = await this.getClient();
 
-    // If we've had too many consecutive failures, trigger client recreation
-    if (!success && this.sessionState.consecutiveFailures >= this.config.maxConsecutiveRefreshFailures) {
-      this.log('🔴 Too many consecutive refresh failures, client may be stuck - will recreate on next operation');
-      this.failureCount = this.config.maxFailures; // Trigger circuit breaker
+      // CRITICAL FIX: Try setSession() with cached tokens first (more reliable)
+      // refreshSession() often hangs after app is backgrounded for long periods
+      // WHATSAPP-STYLE: Reduced timeouts to prevent long hangs
+      if (this.sessionState.accessToken && this.sessionState.refreshToken) {
+        this.log('🔄 Attempting setSession() with cached tokens (more reliable than refreshSession)');
+        try {
+          const setSessionPromise = client.auth.setSession({
+            access_token: this.sessionState.accessToken,
+            refresh_token: this.sessionState.refreshToken,
+          });
+          // WHATSAPP-STYLE: Reduced from 10s to 3s
+          const setSessionTimeout = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('setSession timeout')), 3000);
+          });
+
+          const setSessionResult: any = await Promise.race([setSessionPromise, setSessionTimeout]);
+
+          if (setSessionResult?.data?.session?.access_token && !setSessionResult?.error) {
+            this.log('🔄 Direct session refresh: ✅ SUCCESS via setSession()');
+            this.updateSessionCache(setSessionResult.data.session);
+            // Reset failure counter on success
+            this.sessionState.consecutiveFailures = 0;
+            return true;
+          } else {
+            this.log('🔄 setSession() failed, will try refreshSession():', setSessionResult?.error?.message || 'unknown error');
+          }
+        } catch (setSessionError: any) {
+          if (setSessionError?.message === 'setSession timeout') {
+            this.log('🔄 setSession() TIMEOUT after 3s, will try refreshSession()');
+          } else {
+            this.log('🔄 setSession() error, will try refreshSession():', stringifyError(setSessionError));
+          }
+        }
+      }
+
+      // Fall back to refreshSession() if setSession() failed or no cached tokens
+      this.log('🔄 Attempting refreshSession() as fallback');
+      const refreshPromise = client.auth.refreshSession();
+      // WHATSAPP-STYLE: Keep at 5s (already reasonable)
+      const refreshTimeout = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('refreshSession timeout')), 5000);
+      });
+
+      let result: any;
+      try {
+        result = await Promise.race([refreshPromise, refreshTimeout]);
+      } catch (err: any) {
+        if (err && err.message === 'refreshSession timeout') {
+          // CRITICAL FIX: Clear logging - this is a TIMEOUT, not success
+          this.log('🔄 Direct session refresh: ❌ TIMEOUT after 5s (refreshSession hung)');
+          // Track consecutive failures
+          this.sessionState.consecutiveFailures++;
+          this.log(`⚠️ Consecutive refresh failures: ${this.sessionState.consecutiveFailures}/${this.config.maxConsecutiveRefreshFailures}`);
+
+          // If we've had too many consecutive failures, trigger client recreation
+          if (this.sessionState.consecutiveFailures >= this.config.maxConsecutiveRefreshFailures) {
+            this.log('🔴 Too many consecutive refresh failures, client may be stuck - will recreate on next operation');
+            // Don't recreate immediately to avoid blocking, just mark for recreation
+            this.failureCount = this.config.maxFailures; // Trigger circuit breaker
+          }
+
+          return false;
+        }
+        throw err;
+      }
+
+      const success = !!result?.data?.session?.access_token && !result?.error;
+      // CRITICAL FIX: Clear success/failure logging
+      if (success) {
+        this.log(`🔄 Direct session refresh: ✅ SUCCESS via refreshSession()`);
+      } else {
+        this.log(`🔄 Direct session refresh: ❌ FAILED via refreshSession() - ${result?.error?.message || 'unknown error'}`);
+      }
+
+      // Update session cache if successful
+      if (success && result?.data?.session) {
+        this.updateSessionCache(result.data.session);
+        // Reset failure counter on success
+        this.sessionState.consecutiveFailures = 0;
+      } else {
+        // Track consecutive failures
+        this.sessionState.consecutiveFailures++;
+        this.log(`⚠️ Consecutive refresh failures: ${this.sessionState.consecutiveFailures}/${this.config.maxConsecutiveRefreshFailures}`);
+      }
+
+      return success;
+    } catch (error) {
+      this.log('🔄 Session refresh failed:', stringifyError(error));
+      // Track consecutive failures
+      this.sessionState.consecutiveFailures++;
+      this.log(`⚠️ Consecutive refresh failures: ${this.sessionState.consecutiveFailures}/${this.config.maxConsecutiveRefreshFailures}`);
+      return false;
     }
-
-    return success;
   }
 
   /**
