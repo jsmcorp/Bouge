@@ -11,6 +11,9 @@ export interface SelectedContact {
   isRegistered: boolean;
 }
 
+// Deduplication: Track in-flight fetchGroupMembers requests
+const inFlightMemberFetches = new Map<string, Promise<void>>();
+
 export interface GroupActions {
   createGroup: (name: string, description?: string, selectedContacts?: SelectedContact[]) => Promise<Group>;
   joinGroup: (inviteCode: string) => Promise<void>;
@@ -170,50 +173,138 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
   },
 
   fetchGroupMembers: async (groupId: string) => {
-    try {
-      set({ isLoadingGroupDetails: true });
-
-      const { data, error } = await supabasePipeline.fetchGroupMembers(groupId);
-
-      console.log('[GroupActions] fetchGroupMembers - groupId:', groupId);
-      console.log('[GroupActions] fetchGroupMembers - data:', data);
-      console.log('[GroupActions] fetchGroupMembers - error:', error);
-
-      if (error) throw error;
-
-      // Get the current group to determine who is the creator (admin)
-      const currentGroup = get().groups.find((g: Group) => g.id === groupId);
-      const creatorId = currentGroup?.created_by;
-
-      console.log('[GroupActions] fetchGroupMembers - creatorId:', creatorId);
-
-      const members: GroupMember[] = (data || []).map((member) => {
-        // Determine role: creator is admin, others are participants
-        const role = member.user_id === creatorId ? 'admin' : 'participant';
-
-        return {
-          id: `${member.group_id}-${member.user_id}`,
-          user_id: member.user_id,
-          group_id: member.group_id,
-          role,
-          joined_at: member.joined_at || new Date().toISOString(),
-          user: {
-            display_name: member.users?.display_name || 'Unknown User',
-            phone_number: member.users?.phone_number || '',
-            avatar_url: member.users?.avatar_url || null,
-          },
-        };
-      });
-
-      console.log('[GroupActions] fetchGroupMembers - mapped members:', members);
-
-      set({ groupMembers: members });
-    } catch (error) {
-      console.error('[GroupActions] Error fetching group members:', error);
-      set({ groupMembers: [] });
-    } finally {
-      set({ isLoadingGroupDetails: false });
+    // CRITICAL FIX: Deduplicate concurrent requests for the same group
+    // If there's already a fetch in progress for this group, return that promise
+    const existingFetch = inFlightMemberFetches.get(groupId);
+    if (existingFetch) {
+      console.log(`[GroupActions] fetchGroupMembers - deduplicating request for group ${groupId}`);
+      return existingFetch;
     }
+
+    // Create new fetch promise
+    const fetchPromise = (async () => {
+      try {
+        set({ isLoadingGroupDetails: true });
+
+        // OFFLINE-FIRST: Load from SQLite cache immediately
+        console.log(`[GroupActions] 📱 Loading group members from SQLite cache for group ${groupId}`);
+        const cachedMembers = await sqliteService.getGroupMembers(groupId);
+
+        if (cachedMembers && cachedMembers.length > 0) {
+          console.log(`[GroupActions] ✅ Found ${cachedMembers.length} cached members in SQLite`);
+
+          // Load user details from SQLite for each member
+          const membersWithUserData: GroupMember[] = await Promise.all(
+            cachedMembers.map(async (member) => {
+              const userData = await sqliteService.getUser(member.user_id);
+
+              return {
+                id: `${member.group_id}-${member.user_id}`,
+                user_id: member.user_id,
+                group_id: member.group_id,
+                role: member.role,
+                joined_at: new Date(member.joined_at).toISOString(),
+                user: {
+                  display_name: userData?.display_name || 'Unknown User',
+                  phone_number: userData?.phone_number || '',
+                  avatar_url: userData?.avatar_url || null,
+                },
+              };
+            })
+          );
+
+          // Update UI immediately with cached data
+          set({ groupMembers: membersWithUserData });
+          console.log(`[GroupActions] 📱 UI updated with ${membersWithUserData.length} cached members`);
+        } else {
+          console.log(`[GroupActions] 📭 No cached members found in SQLite`);
+        }
+
+        // BACKGROUND SYNC: Fetch fresh data from Supabase
+        console.log(`[GroupActions] 🌐 Fetching fresh members from Supabase...`);
+        const { data, error } = await supabasePipeline.fetchGroupMembers(groupId);
+
+        console.log('[GroupActions] fetchGroupMembers - groupId:', groupId);
+        console.log('[GroupActions] fetchGroupMembers - data:', data);
+        console.log('[GroupActions] fetchGroupMembers - error:', error);
+
+        if (error) {
+          // If we have cached data, don't throw - just log the error
+          if (cachedMembers && cachedMembers.length > 0) {
+            console.warn('[GroupActions] Supabase fetch failed, but using cached data:', error);
+            return;
+          }
+          throw error;
+        }
+
+        // Get the current group to determine who is the creator (admin)
+        const currentGroup = get().groups.find((g: Group) => g.id === groupId);
+        const creatorId = currentGroup?.created_by;
+
+        console.log('[GroupActions] fetchGroupMembers - creatorId:', creatorId);
+
+        const members: GroupMember[] = (data || []).map((member) => {
+          // Determine role: creator is admin, others are participants
+          const role = member.user_id === creatorId ? 'admin' : 'participant';
+
+          return {
+            id: `${member.group_id}-${member.user_id}`,
+            user_id: member.user_id,
+            group_id: member.group_id,
+            role,
+            joined_at: member.joined_at || new Date().toISOString(),
+            user: {
+              display_name: member.users?.display_name || 'Unknown User',
+              phone_number: member.users?.phone_number || '',
+              avatar_url: member.users?.avatar_url || null,
+            },
+          };
+        });
+
+        console.log('[GroupActions] fetchGroupMembers - mapped members:', members);
+
+        // SAVE TO SQLITE: Cache the fresh data
+        console.log(`[GroupActions] 💾 Saving ${members.length} members to SQLite cache...`);
+        for (const member of members) {
+          // Save member to group_members table
+          await sqliteService.saveGroupMember({
+            group_id: member.group_id,
+            user_id: member.user_id,
+            role: member.role,
+            joined_at: new Date(member.joined_at).getTime(),
+          });
+
+          // Save user details to users table
+          await sqliteService.saveUser({
+            id: member.user_id,
+            display_name: member.user.display_name,
+            phone_number: member.user.phone_number || '',
+            avatar_url: member.user.avatar_url,
+            is_onboarded: 1,
+            created_at: Date.now(),
+          });
+        }
+        console.log(`[GroupActions] ✅ Saved ${members.length} members to SQLite cache`);
+
+        // Update UI with fresh data
+        set({ groupMembers: members });
+      } catch (error) {
+        console.error('[GroupActions] Error fetching group members:', error);
+        // Only clear members if we don't have cached data
+        const currentMembers = get().groupMembers;
+        if (!currentMembers || currentMembers.length === 0) {
+          set({ groupMembers: [] });
+        }
+      } finally {
+        set({ isLoadingGroupDetails: false });
+        // Clean up in-flight tracking
+        inFlightMemberFetches.delete(groupId);
+      }
+    })();
+
+    // Track this fetch
+    inFlightMemberFetches.set(groupId, fetchPromise);
+    return fetchPromise;
   },
 
   fetchGroupMedia: async (groupId: string) => {

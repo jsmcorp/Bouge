@@ -113,7 +113,10 @@ export default function GroupDetailsViewPage() {
       fetchGroupMembers(activeGroup.id);
       fetchGroupMedia(activeGroup.id);
     }
-  }, [activeGroup?.id, fetchGroupMembers, fetchGroupMedia]);
+    // CRITICAL FIX: Don't include fetchGroupMembers/fetchGroupMedia in deps
+    // They are stable Zustand actions and including them causes infinite re-fetches
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGroup?.id]);
 
   // Debug logging
   useEffect(() => {

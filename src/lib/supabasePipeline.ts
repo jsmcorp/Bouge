@@ -1237,6 +1237,7 @@ class SupabasePipeline {
 
   /**
    * Generic database query with timeout and error handling
+   * CRITICAL FIX: Added AbortController to properly cancel timed-out requests
    */
   private async executeQuery<T>(
     queryBuilder: () => Promise<{ data: T; error: any }>,
@@ -1245,12 +1246,23 @@ class SupabasePipeline {
   ): Promise<{ data: T | null; error: any }> {
     this.log(`🗄️ Executing ${operation}...`);
 
+    // Create AbortController for request cancellation
+    const abortController = new AbortController();
+    let timeoutId: NodeJS.Timeout | null = null;
+
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
+        timeoutId = setTimeout(() => {
+          // Cancel the request when timeout is hit
+          abortController.abort();
+          reject(new Error(`${operation} timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
       });
 
       const result = await Promise.race([queryBuilder(), timeoutPromise]);
+
+      // Clear timeout if query completed before timeout
+      if (timeoutId) clearTimeout(timeoutId);
 
       if (result.error) {
         this.log(`🗄️ ${operation} error:`, stringifyError(result.error));
@@ -1260,6 +1272,9 @@ class SupabasePipeline {
       this.log(`🗄️ ${operation} success`);
       return result;
     } catch (error) {
+      // Clear timeout on error
+      if (timeoutId) clearTimeout(timeoutId);
+
       this.log(`🗄️ ${operation} failed:`, stringifyError(error));
       return { data: null, error };
     }

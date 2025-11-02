@@ -58,7 +58,10 @@ export default function ContactSelectionPage() {
     if (isAddMembersMode && groupId) {
       fetchGroupMembers(groupId);
     }
-  }, [isAddMembersMode, groupId, fetchGroupMembers]);
+    // CRITICAL FIX: Don't include fetchGroupMembers in deps
+    // It's a stable Zustand action and including it causes infinite re-fetches
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAddMembersMode, groupId]);
 
   // Create a set of existing member user IDs for quick lookup
   const existingMemberUserIds = useMemo(() => {
