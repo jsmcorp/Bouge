@@ -198,6 +198,10 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
             cachedMembers.map(async (member) => {
               const userData = await sqliteService.getUser(member.user_id);
 
+              if (!userData) {
+                console.warn(`[GroupActions] ⚠️ No user data found in SQLite for user ${member.user_id}`);
+              }
+
               return {
                 id: `${member.group_id}-${member.user_id}`,
                 user_id: member.user_id,
@@ -216,6 +220,15 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
           // Update UI immediately with cached data
           set({ groupMembers: membersWithUserData });
           console.log(`[GroupActions] 📱 UI updated with ${membersWithUserData.length} cached members`);
+
+          // Log sample member data for debugging
+          if (membersWithUserData.length > 0) {
+            console.log(`[GroupActions] 📱 Sample cached member:`, {
+              user_id: membersWithUserData[0].user_id,
+              display_name: membersWithUserData[0].user.display_name,
+              has_avatar: !!membersWithUserData[0].user.avatar_url
+            });
+          }
         } else {
           console.log(`[GroupActions] 📭 No cached members found in SQLite`);
         }

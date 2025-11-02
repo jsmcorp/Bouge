@@ -54,15 +54,18 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     //   get().cleanupRealtimeSubscription();
     // }
 
-    set({
+    const currentGroup = get().activeGroup;
+    const isSwitchingToNewGroup = currentGroup && group && currentGroup.id !== group.id;
+
+    // CRITICAL FIX: Only clear groupMembers/groupMedia when switching to a DIFFERENT group
+    // Don't clear when setting the same group (prevents race condition with fetchGroupMembers)
+    const stateUpdate: any = {
       activeGroup: group,
       messages: [],
       polls: [],
       userVotes: {},
       typingUsers: [],
       showGroupDetailsPanel: false,
-      groupMembers: [],
-      groupMedia: [],
       // CRITICAL FIX: Keep connection status - don't reset to 'disconnected'
       // connectionStatus: 'disconnected',
       isReconnecting: false,
@@ -71,7 +74,15 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       fetchToken: null,
       currentFetchGroupId: null,
       isLoading: false
-    });
+    };
+
+    // Only clear groupMembers and groupMedia when switching to a different group
+    if (isSwitchingToNewGroup || !currentGroup) {
+      stateUpdate.groupMembers = [];
+      stateUpdate.groupMedia = [];
+    }
+
+    set(stateUpdate);
 
     // Setup subscription if not already connected, and fetch polls
     if (group) {
