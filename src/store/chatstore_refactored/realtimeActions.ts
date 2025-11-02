@@ -1014,6 +1014,49 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           set({ polls: updatedPolls, messages: updatedMessages as Message[] });
         });
 
+        // Join request inserts - notify admins of new requests
+        channel.on('postgres_changes', {
+          event: 'INSERT', schema: 'public', table: 'group_join_requests', filter: groupFilter,
+        }, async () => {
+          if (localToken !== connectionToken) return;
+          bumpActivity();
+          updateLastEventTime();
+
+          log(`📬 New join request received for group ${groupId}`);
+
+          // Refresh pending request count if user is admin
+          const { activeGroup } = get();
+          const isAdmin = activeGroup && activeGroup.created_by === user.id;
+
+          if (isAdmin && get().getPendingRequestCount) {
+            const count = await get().getPendingRequestCount(groupId);
+            // Update the count in the UI (this would need to be handled in the component)
+            log(`📊 Updated pending request count: ${count}`);
+          }
+        });
+
+        // Join request updates - refresh when status changes
+        channel.on('postgres_changes', {
+          event: 'UPDATE', schema: 'public', table: 'group_join_requests', filter: groupFilter,
+        }, async (payload: any) => {
+          if (localToken !== connectionToken) return;
+          bumpActivity();
+          updateLastEventTime();
+
+          const request = payload.new;
+          log(`📝 Join request updated: ${request.id} - status: ${request.status}`);
+
+          // If approved, refresh group members
+          if (request.status === 'approved') {
+            await get().fetchGroupMembers(groupId);
+          }
+
+          // Refresh pending requests list
+          if (get().fetchPendingJoinRequests) {
+            await get().fetchPendingJoinRequests(groupId);
+          }
+        });
+
         // Presence events
         channel
           .on('presence', { event: 'sync' }, () => {

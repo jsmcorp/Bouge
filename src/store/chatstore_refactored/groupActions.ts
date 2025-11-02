@@ -1,5 +1,6 @@
 import { supabasePipeline, SupabasePipeline } from '@/lib/supabasePipeline';
 import { sqliteService } from '@/lib/sqliteService';
+import { joinRequestService } from '@/lib/joinRequestService';
 import { Capacitor } from '@capacitor/core';
 import { Group, GroupMember, GroupMedia } from './types';
 
@@ -16,7 +17,7 @@ const inFlightMemberFetches = new Map<string, Promise<void>>();
 
 export interface GroupActions {
   createGroup: (name: string, description?: string, selectedContacts?: SelectedContact[]) => Promise<Group>;
-  joinGroup: (inviteCode: string) => Promise<void>;
+  joinGroup: (inviteCode: string) => Promise<{ success: boolean; message: string; group: any }>;
   fetchGroupMembers: (groupId: string) => Promise<void>;
   fetchGroupMedia: (groupId: string) => Promise<void>;
   openGroupDetailsMobile: (groupId: string) => void;
@@ -127,45 +128,58 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
       const { data: { user } } = await supabasePipeline.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      // Use pipeline to join group (handles finding group and adding member)
-      const { data: group, error } = await supabasePipeline.joinGroup(inviteCode.toUpperCase(), user.id);
+      // First, find the group by invite code
+      const client = await supabasePipeline.getSupabaseClient();
+      const { data: groups, error: findError } = await client
+        .from('groups')
+        .select('*')
+        .eq('invite_code', inviteCode.toUpperCase())
+        .limit(1);
 
-      if (error) {
-        if (error.message?.includes('duplicate key value')) {
-          throw new Error('Already a member of this group');
-        }
+      if (findError || !groups || groups.length === 0) {
         throw new Error('Invalid invite code');
       }
 
-      const newGroups = [...get().groups, group];
-      set({ groups: newGroups });
+      const group = groups[0];
 
-      // Save to SQLite for offline persistence
-      const isNative = Capacitor.isNativePlatform();
-      const isSqliteReady = isNative && await sqliteService.isReady();
-      if (isSqliteReady) {
-        await sqliteService.saveGroup({
-          id: group.id,
-          name: group.name,
-          description: group.description || null,
-          invite_code: group.invite_code || 'offline',
-          created_by: group.created_by || '',
-          created_at: new Date(group.created_at).getTime(),
-          last_sync_timestamp: Date.now(),
-          avatar_url: group.avatar_url || null,
-          is_archived: 0
-        });
+      // Check if user is already a member
+      const { data: existingMember } = await client
+        .from('group_members')
+        .select('*')
+        .eq('group_id', group.id)
+        .eq('user_id', user.id)
+        .single();
 
-        // Save group membership
-        await sqliteService.saveGroupMember({
-          group_id: group.id,
-          user_id: user.id,
-          role: 'participant',
-          joined_at: Date.now()
-        });
-
-        console.log(`✅ Joined group ${group.name} saved to local storage`);
+      if (existingMember) {
+        throw new Error('Already a member of this group');
       }
+
+      // Check if there's already a pending request
+      const { data: hasPending } = await joinRequestService.hasPendingRequest(group.id, user.id);
+
+      if (hasPending) {
+        throw new Error('Join request already pending approval');
+      }
+
+      // Create join request instead of directly joining
+      const { error: requestError } = await joinRequestService.createJoinRequest(
+        group.id,
+        user.id,
+        null // No inviter for invite code joins
+      );
+
+      if (requestError) {
+        throw requestError;
+      }
+
+      console.log(`✅ Join request created for group ${group.name}, pending admin approval`);
+
+      // Return a message to the user
+      return {
+        success: true,
+        message: 'Join request sent! Waiting for admin approval.',
+        group: group
+      };
     } catch (error) {
       console.error('Error joining group:', error);
       throw error;
@@ -422,16 +436,40 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
     }
   },
 
-  addGroupMember: async (groupId: string, userId: string) => {
+  addGroupMember: async (groupId: string, userId: string, skipApproval = false) => {
     try {
-      const { error } = await supabasePipeline.addGroupMember(groupId, userId);
+      const { data: { user } } = await supabasePipeline.getUser();
+      if (!user) throw new Error('Not authenticated');
 
-      if (error) throw error;
+      // Check if current user is admin (group creator)
+      const { activeGroup } = get();
+      const isAdmin = activeGroup && activeGroup.created_by === user.id;
 
-      // Refresh the members list
-      await get().fetchGroupMembers(groupId);
+      // If admin or skipApproval flag is set, add directly
+      if (isAdmin || skipApproval) {
+        const { error } = await supabasePipeline.addGroupMember(groupId, userId);
+        if (error) throw error;
 
-      console.log('✅ Member added successfully');
+        // Refresh the members list
+        await get().fetchGroupMembers(groupId);
+        console.log('✅ Member added successfully');
+      } else {
+        // Non-admin: create join request instead
+        const { error } = await joinRequestService.createJoinRequest(
+          groupId,
+          userId,
+          user.id // invited_by
+        );
+
+        if (error) throw error;
+
+        console.log('✅ Join request created, pending admin approval');
+
+        // Optionally refresh pending requests if we're tracking them
+        if (get().fetchPendingJoinRequests) {
+          await get().fetchPendingJoinRequests(groupId);
+        }
+      }
     } catch (error) {
       console.error('Error adding group member:', error);
       throw error;
@@ -440,30 +478,81 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
 
   removeGroupMember: async (groupId: string, userId: string) => {
     try {
+      console.log(`[GroupActions] Removing member ${userId} from group ${groupId}`);
+
+      // Remove from Supabase
       const { error } = await supabasePipeline.removeGroupMember(groupId, userId);
 
-      if (error) throw error;
+      if (error) {
+        console.error('[GroupActions] Supabase error removing member:', error);
+        throw error;
+      }
 
-      // Refresh the members list
+      // Remove from SQLite
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+
+      if (isSqliteReady) {
+        try {
+          await sqliteService.deleteGroupMember(groupId, userId);
+          console.log('[GroupActions] ✅ Member removed from SQLite');
+        } catch (sqliteError) {
+          console.error('[GroupActions] SQLite error removing member:', sqliteError);
+          // Continue even if SQLite fails - will sync on next fetch
+        }
+      }
+
+      // Refresh the members list to update UI
       await get().fetchGroupMembers(groupId);
 
-      console.log('✅ Member removed successfully');
+      console.log('[GroupActions] ✅ Member removed successfully');
     } catch (error) {
-      console.error('Error removing group member:', error);
+      console.error('[GroupActions] Error removing group member:', error);
       throw error;
     }
   },
 
-  addGroupMembers: async (groupId: string, userIds: string[]) => {
+  addGroupMembers: async (groupId: string, userIds: string[], skipApproval = false) => {
     try {
-      const { error } = await supabasePipeline.addGroupMembers(groupId, userIds);
+      const { data: { user } } = await supabasePipeline.getUser();
+      if (!user) throw new Error('Not authenticated');
 
-      if (error) throw error;
+      // Check if current user is admin (group creator)
+      const { activeGroup } = get();
+      const isAdmin = activeGroup && activeGroup.created_by === user.id;
 
-      // Refresh the members list
-      await get().fetchGroupMembers(groupId);
+      // If admin or skipApproval flag is set, add directly
+      if (isAdmin || skipApproval) {
+        const { error } = await supabasePipeline.addGroupMembers(groupId, userIds);
+        if (error) throw error;
 
-      console.log(`✅ ${userIds.length} member(s) added successfully`);
+        // Refresh the members list
+        await get().fetchGroupMembers(groupId);
+        console.log(`✅ ${userIds.length} member(s) added successfully`);
+      } else {
+        // Non-admin: create join requests for each user
+        let successCount = 0;
+        for (const userId of userIds) {
+          const { error } = await joinRequestService.createJoinRequest(
+            groupId,
+            userId,
+            user.id // invited_by
+          );
+
+          if (!error) {
+            successCount++;
+          } else {
+            console.error(`Failed to create join request for user ${userId}:`, error);
+          }
+        }
+
+        console.log(`✅ ${successCount} join request(s) created, pending admin approval`);
+
+        // Optionally refresh pending requests if we're tracking them
+        if (get().fetchPendingJoinRequests) {
+          await get().fetchPendingJoinRequests(groupId);
+        }
+      }
     } catch (error) {
       console.error('Error adding group members:', error);
       throw error;
@@ -472,26 +561,104 @@ export const createGroupActions = (set: any, get: any): GroupActions => ({
 
   leaveGroup: async (groupId: string, userId: string) => {
     try {
+      console.log(`[GroupActions] User ${userId} leaving group ${groupId}`);
+
+      // Check if the leaving user is an admin
+      const { activeGroup } = get();
+      const isAdmin = activeGroup && activeGroup.created_by === userId;
+
+      if (isAdmin) {
+        console.log('[GroupActions] Leaving user is admin, transferring admin role...');
+
+        // Fetch all members to find the next admin
+        const client = await supabasePipeline.getSupabaseClient();
+        const { data: members, error: membersError } = await client
+          .from('group_members')
+          .select('user_id, joined_at')
+          .eq('group_id', groupId)
+          .neq('user_id', userId)
+          .order('joined_at', { ascending: true })
+          .limit(1);
+
+        if (membersError) {
+          console.error('[GroupActions] Error fetching members for admin transfer:', membersError);
+        } else if (members && members.length > 0) {
+          const newAdminId = members[0].user_id;
+          console.log(`[GroupActions] Transferring admin to user ${newAdminId}`);
+
+          // Update the new admin's role in group_members
+          const { error: updateRoleError } = await client
+            .from('group_members')
+            .update({ role: 'admin' })
+            .eq('group_id', groupId)
+            .eq('user_id', newAdminId);
+
+          if (updateRoleError) {
+            console.error('[GroupActions] Error updating new admin role:', updateRoleError);
+          }
+
+          // Update the group's created_by to the new admin
+          const { error: updateGroupError } = await client
+            .from('groups')
+            .update({ created_by: newAdminId })
+            .eq('id', groupId);
+
+          if (updateGroupError) {
+            console.error('[GroupActions] Error updating group creator:', updateGroupError);
+          } else {
+            console.log('[GroupActions] ✅ Admin role transferred successfully');
+          }
+
+          // Update SQLite if available
+          const isNative = Capacitor.isNativePlatform();
+          const isSqliteReady = isNative && await sqliteService.isReady();
+
+          if (isSqliteReady) {
+            try {
+              // Update new admin role in SQLite
+              await sqliteService.updateGroupMemberRole(groupId, newAdminId, 'admin');
+              // Update group creator in SQLite
+              await sqliteService.updateGroupCreator(groupId, newAdminId);
+            } catch (sqliteError) {
+              console.error('[GroupActions] SQLite error during admin transfer:', sqliteError);
+            }
+          }
+        } else {
+          console.log('[GroupActions] No other members to transfer admin to');
+        }
+      }
+
+      // Now remove the user from the group
       const { error } = await supabasePipeline.leaveGroup(groupId, userId);
 
       if (error) throw error;
+
+      // Remove from SQLite
+      const isNative = Capacitor.isNativePlatform();
+      const isSqliteReady = isNative && await sqliteService.isReady();
+
+      if (isSqliteReady) {
+        try {
+          await sqliteService.deleteGroupMember(groupId, userId);
+          await sqliteService.deleteGroup(groupId);
+          console.log('[GroupActions] ✅ Group removed from SQLite');
+        } catch (sqliteError) {
+          console.error('[GroupActions] SQLite error leaving group:', sqliteError);
+        }
+      }
 
       // Remove the group from the local groups array
       const updatedGroups = get().groups.filter((g: Group) => g.id !== groupId);
       set({ groups: updatedGroups });
 
       // Clear active group if it's the one being left
-      const { activeGroup } = get();
       if (activeGroup && activeGroup.id === groupId) {
         set({ activeGroup: null });
       }
 
-      // Note: SQLite cleanup will happen on next sync
-      // The group will no longer appear in the user's groups list
-
-      console.log('✅ Left group successfully');
+      console.log('[GroupActions] ✅ Left group successfully');
     } catch (error) {
-      console.error('Error leaving group:', error);
+      console.error('[GroupActions] Error leaving group:', error);
       throw error;
     }
   },

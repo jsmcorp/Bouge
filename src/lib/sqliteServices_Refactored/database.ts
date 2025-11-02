@@ -247,6 +247,20 @@ export class DatabaseManager {
         PRIMARY KEY (group_id, user_id)
       );
 
+      /* Group join requests table */
+      CREATE TABLE IF NOT EXISTS group_join_requests (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        invited_by TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (group_id) REFERENCES groups(id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        UNIQUE(group_id, user_id)
+      );
+
       /* Confessions table for confession messages */
       CREATE TABLE IF NOT EXISTS confessions (
         id TEXT PRIMARY KEY,

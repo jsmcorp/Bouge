@@ -11,6 +11,7 @@ import { ConfessionOperations } from './confessionOperations';
 import { UtilityOperations } from './utilityOperations';
 import { ContactOperations } from './contactOperations';
 import { SyncMetadataOperations } from './syncMetadataOperations';
+import { JoinRequestOperations, LocalJoinRequest } from './joinRequestOperations';
 import {
   LocalMessage,
   LocalPoll,
@@ -43,6 +44,7 @@ class SQLiteService {
   private utilityOps: UtilityOperations;
   private contactOps: ContactOperations;
   private syncMetadataOps: SyncMetadataOperations;
+  private joinRequestOps: JoinRequestOperations;
 
   private constructor() {
     this.dbManager = new DatabaseManager();
@@ -58,6 +60,7 @@ class SQLiteService {
     this.utilityOps = new UtilityOperations(this.dbManager);
     this.contactOps = new ContactOperations(this.dbManager);
     this.syncMetadataOps = new SyncMetadataOperations(this.dbManager);
+    this.joinRequestOps = new JoinRequestOperations(this.dbManager);
   }
 
   public static getInstance(): SQLiteService {
@@ -149,6 +152,14 @@ class SQLiteService {
     return this.groupOps.updateLastSyncTimestamp(groupId, timestamp);
   }
 
+  public async deleteGroup(groupId: string): Promise<void> {
+    return this.groupOps.deleteGroup(groupId);
+  }
+
+  public async updateGroupCreator(groupId: string, createdBy: string): Promise<void> {
+    return this.groupOps.updateGroupCreator(groupId, createdBy);
+  }
+
   // User operations
   public async saveUser(user: LocalUser): Promise<void> {
     return this.userOps.saveUser(user);
@@ -229,6 +240,14 @@ class SQLiteService {
 
   public async getUserPseudonyms(groupId: string): Promise<LocalUserPseudonym[]> {
     return this.memberOps.getUserPseudonyms(groupId);
+  }
+
+  public async deleteGroupMember(groupId: string, userId: string): Promise<void> {
+    return this.memberOps.deleteGroupMember(groupId, userId);
+  }
+
+  public async updateGroupMemberRole(groupId: string, userId: string, role: string): Promise<void> {
+    return this.memberOps.updateGroupMemberRole(groupId, userId, role);
   }
 
   // Confession operations
@@ -451,6 +470,42 @@ class SQLiteService {
    */
   public async clearAllSyncMetadata(): Promise<void> {
     return this.syncMetadataOps.clearAllSyncMetadata();
+  }
+
+  // Join Request operations
+  public async saveJoinRequest(request: LocalJoinRequest): Promise<void> {
+    return this.joinRequestOps.saveJoinRequest(request);
+  }
+
+  public async getPendingJoinRequests(groupId: string): Promise<LocalJoinRequest[]> {
+    return this.joinRequestOps.getPendingRequests(groupId);
+  }
+
+  public async getAllJoinRequests(groupId: string): Promise<LocalJoinRequest[]> {
+    return this.joinRequestOps.getAllRequests(groupId);
+  }
+
+  public async updateJoinRequestStatus(
+    requestId: string,
+    status: 'pending' | 'approved' | 'rejected'
+  ): Promise<void> {
+    return this.joinRequestOps.updateRequestStatus(requestId, status);
+  }
+
+  public async deleteJoinRequest(requestId: string): Promise<void> {
+    return this.joinRequestOps.deleteJoinRequest(requestId);
+  }
+
+  public async hasPendingJoinRequest(groupId: string, userId: string): Promise<boolean> {
+    return this.joinRequestOps.hasPendingRequest(groupId, userId);
+  }
+
+  public async getPendingJoinRequestCount(groupId: string): Promise<number> {
+    return this.joinRequestOps.getPendingRequestCount(groupId);
+  }
+
+  public async clearGroupJoinRequests(groupId: string): Promise<void> {
+    return this.joinRequestOps.clearGroupRequests(groupId);
   }
 }
 

@@ -32,6 +32,7 @@ import { Separator } from '@/components/ui/separator';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
   DialogContent,
@@ -58,6 +59,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useChatStore } from '@/store/chatStore';
 import { useAuthStore } from '@/store/authStore';
+import { JoinRequestsTab } from '@/components/group-details/JoinRequestsTab';
 import { toast } from 'sonner';
 
 export default function GroupDetailsViewPage() {
@@ -76,7 +78,8 @@ export default function GroupDetailsViewPage() {
     toggleMainChatGhostMode,
     updateGroup,
     removeGroupMember,
-    leaveGroup
+    leaveGroup,
+    getPendingRequestCount
   } = useChatStore();
 
   const { user } = useAuthStore();
@@ -89,7 +92,12 @@ export default function GroupDetailsViewPage() {
   const [memberToRemove, setMemberToRemove] = useState<string | null>(null);
   const [showExitDialog, setShowExitDialog] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
+  const [pendingRequestCount, setPendingRequestCount] = useState(0);
+  const [activeTab, setActiveTab] = useState('participants');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Check if current user is a member of the group
+  const isMember = activeGroup && user && groupMembers.some(m => m.user_id === user.id);
 
   // Check if current user is admin
   const isAdmin = activeGroup && user && (
@@ -107,16 +115,31 @@ export default function GroupDetailsViewPage() {
     }
   }, [groupId, groups, activeGroup, setActiveGroup]);
 
+  // Redirect non-members to dashboard
+  useEffect(() => {
+    if (activeGroup?.id && user && groupMembers.length > 0 && !isMember) {
+      toast.error('You are not a member of this group');
+      navigate('/dashboard');
+    }
+  }, [activeGroup?.id, user, groupMembers, isMember, navigate]);
+
   useEffect(() => {
     if (activeGroup?.id) {
       console.log('[GroupDetailsViewPage] Fetching members for group:', activeGroup.id);
       fetchGroupMembers(activeGroup.id);
       fetchGroupMedia(activeGroup.id);
+
+      // Load pending request count if user is admin
+      if (isAdmin && getPendingRequestCount) {
+        getPendingRequestCount(activeGroup.id).then(count => {
+          setPendingRequestCount(count);
+        });
+      }
     }
     // CRITICAL FIX: Don't include fetchGroupMembers/fetchGroupMedia in deps
     // They are stable Zustand actions and including them causes infinite re-fetches
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroup?.id]);
+  }, [activeGroup?.id, isAdmin]);
 
   // Debug logging
   useEffect(() => {
@@ -420,24 +443,53 @@ export default function GroupDetailsViewPage() {
             </>
           )}
 
-          {/* Members Section */}
+          {/* Members & Requests Tabs */}
           <div className="px-4 py-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold">{groupMembers.length} participants</h3>
-            </div>
+            <Tabs
+              defaultValue="participants"
+              value={activeTab}
+              onValueChange={async (value) => {
+                setActiveTab(value);
+                // Refresh pending count when switching to requests tab
+                if (value === 'requests' && isAdmin && getPendingRequestCount) {
+                  const count = await getPendingRequestCount(activeGroup?.id || '');
+                  setPendingRequestCount(count);
+                }
+              }}
+              className="w-full"
+            >
+              <TabsList className="grid w-full grid-cols-2 mb-4">
+                <TabsTrigger value="participants">
+                  Participants ({groupMembers.length})
+                </TabsTrigger>
+                {isAdmin && (
+                  <TabsTrigger value="requests" className="relative">
+                    Requests
+                    {pendingRequestCount > 0 && (
+                      <Badge
+                        variant="destructive"
+                        className="ml-2 h-5 min-w-5 px-1.5 text-xs"
+                      >
+                        {pendingRequestCount}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
+                )}
+              </TabsList>
 
-            {/* Add Member Button - Only for admins */}
-            {isAdmin && (
-              <button
-                onClick={handleAddMember}
-                className="w-full flex items-center gap-4 p-3 hover:bg-muted/50 rounded-lg transition-colors mb-2"
-              >
-                <div className="flex items-center justify-center w-12 h-12 bg-green-500/10 rounded-full">
-                  <UserPlus className="w-5 h-5 text-green-600 dark:text-green-500" />
-                </div>
-                <span className="text-sm font-medium text-green-600 dark:text-green-500">Add participant</span>
-              </button>
-            )}
+              <TabsContent value="participants" className="mt-0">
+                {/* Add Member Button - Only for admins */}
+                {isAdmin && (
+                  <button
+                    onClick={handleAddMember}
+                    className="w-full flex items-center gap-4 p-3 hover:bg-muted/50 rounded-lg transition-colors mb-2"
+                  >
+                    <div className="flex items-center justify-center w-12 h-12 bg-green-500/10 rounded-full">
+                      <UserPlus className="w-5 h-5 text-green-600 dark:text-green-500" />
+                    </div>
+                    <span className="text-sm font-medium text-green-600 dark:text-green-500">Add participant</span>
+                  </button>
+                )}
 
             {/* Members List - Virtualized */}
             {isLoadingGroupDetails ? (
@@ -528,6 +580,15 @@ export default function GroupDetailsViewPage() {
             ) : (
               <p className="text-sm text-muted-foreground text-center py-8">No members found</p>
             )}
+              </TabsContent>
+
+              {/* Join Requests Tab - Only visible to admins */}
+              {isAdmin && (
+                <TabsContent value="requests" className="mt-0">
+                  <JoinRequestsTab groupId={activeGroup?.id || ''} />
+                </TabsContent>
+              )}
+            </Tabs>
           </div>
 
           <Separator className="my-2" />

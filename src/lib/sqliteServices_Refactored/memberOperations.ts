@@ -55,11 +55,31 @@ export class MemberOperations {
     const db = this.dbManager.getConnection();
 
     const sql = `
-      SELECT * FROM user_pseudonyms 
+      SELECT * FROM user_pseudonyms
       WHERE group_id = ?
     `;
 
     const result = await db.query(sql, [groupId]);
     return result.values || [];
+  }
+
+  public async deleteGroupMember(groupId: string, userId: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    await db.run(
+      `DELETE FROM group_members WHERE group_id = ? AND user_id = ?;`,
+      [groupId, userId]
+    );
+  }
+
+  public async updateGroupMemberRole(groupId: string, userId: string, role: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    await db.run(
+      `UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?;`,
+      [role, groupId, userId]
+    );
   }
 }

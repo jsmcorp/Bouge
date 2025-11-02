@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
@@ -13,12 +13,14 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useChatStore } from '@/store/chatStore';
+import { useAuthStore } from '@/store/authStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { MessageList } from '@/components/chat/MessageList';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ThreadPanel } from '@/components/chat/ThreadPanel';
 import { GroupDetailsPanel } from '@/components/dashboard/GroupDetailsPanel';
 import { WhatsAppEmojiPanel } from '@/components/chat/WhatsAppEmojiPanel';
+import { NonMemberBanner } from '@/components/chat/NonMemberBanner';
 import { unreadTracker } from '@/lib/unreadTracker';
 
 export function ChatArea() {
@@ -26,6 +28,7 @@ export function ChatArea() {
   const isMobile = useIsMobile();
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const { user } = useAuthStore();
   const {
     activeGroup,
     fetchMessages,
@@ -34,8 +37,17 @@ export function ChatArea() {
     connectionStatus,
     cleanupRealtimeSubscription,
     showGroupDetailsPanel,
-    setShowGroupDetailsPanel
+    setShowGroupDetailsPanel,
+    groupMembers
   } = useChatStore();
+
+  // Check if current user is a member of the active group
+  const isMember = useMemo(() => {
+    if (!activeGroup?.id || !user?.id || !groupMembers || groupMembers.length === 0) {
+      return true; // Default to true if we don't have member data yet
+    }
+    return groupMembers.some(member => member.user_id === user.id);
+  }, [activeGroup?.id, user?.id, groupMembers]);
 
   // The emoji selection is handled by the WhatsAppEmojiPanel component
   const handleEmojiSelect = () => {};
@@ -251,12 +263,18 @@ export function ChatArea() {
           <MessageList />
         </div>
 
-        {/* Input - Fixed at bottom */}
+        {/* Non-member banner or Input - Fixed at bottom */}
         <div className="flex-shrink-0">
-          <ChatInput
-            showEmojiPanel={showEmojiPanel}
-            setShowEmojiPanel={setShowEmojiPanel}
-          />
+          {!isMember ? (
+            <div className="p-4 border-t bg-background">
+              <NonMemberBanner reason="removed" />
+            </div>
+          ) : (
+            <ChatInput
+              showEmojiPanel={showEmojiPanel}
+              setShowEmojiPanel={setShowEmojiPanel}
+            />
+          )}
         </div>
       </div>
 

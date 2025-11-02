@@ -145,4 +145,6 @@ export interface ChatState {
   // Unread message tracking
   firstUnreadMessageId?: string | null;
   unreadCount?: number;
+  // Join requests
+  pendingJoinRequests: any[]; // Will be typed as JoinRequest[] from joinRequestService
 }

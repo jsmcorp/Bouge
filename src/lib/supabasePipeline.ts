@@ -2864,6 +2864,15 @@ class SupabasePipeline {
   }
 
   /**
+   * Get Supabase client (public wrapper for getClient)
+   * Use this for simple queries that don't need special auth handling
+   * @returns Promise<any> - Supabase client
+   */
+  public async getSupabaseClient(): Promise<any> {
+    return this.getClient();
+  }
+
+  /**
    * Get client with guaranteed valid auth token
    * CRITICAL: Use this for background operations that need auth (e.g., FCM message fetch)
    *
