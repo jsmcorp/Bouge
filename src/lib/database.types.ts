@@ -14,20 +14,75 @@ export type Database = {
   }
   public: {
     Tables: {
+      group_join_requests: {
+        Row: {
+          created_at: string | null
+          group_id: string
+          id: string
+          invited_by: string | null
+          status: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          group_id: string
+          id?: string
+          invited_by?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          group_id?: string
+          id?: string
+          invited_by?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_join_requests_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_join_requests_invited_by_fkey"
+            columns: ["invited_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_join_requests_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_members: {
         Row: {
           group_id: string
           joined_at: string | null
+          role: string | null
           user_id: string
         }
         Insert: {
           group_id: string
           joined_at?: string | null
+          role?: string | null
           user_id: string
         }
         Update: {
           group_id?: string
           joined_at?: string | null
+          role?: string | null
           user_id?: string
         }
         Relationships: [

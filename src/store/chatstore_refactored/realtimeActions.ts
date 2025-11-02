@@ -1014,6 +1014,73 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           set({ polls: updatedPolls, messages: updatedMessages as Message[] });
         });
 
+        // Join request inserts - notify admins of new requests
+        channel.on('postgres_changes', {
+          event: 'INSERT', schema: 'public', table: 'group_join_requests', filter: groupFilter,
+        }, async (payload: any) => {
+          if (localToken !== connectionToken) return;
+          bumpActivity();
+          updateLastEventTime();
+
+          const request = payload.new;
+          const requestGroupId = request.group_id;
+
+          log(`📬 New join request received for group ${requestGroupId}`);
+
+          // Check if user is admin of the group that received the request
+          const state = get();
+          const targetGroup = state.groups.find((g: any) => g.id === requestGroupId);
+          const isAdmin = targetGroup && targetGroup.created_by === user.id;
+
+          if (isAdmin) {
+            log(`🔔 User is admin of group ${requestGroupId}, refreshing pending requests`);
+
+            // Refresh pending requests list for this group
+            if (state.fetchPendingJoinRequests) {
+              await state.fetchPendingJoinRequests(requestGroupId);
+            }
+
+            // If this is the active group, update the count
+            if (state.activeGroup?.id === requestGroupId && state.getPendingRequestCount) {
+              const count = await state.getPendingRequestCount(requestGroupId);
+              log(`📊 Updated pending request count for active group: ${count}`);
+            }
+          }
+        });
+
+        // Join request updates - refresh when status changes
+        channel.on('postgres_changes', {
+          event: 'UPDATE', schema: 'public', table: 'group_join_requests', filter: groupFilter,
+        }, async (payload: any) => {
+          if (localToken !== connectionToken) return;
+          bumpActivity();
+          updateLastEventTime();
+
+          const request = payload.new;
+          const requestGroupId = request.group_id;
+
+          log(`📝 Join request updated: ${request.id} - status: ${request.status} for group ${requestGroupId}`);
+
+          const state = get();
+
+          // If approved, refresh group members for the affected group
+          if (request.status === 'approved') {
+            log(`✅ Join request approved, refreshing members for group ${requestGroupId}`);
+            await state.fetchGroupMembers(requestGroupId);
+          }
+
+          // Refresh pending requests list for the affected group
+          if (state.fetchPendingJoinRequests) {
+            await state.fetchPendingJoinRequests(requestGroupId);
+          }
+
+          // If this is the active group, update the count
+          if (state.activeGroup?.id === requestGroupId && state.getPendingRequestCount) {
+            const count = await state.getPendingRequestCount(requestGroupId);
+            log(`📊 Updated pending request count after status change: ${count}`);
+          }
+        });
+
         // Presence events
         channel
           .on('presence', { event: 'sync' }, () => {

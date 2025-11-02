@@ -29,8 +29,13 @@ export function JoinGroupDialog({ open, onOpenChange }: JoinGroupDialogProps) {
 
     setIsLoading(true);
     try {
-      await joinGroup(inviteCode.trim());
-      toast.success('Successfully joined the group!');
+      const result = await joinGroup(inviteCode.trim());
+
+      // Show the message returned from the joinGroup function
+      if (result.success) {
+        toast.success(result.message || 'Join request sent! Waiting for admin approval.');
+      }
+
       onOpenChange(false);
       setInviteCode('');
     } catch (error: any) {

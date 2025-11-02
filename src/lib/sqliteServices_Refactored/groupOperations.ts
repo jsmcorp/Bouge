@@ -54,7 +54,7 @@ export class GroupOperations {
   public async updateLastSyncTimestamp(groupId: string, timestamp: number): Promise<void> {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
-    
+
     try {
       await db.run(
         'UPDATE groups SET last_sync_timestamp = ? WHERE id = ?',
@@ -63,5 +63,25 @@ export class GroupOperations {
     } catch (error) {
       console.error(`❌ Error updating last sync timestamp for group ${groupId}:`, error);
     }
+  }
+
+  public async deleteGroup(groupId: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    await db.run(
+      `DELETE FROM groups WHERE id = ?;`,
+      [groupId]
+    );
+  }
+
+  public async updateGroupCreator(groupId: string, createdBy: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    await db.run(
+      `UPDATE groups SET created_by = ? WHERE id = ?;`,
+      [createdBy, groupId]
+    );
   }
 }

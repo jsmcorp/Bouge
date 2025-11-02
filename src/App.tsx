@@ -359,6 +359,16 @@ function AppContent() {
             }
           />
 
+          {/* Add Members to Group Flow */}
+          <Route
+            path="/groups/:groupId/add-members"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <ContactSelectionPage />
+              </ProtectedRoute>
+            }
+          />
+
           <Route
             path="/settings"
             element={

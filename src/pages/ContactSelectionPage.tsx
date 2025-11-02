@@ -1,13 +1,15 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Search, RefreshCw, Share2, Check, UserCircle, CheckCircle2, Circle } from 'lucide-react';
+import { useNavigate, useLocation, useParams } from 'react-router-dom';
+import { ArrowLeft, Search, RefreshCw, Share2, Check, UserCircle, CheckCircle2, Circle, UserCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import type { VariableSizeList as RVList, ListOnItemsRenderedProps, ListChildComponentProps } from 'react-window';
 import { VariableSizeList } from 'react-window';
 import { useContactsStore } from '@/store/contactsStore';
+import { useChatStore } from '@/store/chatStore';
 import { PermissionRequest } from '@/components/contacts/PermissionRequest';
 import { RegisteredContact, LocalContact } from '@/lib/sqliteServices_Refactored/types';
 import { Share } from '@capacitor/share';
@@ -24,6 +26,7 @@ interface SelectedContact {
 export default function ContactSelectionPage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { groupId } = useParams();
   const {
     contacts,
     registeredUsers,
@@ -36,13 +39,35 @@ export default function ContactSelectionPage() {
     searchContacts,
   } = useContactsStore();
 
+  const { groupMembers, fetchGroupMembers, addGroupMembers } = useChatStore();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isAddingMembers, setIsAddingMembers] = useState(false);
+
+  // Determine if we're in "add members" mode or "create group" mode
+  const isAddMembersMode = !!groupId;
 
   // Get previously selected contacts from navigation state (typed)
   const navState = location.state as { selectedContacts?: SelectedContact[] } | null;
   const previouslySelected = navState?.selectedContacts ?? [];
+
+  // Fetch existing group members if in add members mode
+  useEffect(() => {
+    if (isAddMembersMode && groupId) {
+      fetchGroupMembers(groupId);
+    }
+    // CRITICAL FIX: Don't include fetchGroupMembers in deps
+    // It's a stable Zustand action and including it causes infinite re-fetches
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAddMembersMode, groupId]);
+
+  // Create a set of existing member user IDs for quick lookup
+  const existingMemberUserIds = useMemo(() => {
+    if (!isAddMembersMode) return new Set<string>();
+    return new Set(groupMembers.map(m => m.user_id));
+  }, [isAddMembersMode, groupMembers]);
 
   // Initialize selected contacts from previous selection
   useEffect(() => {
@@ -193,9 +218,6 @@ export default function ContactSelectionPage() {
       handleToggleContact(contactId);
     }
   };
-  const handleBack = () => {
-    navigate(-1);
-  };
 
   const handleToggleContact = (contactId: number) => {
     setSelectedContactIds(prev => {
@@ -242,7 +264,7 @@ export default function ContactSelectionPage() {
     }
   };
 
-  const handleDone = () => {
+  const handleDone = async () => {
     const selected: SelectedContact[] = [];
 
     selectedContactIds.forEach(contactId => {
@@ -260,11 +282,47 @@ export default function ContactSelectionPage() {
       });
     });
 
-    // Navigate back to create group page with selected contacts
-    navigate('/create-group', {
-      state: { selectedContacts: selected },
-      replace: true
-    });
+    if (isAddMembersMode && groupId) {
+      // Add members mode - add selected users to the group
+      setIsAddingMembers(true);
+      try {
+        const userIds = selected
+          .filter(c => c.isRegistered && c.userId)
+          .map(c => c.userId!);
+
+        if (userIds.length === 0) {
+          toast.error('Please select at least one registered user');
+          return;
+        }
+
+        await addGroupMembers(groupId, userIds);
+
+        const memberCount = userIds.length;
+        toast.success(`${memberCount} member${memberCount !== 1 ? 's' : ''} added successfully`);
+
+        // Navigate back to group details
+        navigate(`/groups/${groupId}/details`, { replace: true });
+      } catch (error) {
+        console.error('Failed to add members:', error);
+        toast.error('Failed to add members. Please try again.');
+      } finally {
+        setIsAddingMembers(false);
+      }
+    } else {
+      // Create group mode - navigate back to create group page with selected contacts
+      navigate('/create-group', {
+        state: { selectedContacts: selected },
+        replace: true
+      });
+    }
+  };
+
+  const handleBack = () => {
+    if (isAddMembersMode && groupId) {
+      navigate(`/groups/${groupId}/details`);
+    } else {
+      navigate('/create-group');
+    }
   };
 
   return (
@@ -281,7 +339,9 @@ export default function ContactSelectionPage() {
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div className="flex-1">
-            <h1 className="text-lg font-semibold">Select Contacts</h1>
+            <h1 className="text-lg font-semibold">
+              {isAddMembersMode ? 'Add Participants' : 'Select Contacts'}
+            </h1>
             <p className="text-xs text-muted-foreground">
               {selectedContactIds.size > 0
                 ? `${selectedContactIds.size} selected`
@@ -422,19 +482,25 @@ export default function ContactSelectionPage() {
                           const isSelected = selectedContactIds.has(contact.id);
                           if (it.group === 'registered') {
                             const registeredUser = it.registeredUser;
+                            const isAlreadyMember = isAddMembersMode && registeredUser?.user_id && existingMemberUserIds.has(registeredUser.user_id);
                             return (
                               <div style={style} className="w-full">
                                 <div
                                   role="checkbox"
                                   aria-checked={isSelected}
-                                  tabIndex={0}
-                                  onKeyDown={(e) => onRowKeyDown(e, contact.id)}
-                                  onClick={() => handleToggleContact(contact.id)}
+                                  aria-disabled={isAlreadyMember || undefined}
+                                  tabIndex={isAlreadyMember ? -1 : 0}
+                                  onKeyDown={(e) => !isAlreadyMember && onRowKeyDown(e, contact.id)}
+                                  onClick={() => !isAlreadyMember && handleToggleContact(contact.id)}
                                   className={`group w-full flex items-center justify-between px-4 py-3 transition-colors min-h-[56px] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                                    isSelected ? 'bg-green-50 dark:bg-green-950/20' : 'hover:bg-muted/50 active:bg-muted/70'
+                                    isAlreadyMember
+                                      ? 'opacity-50 cursor-not-allowed bg-muted/30'
+                                      : isSelected
+                                        ? 'bg-green-50 dark:bg-green-950/20'
+                                        : 'hover:bg-muted/50 active:bg-muted/70 cursor-pointer'
                                   }`}
                                 >
-                                  <div className="flex items-center space-x-3 min-w-0">
+                                  <div className="flex items-center space-x-3 min-w-0 flex-1">
                                     <div className="w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 overflow-hidden">
                                       {registeredUser?.user_avatar_url ? (
                                         <img src={registeredUser.user_avatar_url} alt={contact.display_name} className="w-12 h-12 object-cover" />
@@ -442,13 +508,21 @@ export default function ContactSelectionPage() {
                                         <UserCircle className="w-7 h-7 text-green-600" />
                                       )}
                                     </div>
-                                    <div className="min-w-0">
+                                    <div className="min-w-0 flex-1">
                                       <p className="text-[15px] font-medium truncate">{contact.display_name}</p>
                                       <p className="text-xs text-muted-foreground truncate">{contact.phone_number}</p>
                                     </div>
+                                    {isAlreadyMember && (
+                                      <Badge variant="secondary" className="text-xs ml-2 flex-shrink-0">
+                                        <UserCheck className="w-3 h-3 mr-1" />
+                                        Already in group
+                                      </Badge>
+                                    )}
                                   </div>
                                   <div className="ml-3 flex-shrink-0">
-                                    {isSelected ? (
+                                    {isAlreadyMember ? (
+                                      <UserCheck className="h-5 w-5 text-muted-foreground" />
+                                    ) : isSelected ? (
                                       <CheckCircle2 className="h-5 w-5 text-green-600 transition-opacity" />
                                     ) : (
                                       <Circle className="h-5 w-5 text-muted-foreground/50 transition-opacity" />
@@ -538,8 +612,12 @@ export default function ContactSelectionPage() {
             <Button
               type="button"
               onClick={handleDone}
-              className="fixed bottom-6 right-5 h-14 w-14 rounded-full shadow-lg bg-green-600 hover:bg-green-700 text-white"
-              aria-label={`Add ${selectedContactIds.size} contact${selectedContactIds.size !== 1 ? 's' : ''}`}
+              disabled={isAddingMembers}
+              className="fixed bottom-6 right-5 h-14 w-14 rounded-full shadow-lg bg-green-600 hover:bg-green-700 text-white disabled:opacity-50"
+              aria-label={isAddMembersMode
+                ? `Add ${selectedContactIds.size} participant${selectedContactIds.size !== 1 ? 's' : ''}`
+                : `Add ${selectedContactIds.size} contact${selectedContactIds.size !== 1 ? 's' : ''}`
+              }
             >
               <Check className="h-6 w-6" />
             </Button>
