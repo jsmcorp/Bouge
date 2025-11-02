@@ -149,17 +149,37 @@ export const createJoinRequestActions = (set: any, get: any): JoinRequestActions
 
       if (error) {
         console.error('[JoinRequestActions] Error getting pending request count:', error);
-        
+
         // Fallback to SQLite
         const isNative = Capacitor.isNativePlatform();
         const isSqliteReady = isNative && await sqliteService.isReady();
-        
+
         if (isSqliteReady) {
-          return await sqliteService.getPendingJoinRequestCount(groupId);
+          const count = await sqliteService.getPendingJoinRequestCount(groupId);
+
+          // Update state
+          const state = get();
+          set({
+            pendingRequestCounts: {
+              ...state.pendingRequestCounts,
+              [groupId]: count
+            }
+          });
+
+          return count;
         }
-        
+
         return 0;
       }
+
+      // Update state with the count
+      const state = get();
+      set({
+        pendingRequestCounts: {
+          ...state.pendingRequestCounts,
+          [groupId]: data
+        }
+      });
 
       return data;
     } catch (error) {

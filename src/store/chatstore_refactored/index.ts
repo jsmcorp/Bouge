@@ -101,6 +101,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     fetchToken: null,
     currentFetchGroupId: null,
     pendingJoinRequests: [],
+    pendingRequestCounts: {},
 
     // Combine all actions
     ...stateActions,

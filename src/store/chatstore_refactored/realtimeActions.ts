@@ -1017,21 +1017,34 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
         // Join request inserts - notify admins of new requests
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'group_join_requests', filter: groupFilter,
-        }, async () => {
+        }, async (payload: any) => {
           if (localToken !== connectionToken) return;
           bumpActivity();
           updateLastEventTime();
 
-          log(`📬 New join request received for group ${groupId}`);
+          const request = payload.new;
+          const requestGroupId = request.group_id;
 
-          // Refresh pending request count if user is admin
-          const { activeGroup } = get();
-          const isAdmin = activeGroup && activeGroup.created_by === user.id;
+          log(`📬 New join request received for group ${requestGroupId}`);
 
-          if (isAdmin && get().getPendingRequestCount) {
-            const count = await get().getPendingRequestCount(groupId);
-            // Update the count in the UI (this would need to be handled in the component)
-            log(`📊 Updated pending request count: ${count}`);
+          // Check if user is admin of the group that received the request
+          const state = get();
+          const targetGroup = state.groups.find((g: any) => g.id === requestGroupId);
+          const isAdmin = targetGroup && targetGroup.created_by === user.id;
+
+          if (isAdmin) {
+            log(`🔔 User is admin of group ${requestGroupId}, refreshing pending requests`);
+
+            // Refresh pending requests list for this group
+            if (state.fetchPendingJoinRequests) {
+              await state.fetchPendingJoinRequests(requestGroupId);
+            }
+
+            // If this is the active group, update the count
+            if (state.activeGroup?.id === requestGroupId && state.getPendingRequestCount) {
+              const count = await state.getPendingRequestCount(requestGroupId);
+              log(`📊 Updated pending request count for active group: ${count}`);
+            }
           }
         });
 
@@ -1044,16 +1057,27 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           updateLastEventTime();
 
           const request = payload.new;
-          log(`📝 Join request updated: ${request.id} - status: ${request.status}`);
+          const requestGroupId = request.group_id;
 
-          // If approved, refresh group members
+          log(`📝 Join request updated: ${request.id} - status: ${request.status} for group ${requestGroupId}`);
+
+          const state = get();
+
+          // If approved, refresh group members for the affected group
           if (request.status === 'approved') {
-            await get().fetchGroupMembers(groupId);
+            log(`✅ Join request approved, refreshing members for group ${requestGroupId}`);
+            await state.fetchGroupMembers(requestGroupId);
           }
 
-          // Refresh pending requests list
-          if (get().fetchPendingJoinRequests) {
-            await get().fetchPendingJoinRequests(groupId);
+          // Refresh pending requests list for the affected group
+          if (state.fetchPendingJoinRequests) {
+            await state.fetchPendingJoinRequests(requestGroupId);
+          }
+
+          // If this is the active group, update the count
+          if (state.activeGroup?.id === requestGroupId && state.getPendingRequestCount) {
+            const count = await state.getPendingRequestCount(requestGroupId);
+            log(`📊 Updated pending request count after status change: ${count}`);
           }
         });
 

@@ -147,4 +147,5 @@ export interface ChatState {
   unreadCount?: number;
   // Join requests
   pendingJoinRequests: any[]; // Will be typed as JoinRequest[] from joinRequestService
+  pendingRequestCounts: Record<string, number>; // Map of groupId -> pending request count
 }

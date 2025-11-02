@@ -79,7 +79,8 @@ export default function GroupDetailsViewPage() {
     updateGroup,
     removeGroupMember,
     leaveGroup,
-    getPendingRequestCount
+    getPendingRequestCount,
+    pendingRequestCounts
   } = useChatStore();
 
   const { user } = useAuthStore();
@@ -92,9 +93,11 @@ export default function GroupDetailsViewPage() {
   const [memberToRemove, setMemberToRemove] = useState<string | null>(null);
   const [showExitDialog, setShowExitDialog] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
-  const [pendingRequestCount, setPendingRequestCount] = useState(0);
   const [activeTab, setActiveTab] = useState('participants');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Get pending request count from store (updated in real-time)
+  const pendingRequestCount = activeGroup?.id ? (pendingRequestCounts[activeGroup.id] || 0) : 0;
 
   // Check if current user is a member of the group
   const isMember = activeGroup && user && groupMembers.some(m => m.user_id === user.id);
@@ -130,10 +133,9 @@ export default function GroupDetailsViewPage() {
       fetchGroupMedia(activeGroup.id);
 
       // Load pending request count if user is admin
+      // This will update the pendingRequestCounts state in the store
       if (isAdmin && getPendingRequestCount) {
-        getPendingRequestCount(activeGroup.id).then(count => {
-          setPendingRequestCount(count);
-        });
+        getPendingRequestCount(activeGroup.id);
       }
     }
     // CRITICAL FIX: Don't include fetchGroupMembers/fetchGroupMedia in deps
@@ -451,9 +453,9 @@ export default function GroupDetailsViewPage() {
               onValueChange={async (value) => {
                 setActiveTab(value);
                 // Refresh pending count when switching to requests tab
-                if (value === 'requests' && isAdmin && getPendingRequestCount) {
-                  const count = await getPendingRequestCount(activeGroup?.id || '');
-                  setPendingRequestCount(count);
+                // This will update the pendingRequestCounts state in the store
+                if (value === 'requests' && isAdmin && getPendingRequestCount && activeGroup?.id) {
+                  await getPendingRequestCount(activeGroup.id);
                 }
               }}
               className="w-full"
