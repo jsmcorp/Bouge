@@ -239,6 +239,35 @@ class BackgroundMessageSyncService {
           const totalElapsed = Date.now() - startTime;
           console.log(`[bg-sync] ✅ Message ${messageId} stored successfully after ${totalElapsed}ms (with retry)`);
 
+          // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+          try {
+            const { useChatStore } = await import('@/store/chatStore');
+            const chatStore = useChatStore.getState();
+            const isActiveGroup = chatStore.activeGroup?.id === groupId;
+            
+            if (isActiveGroup) {
+              console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show new message`);
+              await chatStore.fetchMessages(groupId);
+              
+              // CRITICAL FIX: Force scroll to bottom after refresh to show new message
+              setTimeout(() => {
+                const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+                if (viewport) {
+                  viewport.scrollTop = viewport.scrollHeight;
+                  console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+                }
+              }, 50);
+            } else {
+              console.log(`[bg-sync] 📨 Message for non-active group ${groupId}, dispatching background event`);
+              // Dispatch event for dashboard to show badge
+              window.dispatchEvent(new CustomEvent('message:background', {
+                detail: { groupId, messageId }
+              }));
+            }
+          } catch (error) {
+            console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
+          }
+
           // Trigger unread tracker callbacks
           try {
             const { unreadTracker } = await import('./unreadTracker');
@@ -269,6 +298,35 @@ class BackgroundMessageSyncService {
 
       const elapsed = Date.now() - startTime;
       console.log(`[bg-sync] ✅ Message ${messageId} stored successfully in ${elapsed}ms`);
+
+      // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+      try {
+        const { useChatStore } = await import('@/store/chatStore');
+        const chatStore = useChatStore.getState();
+        const isActiveGroup = chatStore.activeGroup?.id === groupId;
+        
+        if (isActiveGroup) {
+          console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show new message`);
+          await chatStore.fetchMessages(groupId);
+          
+          // CRITICAL FIX: Force scroll to bottom after refresh to show new message
+          setTimeout(() => {
+            const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+            if (viewport) {
+              viewport.scrollTop = viewport.scrollHeight;
+              console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+            }
+          }, 50);
+        } else {
+          console.log(`[bg-sync] 📨 Message for non-active group ${groupId}, dispatching background event`);
+          // Dispatch event for dashboard to show badge
+          window.dispatchEvent(new CustomEvent('message:background', {
+            detail: { groupId, messageId }
+          }));
+        }
+      } catch (error) {
+        console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
+      }
 
       // Trigger unread tracker callbacks to update dashboard badges
       try {
@@ -390,6 +448,42 @@ class BackgroundMessageSyncService {
       await sqliteService.updateLastSyncTimestamp(groupId, Date.now());
 
       console.log(`[bg-sync] ✅ Stored ${storedCount} missed messages for group ${groupId}`);
+
+      // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+      if (storedCount > 0) {
+        try {
+          const { useChatStore } = await import('@/store/chatStore');
+          const chatStore = useChatStore.getState();
+          const isActiveGroup = chatStore.activeGroup?.id === groupId;
+          
+          if (isActiveGroup) {
+            console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show ${storedCount} missed messages`);
+            await chatStore.fetchMessages(groupId);
+            
+            // CRITICAL FIX: Force scroll to bottom after refresh to show new messages
+            setTimeout(() => {
+              const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+              if (viewport) {
+                viewport.scrollTop = viewport.scrollHeight;
+                console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show ${storedCount} missed messages`);
+              }
+            }, 50);
+          } else {
+            console.log(`[bg-sync] 📨 ${storedCount} missed messages for non-active group ${groupId}`);
+          }
+        } catch (error) {
+          console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
+        }
+
+        // Trigger unread tracker callbacks
+        try {
+          const { unreadTracker } = await import('./unreadTracker');
+          await unreadTracker.triggerCallbacks(groupId);
+        } catch (error) {
+          console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
+        }
+      }
+
       return storedCount;
     } catch (error) {
       console.error(`[bg-sync] Failed to fetch missed messages for group ${groupId}:`, error);

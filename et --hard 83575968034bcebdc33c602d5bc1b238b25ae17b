@@ -1,0 +1,23 @@
+[33mcommit 83575968034bcebdc33c602d5bc1b238b25ae17b[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Merge: 5d8b9e3 967d5e4
+Author: jsmcorp <ramkrishnapawar333@gmail.com>
+Date:   Mon Nov 3 03:55:01 2025 +0530
+
+    Merge pull request #19 from jsmcorp/auggie
+    
+    phase 2 and 3
+
+ BEFORE_AFTER_COMPARISON.md                |  429 [31m----[m
+ DEPLOYMENT_READY.md                       |  390 [31m----[m
+ ENHANCEMENT_SUMMARY.md                    |  337 [31m----[m
+ IMPLEMENTATION_CHECKLIST.md               |  490 [31m-----[m
+ IMPLEMENTATION_COMPLETE.md                |  435 [31m----[m
+ README_PIPELINE_ENHANCEMENT.md            |  387 [31m----[m
+ phase2_replacements.py                    |   35 [32m+[m
+ plancheckforsupabasepipeline.md           |    0
+ src/lib/supabasePipeline.phase2.backup.ts | 2978 [32m++++++++++++++++++++++++++++[m
+ src/lib/supabasePipeline.ts               |  826 [32m+++[m[31m-----[m
+ src/lib/supabasePipeline.ts.phase2-backup | 3050 [32m+++++++++++++++++++++++++++++[m
+ supabase-pipeline-enhance.md              |  340 [32m+++[m[31m-[m
+ tsconfig.app.tsbuildinfo                  |    2 [32m+[m[31m-[m
+ 13 files changed, 6718 insertions(+), 2981 deletions(-)
