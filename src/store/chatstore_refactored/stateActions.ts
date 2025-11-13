@@ -8,6 +8,7 @@ export interface StateActions {
   setActiveGroup: (group: Group | null) => void;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
+  appendMessageWithDedupe: (message: Message) => void;
   updateMessage: (messageId: string, updates: Partial<Message>) => void;
   setPolls: (polls: Poll[]) => void;
   addPoll: (poll: Poll) => void;
@@ -103,6 +104,21 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   addMessage: (message) => set((state: any) => ({
     messages: [...state.messages, message]
   })),
+
+  appendMessageWithDedupe: (message) => set((state: any) => {
+    const exists = state.messages.some((m: Message) => m.id === message.id);
+    const next = exists
+      ? state.messages.map((m: Message) => (m.id === message.id ? { ...m, ...message } : m))
+      : [...state.messages, message];
+    const sorted = [...next].sort((a: Message, b: Message) => {
+      const ta = Number(a.created_at);
+      const tb = Number(b.created_at);
+      if (ta === tb) return 0;
+      return ta < tb ? -1 : 1;
+    });
+    const capped = sorted.slice(Math.max(0, sorted.length - 50));
+    return { messages: capped };
+  }),
   
   updateMessage: (messageId, updates) => set((state: any) => ({
     messages: state.messages.map((msg: Message) =>
@@ -213,47 +229,88 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     }
   },
 
-  // Simplified wake handler - just ensure connection and process outbox
+  // WHATSAPP-STYLE: Wake handler with instant message display
+  // Called when FCM notification arrives or app resumes from background
   onWake: async (reason?: string, groupIdOverride?: string) => {
     try {
       console.log(`[realtime-v2] Wake event: ${reason || 'unknown'}`);
 
-      // DON'T auto-navigate to group - let user stay on dashboard
-      // Only navigate if user explicitly taps notification (handled by notificationActionPerformed)
-      // This allows dashboard badges to update without disrupting user
-      if (groupIdOverride) {
-        console.log(`[realtime-v2] 📬 New message in group ${groupIdOverride} - staying on current screen`);
-        // Store the group ID for potential future use, but don't navigate
+      const state = get();
+      const connectionStatus = state.connectionStatus;
+      const isRealtimeConnected = connectionStatus === 'connected';
+
+      // WHATSAPP-STYLE: If groupId provided and it's the active group, refresh UI from SQLite immediately
+      if (groupIdOverride && state.activeGroup?.id === groupIdOverride) {
+        console.log(`[realtime-v2] 📬 New message in active group ${groupIdOverride} - refreshing UI from SQLite`);
+        if (typeof state.refreshUIFromSQLite === 'function') {
+          const start = performance.now();
+          await state.refreshUIFromSQLite(groupIdOverride);
+          const dur = Math.round(performance.now() - start);
+          console.log(`[ui] refresh group=${groupIdOverride} dur=${dur}ms mode=fast-path`);
+        }
+      } else if (groupIdOverride) {
+        console.log(`[realtime-v2] 📨 New message in background group ${groupIdOverride} - staying on current screen`);
+        // Update unread count for background group
+        try {
+          const { unreadTracker } = await import('@/lib/unreadTracker');
+          await unreadTracker.triggerCallbacks(groupIdOverride);
+        } catch (err) {
+          console.error('[realtime-v2] Failed to update unread count:', err);
+        }
       }
 
       // Resume connection
       get().onAppResumeSimplified();
 
-      // Fetch missed messages for all groups in background
+      // Trigger outbox processing immediately (send pending messages)
       try {
-        const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-        console.log('[realtime-v2] Fetching missed messages for all groups...');
-        const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
-        const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
-        console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
-
-        // Update unread counts for all groups that received messages
-        if (totalMissed > 0) {
-          try {
-            const { unreadTracker } = await import('@/lib/unreadTracker');
-            for (const [gId, count] of Object.entries(results)) {
-              if (count > 0) {
-                await unreadTracker.triggerCallbacks(gId);
-                console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
-              }
-            }
-          } catch (error) {
-            console.warn('[realtime-v2] Failed to update unread counts:', error);
-          }
-        }
+        const { triggerOutboxProcessing } = await import('./offlineActions');
+        triggerOutboxProcessing('onWake', 'immediate');
       } catch (error) {
-        console.error('[realtime-v2] Error fetching missed messages:', error);
+        console.error('[realtime-v2] Failed to trigger outbox processing:', error);
       }
+
+      // OPTIMIZATION: Skip missed message fetch if realtime is connected and message was just delivered
+      // Realtime already delivered the message, no need to fetch from REST
+      if (isRealtimeConnected && groupIdOverride) {
+        console.log('[realtime-v2] ⚡ Skipping missed message fetch - realtime delivered message already');
+      } else {
+        // Only fetch missed messages if realtime is disconnected or this is a general wake (no specific group)
+        try {
+          const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+          console.log('[realtime-v2] Fetching missed messages for all groups...');
+          const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
+          const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
+          console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
+
+          // Update unread counts for all groups that received messages
+          if (totalMissed > 0) {
+            try {
+              const { unreadTracker } = await import('@/lib/unreadTracker');
+              for (const [gId, count] of Object.entries(results)) {
+                if (count > 0) {
+                  await unreadTracker.triggerCallbacks(gId);
+                  console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
+                }
+              }
+            } catch (error) {
+              console.warn('[realtime-v2] Failed to update unread counts:', error);
+            }
+          }
+        } catch (error) {
+          console.error('[realtime-v2] Error fetching missed messages:', error);
+        }
+      }
+
+      // Ensure realtime is reconnected (if it was dead)
+      if (connectionStatus !== 'connected' && state.activeGroup?.id) {
+        console.log(`[realtime-v2] 🔄 Realtime not connected (${connectionStatus}), forcing reconnection`);
+        if (typeof state.setupSimplifiedRealtimeSubscription === 'function') {
+          await state.setupSimplifiedRealtimeSubscription(state.activeGroup.id);
+        }
+      }
+
+      console.log(`[realtime-v2] ✅ Wake handling complete`);
     } catch (e) {
       console.warn('[realtime-v2] onWake error:', e);
     }

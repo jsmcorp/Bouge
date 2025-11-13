@@ -879,11 +879,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
         // CRITICAL FIX: Subscribe to messages for ALL user's groups
         // This ensures messages are received even when user is in a different group
+        const DEBUG_REALTIME = true;
         const groupFilter = allGroupIds.length === 1
           ? `group_id=eq.${allGroupIds[0]}`
-          : `group_id=in.(${allGroupIds.join(',')})`;
+          : `or=(${allGroupIds.map((id: string) => `group_id.eq.${id}`).join(',')})`;
 
         log(`📡 Subscribing to messages with filter: ${groupFilter}`);
+        if (DEBUG_REALTIME) {
+          log(`🧪 DEBUG: Group IDs = ${JSON.stringify(allGroupIds)}`);
+        }
 
         channel.on('postgres_changes', {
           event: 'INSERT', schema: 'public', table: 'messages', filter: groupFilter,
@@ -914,6 +918,38 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             if (isForActiveGroup) {
               attachMessageToState(message);
               log(`📨 Message attached to state: id=${message.id} (active group)`);
+              
+              // WHATSAPP-STYLE INSTANT DISPLAY: Auto-scroll to show new message immediately
+              // This ensures messages appear instantly like WhatsApp
+              setTimeout(() => {
+                try {
+                  const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+                  if (viewport) {
+                    const isNearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 200;
+                    
+                    // Only auto-scroll if user is near bottom (not reading old messages)
+                    if (isNearBottom) {
+                      viewport.scrollTop = viewport.scrollHeight;
+                      log(`📍 Auto-scrolled to show new message: ${message.id}`);
+                    } else {
+                      log(`📍 User is reading old messages, not auto-scrolling`);
+                      
+                      // Show "New message" indicator if user is reading old messages
+                      const isOwnMessage = row.user_id === user.id;
+                      if (!isOwnMessage) {
+                        try {
+                          // Dispatch event to show "scroll to bottom" button
+                          window.dispatchEvent(new CustomEvent('message:new-below', {
+                            detail: { messageId: message.id, groupId: row.group_id }
+                          }));
+                        } catch {}
+                      }
+                    }
+                  }
+                } catch (scrollErr) {
+                  console.warn('⚠️ Failed to auto-scroll:', scrollErr);
+                }
+              }, 50);
             } else {
               log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
 
@@ -974,6 +1010,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             log('❌ Failed to process message insert: ' + e);
           }
         });
+
+        if (DEBUG_REALTIME) {
+          channel.on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'messages'
+          }, (payload: any) => {
+            try {
+              const row = payload.new as DbMessageRow;
+              log(`🧪 DEBUG: Unfiltered INSERT observed: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}..."`);
+            } catch (err) {
+              log(`🧪 DEBUG: Failed to log unfiltered INSERT: ${err}`);
+            }
+          });
+        }
 
         // Poll inserts
         channel.on('postgres_changes', {
@@ -1111,6 +1160,9 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             bumpActivity();
 
             if (status === 'SUBSCRIBED') {
+              if (DEBUG_REALTIME) {
+                log('🧪 DEBUG: Subscription is SUBSCRIBED; handlers registered for messages, polls, votes, join-requests');
+              }
               // Connection established successfully
               // Removed: resetting outbox state here could interrupt an in-flight drain and cause concurrency
               // resetOutboxProcessingState();

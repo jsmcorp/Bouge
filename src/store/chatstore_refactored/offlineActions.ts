@@ -11,6 +11,8 @@ import { outboxProcessorInterval, setOutboxProcessorInterval } from './utils';
 
 // Processing state (managed in pipeline now)
 let triggerTimeout: NodeJS.Timeout | null = null;
+let lastTriggerContext: string | null = null;
+let lastTriggerTime = 0;
 
 // Simple per-group refresh throttling (WhatsApp-style: avoid frequent back-to-back refresh)
 const groupRefreshThrottleMs = 2000;
@@ -23,12 +25,24 @@ export const resetOutboxProcessingState = () => {
     clearTimeout(triggerTimeout);
     triggerTimeout = null;
   }
+  lastTriggerContext = null;
+  lastTriggerTime = 0;
   // Processing lock lives in pipeline now; nothing else to reset here
 };
 
 // Unified trigger system - thin wrapper that delegates to pipeline (single-flight inside pipeline)
 export const triggerOutboxProcessing = (context: string, priority: 'immediate' | 'high' | 'normal' | 'low' = 'normal') => {
+  const now = Date.now();
+  
+  // OPTIMIZATION: Debounce rapid triggers within 100ms window
+  if (lastTriggerContext && now - lastTriggerTime < 100) {
+    console.log(`[outbox-unified] Debouncing trigger from: ${context} (last: ${lastTriggerContext}, ${now - lastTriggerTime}ms ago)`);
+    return;
+  }
+
   console.log(`[outbox-unified] Trigger requested from: ${context} (priority: ${priority})`);
+  lastTriggerContext = context;
+  lastTriggerTime = now;
 
   // Clear any existing trigger timeout (coalesce; trailing-edge true)
   if (triggerTimeout) {
@@ -69,6 +83,8 @@ export interface OfflineActions {
     id: string; group_id: string; user_id: string; content: string; is_ghost: boolean;
     message_type: string; category: string | null; parent_id: string | null; image_url: string | null;
   }) => Promise<void>;
+  // WHATSAPP-STYLE: Instant UI refresh from SQLite
+  refreshUIFromSQLite: (groupId: string) => Promise<void>;
 }
 
 // 🔁 Helpers to remove duplicate code
@@ -99,6 +115,105 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
   // Unified trigger system - accessible as a store action
   triggerOutboxProcessing: (context: string, priority: 'immediate' | 'high' | 'normal' | 'low' = 'normal') => {
     triggerOutboxProcessing(context, priority);
+  },
+
+  // WHATSAPP-STYLE: Instant UI refresh from SQLite (no network delay)
+  // Loads messages from local SQLite and updates UI immediately
+  refreshUIFromSQLite: async (groupId: string) => {
+    console.log(`[refreshUIFromSQLite] 🔄 Loading messages from SQLite for group ${groupId}`);
+    
+    try {
+      const isNative = Capacitor.isNativePlatform();
+      if (!isNative) {
+        console.log('[refreshUIFromSQLite] Not on native platform, skipping');
+        return;
+      }
+
+      const ready = await sqliteService.isReady();
+      if (!ready) {
+        console.log('[refreshUIFromSQLite] SQLite not ready, skipping');
+        return;
+      }
+
+      // Load messages from SQLite (up to 50 most recent)
+      const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+      
+      if (!localMessages || localMessages.length === 0) {
+        console.log('[refreshUIFromSQLite] No local messages found');
+        return;
+      }
+
+      console.log(`[refreshUIFromSQLite] 📦 Loaded ${localMessages.length} messages from SQLite`);
+
+      // Get user info for non-ghost messages
+      const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+      const userCache = new Map();
+      
+      for (const userId of userIds) {
+        try {
+          const user = await sqliteService.getUser(userId);
+          if (user) {
+            userCache.set(userId, {
+              display_name: user.display_name,
+              avatar_url: user.avatar_url || null
+            });
+          }
+        } catch (error) {
+          console.error(`[refreshUIFromSQLite] Error loading user ${userId}:`, error);
+        }
+      }
+      
+      // Convert to Message format
+      const messages = localMessages.map((msg: any) => ({
+        id: msg.id,
+        group_id: msg.group_id,
+        user_id: msg.user_id,
+        content: msg.content,
+        is_ghost: msg.is_ghost === 1,
+        message_type: msg.message_type,
+        category: msg.category,
+        parent_id: msg.parent_id,
+        image_url: msg.image_url,
+        created_at: new Date(msg.created_at).toISOString(),
+        author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+        reply_count: 0,
+        replies: [],
+        delivery_status: 'delivered' as const,
+        reactions: [],
+      }));
+      
+      // Sort messages by created_at ascending (oldest first)
+      messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      
+      // CRITICAL FIX: Force React re-render by creating new array reference
+      // This ensures React detects the change and updates the UI
+      const currentState = get();
+      const currentMessages = currentState.messages || [];
+      
+      // Only update if messages actually changed
+      const hasNewMessages = messages.length !== currentMessages.length || 
+        messages.some((msg, idx) => msg.id !== currentMessages[idx]?.id);
+      
+      if (hasNewMessages) {
+        // Create completely new array to force React re-render
+        _set({ messages: [...messages], fetchToken: Date.now().toString() });
+        console.log(`[refreshUIFromSQLite] ✅ UI updated with ${messages.length} messages from SQLite (forced re-render)`);
+        
+        // Force scroll to bottom to show new message
+        setTimeout(() => {
+          const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+          if (viewport) {
+            viewport.scrollTop = viewport.scrollHeight;
+            console.log(`[refreshUIFromSQLite] 📍 Auto-scrolled to bottom`);
+          }
+        }, 100); // Increased delay to ensure React has rendered
+      } else {
+        console.log(`[refreshUIFromSQLite] ℹ️ No new messages, skipping update`);
+      }
+
+    } catch (error) {
+      console.error('[refreshUIFromSQLite] ❌ Error refreshing UI from SQLite:', error);
+    }
   },
   // Draft stage: persist local message immediately for guaranteed recovery
   markMessageAsDraft: async (msg) => {

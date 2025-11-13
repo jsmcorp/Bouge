@@ -159,8 +159,11 @@ class SupabasePipeline {
     return this.sessionState.accessToken || null;
   }
 
+  // OPTIMIZATION: Single-flight protection for session refresh
+  private refreshInFlight: Promise<boolean> | null = null;
+
   /**
-   * PHASE 3: Unified session refresh method
+   * PHASE 3: Unified session refresh method with single-flight protection
    * Consolidates all session refresh logic into one method with configurable options
    * Replaces: refreshSessionDirect, refreshSessionInBackground, refreshQuickBounded, refreshSession
    */
@@ -168,11 +171,20 @@ class SupabasePipeline {
     timeout?: number;
     background?: boolean;
   } = {}): Promise<boolean> {
+    // OPTIMIZATION: Single-flight - if refresh is already in progress, wait for it
+    if (this.refreshInFlight) {
+      this.log(`🔄 refreshSessionUnified: waiting for in-flight refresh`);
+      return await this.refreshInFlight;
+    }
+
     const { timeout = 5000, background = false } = options;
     const started = Date.now();
     const mode = background ? 'background' : 'direct';
 
     this.log(`🔄 refreshSessionUnified(${mode}, timeout=${timeout}ms) start`);
+
+    // Create the refresh promise and store it
+    this.refreshInFlight = (async (): Promise<boolean> => {
 
     try {
       const client = await this.getClient();
@@ -248,6 +260,14 @@ class SupabasePipeline {
       this.log(`🔄 refreshSessionUnified error after ${took}ms: ${stringifyError(error)}`);
       this.sessionState.consecutiveFailures++;
       return false;
+    }
+    })();
+
+    try {
+      return await this.refreshInFlight;
+    } finally {
+      // Clear the in-flight promise after completion
+      this.refreshInFlight = null;
     }
   }
 

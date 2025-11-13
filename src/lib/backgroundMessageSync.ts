@@ -239,24 +239,72 @@ class BackgroundMessageSyncService {
           const totalElapsed = Date.now() - startTime;
           console.log(`[bg-sync] ✅ Message ${messageId} stored successfully after ${totalElapsed}ms (with retry)`);
 
-          // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+          // CRITICAL FIX: Directly load from SQLite and update UI without creating new fetchToken
+          // This prevents the "Skipping stale set" issue where fetchMessages() creates a new token
           try {
             const { useChatStore } = await import('@/store/chatStore');
-            const chatStore = useChatStore.getState();
-            const isActiveGroup = chatStore.activeGroup?.id === groupId;
+            const isActiveGroup = useChatStore.getState().activeGroup?.id === groupId;
             
             if (isActiveGroup) {
-              console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show new message`);
-              await chatStore.fetchMessages(groupId);
+              console.log(`[bg-sync] 🔄 Loading new message from SQLite to update UI (retry path)`);
               
-              // CRITICAL FIX: Force scroll to bottom after refresh to show new message
-              setTimeout(() => {
-                const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-                if (viewport) {
-                  viewport.scrollTop = viewport.scrollHeight;
-                  console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+              // Load the newly stored message from SQLite
+              const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+              
+              if (localMessages && localMessages.length > 0) {
+                // Get user info for non-ghost messages
+                const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+                const userCache = new Map();
+                
+                for (const userId of userIds) {
+                  try {
+                    const user = await sqliteService.getUser(userId);
+                    if (user) {
+                      userCache.set(userId, {
+                        display_name: user.display_name,
+                        avatar_url: user.avatar_url || null
+                      });
+                    }
+                  } catch (error) {
+                    console.error(`Error loading user ${userId}:`, error);
+                  }
                 }
-              }, 50);
+                
+                // Convert to Message format
+                const messages = localMessages.map((msg: any) => ({
+                  id: msg.id,
+                  group_id: msg.group_id,
+                  user_id: msg.user_id,
+                  content: msg.content,
+                  is_ghost: msg.is_ghost === 1,
+                  message_type: msg.message_type,
+                  category: msg.category,
+                  parent_id: msg.parent_id,
+                  image_url: msg.image_url,
+                  created_at: new Date(msg.created_at).toISOString(),
+                  author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+                  reply_count: 0,
+                  replies: [],
+                  delivery_status: 'delivered' as const,
+                  reactions: [],
+                }));
+                
+                // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
+                messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+                
+                // Directly update state without fetchToken check using Zustand's setState
+                useChatStore.setState({ messages });
+                console.log(`[bg-sync] ✅ UI updated with ${messages.length} messages from SQLite (retry path)`);
+                
+                // Force scroll to bottom after refresh to show new message
+                setTimeout(() => {
+                  const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+                  if (viewport) {
+                    viewport.scrollTop = viewport.scrollHeight;
+                    console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+                  }
+                }, 50);
+              }
             } else {
               console.log(`[bg-sync] 📨 Message for non-active group ${groupId}, dispatching background event`);
               // Dispatch event for dashboard to show badge
@@ -299,24 +347,72 @@ class BackgroundMessageSyncService {
       const elapsed = Date.now() - startTime;
       console.log(`[bg-sync] ✅ Message ${messageId} stored successfully in ${elapsed}ms`);
 
-      // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+      // CRITICAL FIX: Directly load from SQLite and update UI without creating new fetchToken
+      // This prevents the "Skipping stale set" issue where fetchMessages() creates a new token
       try {
         const { useChatStore } = await import('@/store/chatStore');
-        const chatStore = useChatStore.getState();
-        const isActiveGroup = chatStore.activeGroup?.id === groupId;
+        const isActiveGroup = useChatStore.getState().activeGroup?.id === groupId;
         
         if (isActiveGroup) {
-          console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show new message`);
-          await chatStore.fetchMessages(groupId);
+          console.log(`[bg-sync] 🔄 Loading new message from SQLite to update UI`);
           
-          // CRITICAL FIX: Force scroll to bottom after refresh to show new message
-          setTimeout(() => {
-            const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-            if (viewport) {
-              viewport.scrollTop = viewport.scrollHeight;
-              console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+          // Load the newly stored message from SQLite
+          const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+          
+          if (localMessages && localMessages.length > 0) {
+            // Get user info for non-ghost messages
+            const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+            const userCache = new Map();
+            
+            for (const userId of userIds) {
+              try {
+                const user = await sqliteService.getUser(userId);
+                if (user) {
+                  userCache.set(userId, {
+                    display_name: user.display_name,
+                    avatar_url: user.avatar_url || null
+                  });
+                }
+              } catch (error) {
+                console.error(`Error loading user ${userId}:`, error);
+              }
             }
-          }, 50);
+            
+            // Convert to Message format
+            const messages = localMessages.map((msg: any) => ({
+              id: msg.id,
+              group_id: msg.group_id,
+              user_id: msg.user_id,
+              content: msg.content,
+              is_ghost: msg.is_ghost === 1,
+              message_type: msg.message_type,
+              category: msg.category,
+              parent_id: msg.parent_id,
+              image_url: msg.image_url,
+              created_at: new Date(msg.created_at).toISOString(),
+              author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+              reply_count: 0,
+              replies: [],
+              delivery_status: 'delivered' as const,
+              reactions: [],
+            }));
+            
+            // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
+            messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            
+            // Directly update state without fetchToken check using Zustand's setState
+            useChatStore.setState({ messages });
+            console.log(`[bg-sync] ✅ UI updated with ${messages.length} messages from SQLite`);
+            
+            // Force scroll to bottom after refresh to show new message
+            setTimeout(() => {
+              const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+              if (viewport) {
+                viewport.scrollTop = viewport.scrollHeight;
+                console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
+              }
+            }, 50);
+          }
         } else {
           console.log(`[bg-sync] 📨 Message for non-active group ${groupId}, dispatching background event`);
           // Dispatch event for dashboard to show badge
@@ -449,25 +545,72 @@ class BackgroundMessageSyncService {
 
       console.log(`[bg-sync] ✅ Stored ${storedCount} missed messages for group ${groupId}`);
 
-      // CRITICAL FIX: Notify chat store to refresh UI if this is the active group
+      // CRITICAL FIX: Directly load from SQLite and update UI without creating new fetchToken
       if (storedCount > 0) {
         try {
           const { useChatStore } = await import('@/store/chatStore');
-          const chatStore = useChatStore.getState();
-          const isActiveGroup = chatStore.activeGroup?.id === groupId;
+          const isActiveGroup = useChatStore.getState().activeGroup?.id === groupId;
           
           if (isActiveGroup) {
-            console.log(`[bg-sync] 🔄 Refreshing active group ${groupId} to show ${storedCount} missed messages`);
-            await chatStore.fetchMessages(groupId);
+            console.log(`[bg-sync] 🔄 Loading ${storedCount} missed messages from SQLite to update UI`);
             
-            // CRITICAL FIX: Force scroll to bottom after refresh to show new messages
-            setTimeout(() => {
-              const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-              if (viewport) {
-                viewport.scrollTop = viewport.scrollHeight;
-                console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show ${storedCount} missed messages`);
+            // Load the newly stored messages from SQLite
+            const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+            
+            if (localMessages && localMessages.length > 0) {
+              // Get user info for non-ghost messages
+              const userIds = [...new Set(localMessages.filter(msg => !msg.is_ghost).map(msg => msg.user_id))];
+              const userCache = new Map();
+              
+              for (const userId of userIds) {
+                try {
+                  const user = await sqliteService.getUser(userId);
+                  if (user) {
+                    userCache.set(userId, {
+                      display_name: user.display_name,
+                      avatar_url: user.avatar_url || null
+                    });
+                  }
+                } catch (error) {
+                  console.error(`Error loading user ${userId}:`, error);
+                }
               }
-            }, 50);
+              
+              // Convert to Message format
+              const messages = localMessages.map((msg: any) => ({
+                id: msg.id,
+                group_id: msg.group_id,
+                user_id: msg.user_id,
+                content: msg.content,
+                is_ghost: msg.is_ghost === 1,
+                message_type: msg.message_type,
+                category: msg.category,
+                parent_id: msg.parent_id,
+                image_url: msg.image_url,
+                created_at: new Date(msg.created_at).toISOString(),
+                author: msg.is_ghost ? undefined : (userCache.get(msg.user_id) || { display_name: 'Unknown User', avatar_url: null }),
+                reply_count: 0,
+                replies: [],
+                delivery_status: 'delivered' as const,
+                reactions: [],
+              }));
+              
+              // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
+              messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+              
+              // Directly update state without fetchToken check using Zustand's setState
+              useChatStore.setState({ messages });
+              console.log(`[bg-sync] ✅ UI updated with ${messages.length} messages from SQLite`);
+              
+              // Force scroll to bottom after refresh to show new messages
+              setTimeout(() => {
+                const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+                if (viewport) {
+                  viewport.scrollTop = viewport.scrollHeight;
+                  console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show ${storedCount} missed messages`);
+                }
+              }, 50);
+            }
           } else {
             console.log(`[bg-sync] 📨 ${storedCount} missed messages for non-active group ${groupId}`);
           }

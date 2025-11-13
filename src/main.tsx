@@ -184,12 +184,20 @@ console.log('[main] 🚀 IIFE starting - about to initialize push notifications'
 		}
 	});
 
-	// Push wake bridge
+	// Push wake bridge - WHATSAPP-STYLE instant message handling
 	window.addEventListener('push:wakeup', (e: any) => {
 		try {
 			const detail = e?.detail || {};
 			console.log('📱 Push wakeup received:', detail);
-			useChatStore.getState().onWake?.(detail?.type || 'data', detail?.group_id);
+			// Call onWake handler for instant message display
+			const onWake = useChatStore.getState().onWake;
+			if (typeof onWake === 'function') {
+				onWake(detail?.type || 'data', detail?.group_id).catch((err: any) => {
+					console.error('Push wakeup handler error:', err);
+				});
+			} else {
+				console.warn('⚠️ onWake handler not available in chatStore');
+			}
 		} catch (error) {
 			console.error('Push wakeup handler error:', error);
 		}
