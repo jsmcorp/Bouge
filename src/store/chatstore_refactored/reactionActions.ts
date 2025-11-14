@@ -11,20 +11,23 @@ export const createReactionActions = (set: any, get: any): ReactionActions => ({
   addOrRemoveReaction: async (messageId: string, emoji: string) => {
     console.log(`🎭 addOrRemoveReaction called: messageId=${messageId}, emoji=${emoji}`);
     try {
-      const { data: { user } } = await supabasePipeline.getUser();
-      if (!user) {
-        console.error('❌ User not authenticated');
-        throw new Error('Not authenticated');
+      // Get user ID from auth store (synchronous, instant - no getUser() call!)
+      const authModule = await import('@/store/authStore');
+      const { user } = authModule.useAuthStore.getState();
+      if (!user?.id) {
+        console.error('❌ No user in auth store');
+        return;
       }
-      console.log(`✅ User authenticated: ${user.id}`);
+      const userId = user.id;
+      console.log(`✅ Got user ID from store: ${userId}`);
 
       const state = get();
       const currentReactions = state.messageReactions[messageId] || [];
       console.log(`📊 Current reactions for message:`, currentReactions);
       
       // Find any existing reaction from this user on this message
-      const existingUserReaction = currentReactions.find((r: Reaction) => r.user_id === user.id);
-      const existingReactionWithSameEmoji = currentReactions.find((r: Reaction) => r.user_id === user.id && r.emoji === emoji);
+      const existingUserReaction = currentReactions.find((r: Reaction) => r.user_id === userId);
+      const existingReactionWithSameEmoji = currentReactions.find((r: Reaction) => r.user_id === userId && r.emoji === emoji);
 
       if (existingReactionWithSameEmoji) {
         console.log(`🔄 Removing existing reaction: ${emoji}`);
