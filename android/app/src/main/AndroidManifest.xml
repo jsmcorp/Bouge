@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="true"
@@ -49,6 +50,22 @@
         <meta-data
             android:name="com.truecaller.android.sdk.ClientId"
             android:value="@string/truecaller_client_id" />
+
+        <!-- Custom Firebase Messaging Service for background message handling -->
+        <!-- CRITICAL: This replaces Capacitor's default service -->
+        <service
+            android:name=".MyFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        
+        <!-- Disable Capacitor's default Firebase Messaging Service -->
+        <service
+            android:name="io.capawesome.capacitorjs.plugins.firebase.messaging.MessagingService"
+            android:enabled="false"
+            tools:node="remove" />
 
     </application>
 

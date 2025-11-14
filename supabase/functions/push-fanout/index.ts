@@ -126,15 +126,23 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 	console.log(JSON.stringify({ tag: 'push-fcm-v1:request', projectId: FCM_PROJECT_ID, endpoint: url, tokenCount: tokens.length, reqId }));
 	const invalid: string[] = [];
 	for (const token of tokens) {
-		// DATA-ONLY payload for instant background delivery
-		// - No notification block: Allows notificationReceived listener to fire in background
-		// - Full message content in data: Enables direct SQLite write without REST fetch
-		// - App shows local notification after storing message
+		// HYBRID payload for production-grade background delivery
+		// - notification block: Android shows system notification even when app is dead
+		// - data block: Native FirebaseMessagingService writes to SQLite
+		// - This is how WhatsApp and other production apps work
 		//
 		// All data values MUST be strings (FCM requirement)
+		const groupName = data.group_name || 'New message';
+		const preview = data.content ? String(data.content).substring(0, 100) : 'You have a new message';
+		
 		const body = {
 			message: {
 				token,
+				// Notification block for system tray (works even when app is dead)
+				notification: {
+					title: groupName,
+					body: preview
+				},
 				// Data block with full message content (all values must be strings!)
 				data: {
 					...data,
@@ -149,7 +157,8 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 					msg_type: String(data.msg_type || 'text'), // Renamed from message_type
 					category: String(data.category || ''),
 					parent_id: String(data.parent_id || ''),
-					image_url: String(data.image_url || '')
+					image_url: String(data.image_url || ''),
+					group_name: String(data.group_name || 'New message')
 				},
 				android: {
 					priority: 'HIGH',
@@ -158,8 +167,12 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 					headers: { 'apns-priority': '10' },
 					payload: {
 						aps: {
-							'content-available': 1,
-							sound: 'default'
+							alert: {
+								title: groupName,
+								body: preview
+							},
+							sound: 'default',
+							badge: 1
 						}
 					},
 				},
@@ -186,13 +199,22 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
-	// DATA-ONLY payload for instant background delivery (same as v1)
-	// No notification block: Allows notificationReceived listener to fire in background
-	// Full message content in data: Enables direct SQLite write without REST fetch
+	// HYBRID payload for production-grade background delivery (same as v1)
+	// notification block: Android shows system notification even when app is dead
+	// data block: Native FirebaseMessagingService writes to SQLite
 	// All data values MUST be strings (FCM requirement)
+	const groupName = data.group_name || 'New message';
+	const preview = data.content ? String(data.content).substring(0, 100) : 'You have a new message';
+	
 	const payload = {
 		registration_ids: tokens,
 		priority: 'high',
+		// Notification block for system tray
+		notification: {
+			title: groupName,
+			body: preview,
+			sound: 'default'
+		},
 		// Data block with full message content (all values must be strings!)
 		data: {
 			...data,
@@ -206,7 +228,8 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 			msg_type: String(data.msg_type || 'text'), // Renamed from message_type
 			category: String(data.category || ''),
 			parent_id: String(data.parent_id || ''),
-			image_url: String(data.image_url || '')
+			image_url: String(data.image_url || ''),
+			group_name: String(data.group_name || 'New message')
 		},
 		android: {
 			priority: 'high',
@@ -215,8 +238,12 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 			headers: { 'apns-priority': '10' },
 			payload: {
 				aps: {
-					'content-available': 1,
-					sound: 'default'
+					alert: {
+						title: groupName,
+						body: preview
+					},
+					sound: 'default',
+					badge: 1
 				}
 			}
 		},
