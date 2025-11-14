@@ -34,6 +34,9 @@ export function clearRecentPush(groupId: string): void {
 // If these are garbage collected, the listeners are removed!
 const listenerHandles: any[] = [];
 
+// Track active group ID for native service
+let currentActiveGroupId: string | null = null;
+
 // ============================================================================
 // CRITICAL FIX: Single shared Promise for FirebaseMessaging import
 // This ensures we only import once and all code waits for the same Promise
@@ -55,6 +58,66 @@ function getFirebaseMessaging(): Promise<any> {
 			});
 	}
 	return firebaseMessagingPromise;
+}
+
+// ============================================================================
+// CRITICAL: Register native events listener for instant UI refresh
+// This listener receives events from MyFirebaseMessagingService when:
+// - App is in foreground
+// - Message is for the currently active group
+// - Message has been written to SQLite
+// ============================================================================
+if (Capacitor.isNativePlatform()) {
+	import('@/plugins/nativeEvents').then(({ default: NativeEvents }) => {
+		NativeEvents.addListener('nativeNewMessage', async (event) => {
+			console.log('[push] 🔔 Native new message event received:', event);
+			
+			try {
+				const { groupId } = event;
+				const activeGroup = useChatStore.getState().activeGroup;
+				
+				if (activeGroup?.id === groupId) {
+					console.log('[push] ⚡ Refreshing UI from SQLite for active group:', groupId);
+					
+					// Refresh UI from SQLite (message already written by native service)
+					if (typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
+						const startTime = performance.now();
+						await useChatStore.getState().refreshUIFromSQLite(groupId);
+						const duration = Math.round(performance.now() - startTime);
+						console.log(`[push] ✅ UI refreshed in ${duration}ms`);
+						
+						// Auto-scroll to show new message
+						setTimeout(() => {
+							const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+							if (viewport) {
+								viewport.scrollTop = viewport.scrollHeight;
+								console.log(`[push] 📍 Auto-scrolled to bottom`);
+							}
+						}, 50);
+					}
+					
+					// Update unread count
+					try {
+						const { unreadTracker } = await import('@/lib/unreadTracker');
+						await unreadTracker.triggerCallbacks(groupId);
+					} catch (unreadErr) {
+						console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
+					}
+				} else {
+					console.log('[push] ⚠️ Native event for non-active group, ignoring');
+				}
+			} catch (error) {
+				console.error('[push] ❌ Error handling native new message event:', error);
+			}
+		}).then((handle) => {
+			listenerHandles.push(handle);
+			console.log('[push] ✅ Native events listener registered');
+		}).catch((err) => {
+			console.error('[push] ❌ Failed to register native events listener:', err);
+		});
+	}).catch((err) => {
+		console.error('[push] ❌ Failed to import NativeEvents plugin:', err);
+	});
 }
 
 // ============================================================================
@@ -659,6 +722,36 @@ export async function initPush(): Promise<void> {
 
 export function getCurrentToken(): string | null {
 	return currentToken;
+}
+
+/**
+ * Set the active group ID for native service notification suppression.
+ * Call this when user opens or switches to a chat.
+ */
+export async function setActiveGroupId(groupId: string | null): Promise<void> {
+	if (!Capacitor.isNativePlatform()) return;
+	
+	try {
+		currentActiveGroupId = groupId;
+		const { Preferences } = await import('@capacitor/preferences');
+		
+		if (groupId) {
+			await Preferences.set({ key: 'active_group_id', value: groupId });
+			console.log('[push] 📂 Active group ID saved:', groupId);
+		} else {
+			await Preferences.remove({ key: 'active_group_id' });
+			console.log('[push] 📂 Active group ID cleared');
+		}
+	} catch (error) {
+		console.error('[push] ❌ Failed to save active group ID:', error);
+	}
+}
+
+/**
+ * Get the current active group ID
+ */
+export function getActiveGroupId(): string | null {
+	return currentActiveGroupId;
 }
 
 

@@ -20,6 +20,9 @@ import net.zetetic.database.sqlcipher.SQLiteDatabase;
 import java.io.File;
 import java.util.Map;
 
+import android.app.ActivityManager;
+import android.app.ActivityManager.RunningAppProcessInfo;
+
 
 
 /**
@@ -99,15 +102,46 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
             Log.w(TAG, "⚠️ Failed to write message to SQLite (will be synced when app opens)");
         }
         
-        // Show notification
-        showNotification(
-            groupName != null ? groupName : "New message", 
-            content != null ? content : "You have a new message",
-            groupId,
-            remoteMessage
-        );
+        // Get active group ID from SharedPreferences (set by JS layer)
+        String activeGroupId = getActiveGroupId();
+        boolean isActiveGroup = groupId.equals(activeGroupId);
+        boolean isAppForeground = isAppInForeground();
         
-        Log.d(TAG, "✅ Notification shown");
+        Log.d(TAG, "📊 State: appForeground=" + isAppForeground + ", activeGroup=" + activeGroupId + ", messageGroup=" + groupId + ", isActiveGroup=" + isActiveGroup);
+        
+        // Decision logic:
+        // 1. App in background → Always show notification
+        // 2. App in foreground + different group → Show notification
+        // 3. App in foreground + same group → No notification, notify JS to refresh UI
+        
+        if (!isAppForeground) {
+            // App is in background - always show notification
+            showNotification(
+                groupName != null ? groupName : "New message", 
+                content != null ? content : "You have a new message",
+                groupId,
+                remoteMessage
+            );
+            Log.d(TAG, "✅ Notification shown (app in background)");
+        } else if (!isActiveGroup) {
+            // App is foreground but different group - show notification
+            showNotification(
+                groupName != null ? groupName : "New message", 
+                content != null ? content : "You have a new message",
+                groupId,
+                remoteMessage
+            );
+            Log.d(TAG, "✅ Notification shown (app in foreground, different group)");
+        } else {
+            // App is foreground AND same group - notify JS to refresh UI
+            Log.d(TAG, "🔕 Skipping notification (app in foreground, active group - notifying JS)");
+            try {
+                NativeEventsPlugin.notifyNewMessage(groupId, messageId);
+                Log.d(TAG, "✅ JS layer notified via NativeEventsPlugin");
+            } catch (Exception e) {
+                Log.e(TAG, "❌ Failed to notify JS layer: " + e.getMessage());
+            }
+        }
     }
 
     /**
@@ -276,6 +310,46 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
         notificationManager.notify((int) System.currentTimeMillis(), builder.build());
         
         Log.d(TAG, "✅ Notification shown");
+    }
+
+    /**
+     * Get active group ID from SharedPreferences (set by JS layer)
+     */
+    private String getActiveGroupId() {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String activeGroupId = prefs.getString("active_group_id", null);
+            Log.d(TAG, "📂 Active group ID from prefs: " + activeGroupId);
+            return activeGroupId;
+        } catch (Exception e) {
+            Log.e(TAG, "❌ Error reading active group ID: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Check if app is in foreground
+     * If app is in foreground, JS layer should handle the notification
+     */
+    private boolean isAppInForeground() {
+        try {
+            ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager == null) return false;
+            
+            for (RunningAppProcessInfo processInfo : activityManager.getRunningAppProcesses()) {
+                if (processInfo.processName.equals(getPackageName())) {
+                    boolean isForeground = processInfo.importance == RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+                    Log.d(TAG, "📱 App process found: importance=" + processInfo.importance + ", isForeground=" + isForeground);
+                    return isForeground;
+                }
+            }
+            
+            Log.d(TAG, "📱 App process not found in running processes");
+            return false;
+        } catch (Exception e) {
+            Log.e(TAG, "❌ Error checking app foreground state: " + e.getMessage());
+            return false; // Assume background if we can't determine
+        }
     }
 
     @Override

@@ -58,6 +58,15 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     const currentGroup = get().activeGroup;
     const isSwitchingToNewGroup = currentGroup && group && currentGroup.id !== group.id;
 
+    // CRITICAL: Notify native service of active group change for notification suppression
+    import('@/lib/push').then(({ setActiveGroupId }) => {
+      setActiveGroupId(group?.id || null).catch((err) => {
+        console.error('[chat] Failed to set active group ID for push:', err);
+      });
+    }).catch(() => {
+      // Ignore import errors (e.g., on web)
+    });
+
     // CRITICAL FIX: Only clear groupMembers/groupMedia when switching to a DIFFERENT group
     // Don't clear when setting the same group (prevents race condition with fetchGroupMembers)
     const stateUpdate: any = {

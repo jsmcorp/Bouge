@@ -21,6 +21,7 @@ public class MainActivity extends BridgeActivity {
   public void onCreate(Bundle savedInstanceState) {
     registerPlugin(TruecallerPlugin.class);
     registerPlugin(ContactsPlugin.class);
+    registerPlugin(NativeEventsPlugin.class);
     super.onCreate(savedInstanceState);
     createDefaultNotificationChannel();
   }
