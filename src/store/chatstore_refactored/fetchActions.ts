@@ -314,8 +314,22 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       };
 
       // FIRST: Try to load from in-memory cache for instant display
+      // BUT: Skip cache if there was a recent push notification (last 10s) to ensure we show the new message
       const cacheCheckTime = Date.now();
-      const cachedMessages = messageCache.getCachedMessages(groupId);
+      let shouldUseCache = true;
+      
+      try {
+        const { hasRecentPush, clearRecentPush } = await import('@/lib/push');
+        if (hasRecentPush(groupId)) {
+          console.log('⚡ Recent push detected, skipping cache to force SQLite refresh');
+          shouldUseCache = false;
+          clearRecentPush(groupId); // Clear so subsequent opens can use cache
+        }
+      } catch (e) {
+        // push module not available (web), continue with cache
+      }
+      
+      const cachedMessages = shouldUseCache ? messageCache.getCachedMessages(groupId) : null;
       console.log(`📦 Cache check completed in ${Date.now() - cacheCheckTime}ms, found ${cachedMessages?.length || 0} messages`);
 
       if (cachedMessages && cachedMessages.length > 0) {

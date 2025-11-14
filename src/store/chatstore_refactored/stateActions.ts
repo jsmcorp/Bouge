@@ -237,7 +237,6 @@ export const createStateActions = (set: any, get: any): StateActions => ({
 
       const state = get();
       const connectionStatus = state.connectionStatus;
-      const isRealtimeConnected = connectionStatus === 'connected';
 
       // WHATSAPP-STYLE: If groupId provided and it's the active group, refresh UI from SQLite immediately
       if (groupIdOverride && state.activeGroup?.id === groupIdOverride) {
@@ -270,36 +269,32 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         console.error('[realtime-v2] Failed to trigger outbox processing:', error);
       }
 
-      // OPTIMIZATION: Skip missed message fetch if realtime is connected and message was just delivered
-      // Realtime already delivered the message, no need to fetch from REST
-      if (isRealtimeConnected && groupIdOverride) {
-        console.log('[realtime-v2] ⚡ Skipping missed message fetch - realtime delivered message already');
-      } else {
-        // Only fetch missed messages if realtime is disconnected or this is a general wake (no specific group)
-        try {
-          const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-          console.log('[realtime-v2] Fetching missed messages for all groups...');
-          const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
-          const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
-          console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
+      // PUSH-FIRST FAST PATH: Always fetch missed messages, dedupe handled by SQLite existence check
+      // This ensures background push notifications always trigger immediate refresh
+      // The messageExists check in backgroundMessageSync prevents duplicate fetches
+      try {
+        const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+        console.log('[realtime-v2] Fetching missed messages for all groups...');
+        const results = await backgroundMessageSync.fetchMissedMessagesForAllGroups();
+        const totalMissed = Object.values(results).reduce((sum, count) => sum + count, 0);
+        console.log(`[realtime-v2] ✅ Fetched ${totalMissed} missed messages across ${Object.keys(results).length} groups`);
 
-          // Update unread counts for all groups that received messages
-          if (totalMissed > 0) {
-            try {
-              const { unreadTracker } = await import('@/lib/unreadTracker');
-              for (const [gId, count] of Object.entries(results)) {
-                if (count > 0) {
-                  await unreadTracker.triggerCallbacks(gId);
-                  console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
-                }
+        // Update unread counts for all groups that received messages
+        if (totalMissed > 0) {
+          try {
+            const { unreadTracker } = await import('@/lib/unreadTracker');
+            for (const [gId, count] of Object.entries(results)) {
+              if (count > 0) {
+                await unreadTracker.triggerCallbacks(gId);
+                console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
               }
-            } catch (error) {
-              console.warn('[realtime-v2] Failed to update unread counts:', error);
             }
+          } catch (error) {
+            console.warn('[realtime-v2] Failed to update unread counts:', error);
           }
-        } catch (error) {
-          console.error('[realtime-v2] Error fetching missed messages:', error);
         }
+      } catch (error) {
+        console.error('[realtime-v2] Error fetching missed messages:', error);
       }
 
       // Ensure realtime is reconnected (if it was dead)

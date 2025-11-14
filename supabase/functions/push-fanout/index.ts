@@ -3,6 +3,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 
+
 // CORS helpers
 const DEV_ORIGINS = (Deno.env.get('DEV_CORS_ORIGINS') || 'https://localhost,capacitor://localhost,http://localhost').split(',');
 function buildCorsHeaders(origin: string | null): HeadersInit {
@@ -125,51 +126,40 @@ async function sendFcmV1(tokens: string[], data: Record<string, string>, reqId?:
 	console.log(JSON.stringify({ tag: 'push-fcm-v1:request', projectId: FCM_PROJECT_ID, endpoint: url, tokenCount: tokens.length, reqId }));
 	const invalid: string[] = [];
 	for (const token of tokens) {
-		// HYBRID payload: notification + data blocks
-		// - notification block: Wakes device, shows in tray, works in background/killed
-		// - data block: Available for custom handling in foreground
-		//
-		// Trade-off: notificationReceived listener won't fire in background on Android
-		// (Android system handles it via notification tray instead)
-		// But this ensures reliable delivery and user sees notifications!
+		// DATA-ONLY payload for instant background delivery
+		// - No notification block: Allows notificationReceived listener to fire in background
+		// - Full message content in data: Enables direct SQLite write without REST fetch
+		// - App shows local notification after storing message
 		//
 		// All data values MUST be strings (FCM requirement)
 		const body = {
 			message: {
 				token,
-				// Notification block for system tray and device wake
-				notification: {
-					title: 'New message',
-					body: 'You have a new message in Confessr'
-				},
-				// Data block for custom handling (all values must be strings!)
+				// Data block with full message content (all values must be strings!)
 				data: {
 					...data,
 					// Ensure all values are strings
 					type: String(data.type || 'new_message'),
 					group_id: String(data.group_id || ''),
 					message_id: String(data.message_id || ''),
-					created_at: String(data.created_at || '')
+					created_at: String(data.created_at || ''),
+					content: String(data.content || ''),
+					user_id: String(data.user_id || ''),
+					is_ghost: String(data.is_ghost || 'false'),
+					msg_type: String(data.msg_type || 'text'), // Renamed from message_type
+					category: String(data.category || ''),
+					parent_id: String(data.parent_id || ''),
+					image_url: String(data.image_url || '')
 				},
 				android: {
 					priority: 'HIGH',
-					// CRITICAL FIX (LOG54): Use deep link for Capacitor instead of Flutter-specific action
-					// This ensures notificationActionPerformed listener fires when notification is tapped
-					notification: {
-						sound: 'default',
-						click_action: `confessr://dashboard?group_id=${data.group_id}`
-					}
 				},
 				apns: {
 					headers: { 'apns-priority': '10' },
 					payload: {
 						aps: {
-							alert: {
-								title: 'New message',
-								body: 'You have a new message in Confessr'
-							},
-							sound: 'default',
-							badge: 1
+							'content-available': 1,
+							sound: 'default'
 						}
 					},
 				},
@@ -196,27 +186,27 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 	}
 	if (!FCM_SERVER_KEY || tokens.length === 0) return;
 	const url = 'https://fcm.googleapis.com/fcm/send';
-	// HYBRID payload: notification + data blocks (same as v1)
-	// Ensures reliable delivery and user sees notifications
+	// DATA-ONLY payload for instant background delivery (same as v1)
+	// No notification block: Allows notificationReceived listener to fire in background
+	// Full message content in data: Enables direct SQLite write without REST fetch
 	// All data values MUST be strings (FCM requirement)
 	const payload = {
 		registration_ids: tokens,
 		priority: 'high',
-		// Notification block for system tray
-		// CRITICAL FIX (LOG54): Use deep link for Capacitor instead of Flutter-specific action
-		notification: {
-			title: 'New message',
-			body: 'You have a new message in Confessr',
-			sound: 'default',
-			click_action: `confessr://dashboard?group_id=${data.group_id}`
-		},
-		// Data block for custom handling (all values must be strings!)
+		// Data block with full message content (all values must be strings!)
 		data: {
 			...data,
 			type: String(data.type || 'new_message'),
 			group_id: String(data.group_id || ''),
 			message_id: String(data.message_id || ''),
-			created_at: String(data.created_at || '')
+			created_at: String(data.created_at || ''),
+			content: String(data.content || ''),
+			user_id: String(data.user_id || ''),
+			is_ghost: String(data.is_ghost || 'false'),
+			msg_type: String(data.msg_type || 'text'), // Renamed from message_type
+			category: String(data.category || ''),
+			parent_id: String(data.parent_id || ''),
+			image_url: String(data.image_url || '')
 		},
 		android: {
 			priority: 'high',
@@ -225,12 +215,8 @@ async function sendFcm(tokens: string[], data: Record<string, string>, reqId?: s
 			headers: { 'apns-priority': '10' },
 			payload: {
 				aps: {
-					alert: {
-						title: 'New message',
-						body: 'You have a new message in Confessr'
-					},
-					sound: 'default',
-					badge: 1
+					'content-available': 1,
+					sound: 'default'
 				}
 			}
 		},
@@ -282,12 +268,51 @@ serve(async (req: Request) => {
 				try { console.log(JSON.stringify({ tag: 'push-fanout:fanout', reqId, recipients: tokenList.length })); } catch {}
 
 			if (tokenList.length === 0) return new Response('ok', { headers: cors });
-			await sendFcm(tokenList, {
+			
+			// Fetch full message data to include in FCM payload for instant background delivery
+			const { data: messageData, error: messageError } = await db
+				.from('messages')
+				.select('id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at')
+				.eq('id', payload.message_id)
+				.single();
+			
+			if (messageError) {
+				console.error(`[push] Failed to fetch message ${payload.message_id}:`, messageError);
+			}
+			
+			// Build FCM data payload with full message content
+			const fcmData: Record<string, string> = {
 				type: 'new_message',
 				group_id: payload.group_id,
 				message_id: payload.message_id,
 				created_at: payload.created_at,
-			}, reqId);
+			};
+			
+			// Add full message data if available (for instant background delivery)
+			// Note: Renamed message_type to msg_type to avoid FCM reserved key conflict
+			if (messageData) {
+				fcmData.content = String(messageData.content || '');
+				fcmData.user_id = String(messageData.user_id || '');
+				fcmData.is_ghost = String(messageData.is_ghost || false);
+				fcmData.msg_type = String(messageData.message_type || 'text'); // Renamed from message_type
+				if (messageData.category) fcmData.category = String(messageData.category);
+				if (messageData.parent_id) fcmData.parent_id = String(messageData.parent_id);
+				if (messageData.image_url) fcmData.image_url = String(messageData.image_url);
+				console.log(`[push] Including full message content in FCM payload (${fcmData.content.length} chars)`);
+			}
+			
+			// Fetch group name for notification
+			const { data: groupData } = await db
+				.from('groups')
+				.select('name')
+				.eq('id', payload.group_id)
+				.single();
+			
+			if (groupData) {
+				fcmData.group_name = String(groupData.name || 'Group');
+			}
+			
+			await sendFcm(tokenList, fcmData, reqId);
 			console.log(`[push] notify:fanout group=${payload.group_id} recipients=${tokenList.length}`);
 			return new Response('ok', { headers: cors });
 		}

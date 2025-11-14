@@ -11,6 +11,25 @@ import { useChatStore } from '@/store/chatstore_refactored';
 
 let currentToken: string | null = null;
 
+// Track recent push notifications to force SQLite refresh on ChatArea open
+const recentPushes = new Map<string, number>(); // groupId -> timestamp
+const RECENT_PUSH_WINDOW_MS = 10000; // 10 seconds
+
+export function hasRecentPush(groupId: string): boolean {
+	const timestamp = recentPushes.get(groupId);
+	if (!timestamp) return false;
+	const age = Date.now() - timestamp;
+	if (age > RECENT_PUSH_WINDOW_MS) {
+		recentPushes.delete(groupId);
+		return false;
+	}
+	return true;
+}
+
+export function clearRecentPush(groupId: string): void {
+	recentPushes.delete(groupId);
+}
+
 // CRITICAL: Store listener handles to prevent garbage collection
 // If these are garbage collected, the listeners are removed!
 const listenerHandles: any[] = [];
@@ -211,135 +230,180 @@ async function upsertDeviceToken(token: string): Promise<void> {
 
 /**
  * Shared handler for notification received events
- * Handles FCM notifications when app is in foreground
+ * Handles FCM notifications when app is in foreground and background
  *
- * WHATSAPP-STYLE INSTANT MESSAGING: Messages received via realtime are ALREADY in state
- * FCM notifications should ONLY trigger UI refresh, NOT fetch from REST API
+ * INSTANT BACKGROUND DELIVERY: FCM payload now contains full message content
+ * Write directly to SQLite without REST fetch for <150ms delivery
  */
 async function handleNotificationReceived(data: any): Promise<void> {
 	const reason = data?.type === 'new_message' ? 'data' : 'other';
 	console.log(`[push] 🔔 Notification received, reason=${reason}, data:`, data);
 
-	// CRITICAL FIX: Always process FCM messages because realtime INSERT handler is NOT firing
-	// Even though realtime shows as "connected", the postgres_changes INSERT events are not being received
-	// This is likely a Supabase Realtime configuration issue (RLS policies or realtime not enabled on table)
-	console.log(`[push] 📡 Realtime status: ${useChatStore.getState().connectionStatus}`);
-	console.log(`[push] 🔄 Processing FCM message (realtime INSERT handler not working)`);
-	
-	// Note: We'll still process the message below via REST fetch or fast path
-
-	// Track if we successfully handled the message
-	let messageHandled = false;
-
-	// WHATSAPP-STYLE FAST PATH: If FCM payload contains full message data, write directly to SQLite
-	// This avoids REST fetch entirely and provides instant display
 	if (data.type === 'new_message' && data.message_id && data.group_id) {
-		// Check if FCM payload contains full message data
-		const hasFullPayload = data.content && data.user_id && data.created_at;
+		// Track this push to force SQLite refresh if ChatArea opens soon
+		recentPushes.set(data.group_id, Date.now());
+		
+		const startTime = performance.now();
+		
+		// FAST PATH: Check if FCM payload contains full message content
+		const hasFullPayload = data.content !== undefined && data.user_id && data.created_at;
 		
 		if (hasFullPayload) {
 			console.log(`[push] ⚡ FAST PATH: FCM payload contains full message, writing directly to SQLite`);
 			
 			try {
-				const { Capacitor } = await import('@capacitor/core');
-				const isNative = Capacitor.isNativePlatform();
+				// Import SQLite service
+				const { sqliteService } = await import('@/lib/sqliteService');
 				
-				if (isNative) {
-					const { sqliteService } = await import('@/lib/sqliteService');
-					const ready = await sqliteService.isReady();
+				// Check if SQLite is ready
+				const isSqliteReady = await sqliteService.isReady();
+				if (!isSqliteReady) {
+					console.warn('[push] ⚠️ SQLite not ready, falling back to REST fetch');
+					// Fall through to REST fetch below
+				} else {
+					// Write message directly to SQLite from FCM payload
+					// Write message directly to SQLite from FCM payload
+					// Note: FCM sends msg_type (renamed from message_type to avoid reserved key)
+					await sqliteService.saveMessage({
+						id: data.message_id,
+						group_id: data.group_id,
+						user_id: data.user_id,
+						content: data.content,
+						is_ghost: data.is_ghost === 'true' || data.is_ghost === true ? 1 : 0,
+						message_type: data.msg_type || 'text', // FCM sends as msg_type
+						category: data.category || null,
+						parent_id: data.parent_id || null,
+						image_url: data.image_url || null,
+						created_at: new Date(data.created_at).getTime(),
+					});
 					
-					if (ready) {
-						// Write message directly to SQLite from FCM payload
-						await sqliteService.saveMessage({
-							id: data.message_id,
-							group_id: data.group_id,
-							user_id: data.user_id,
-							content: data.content,
-							is_ghost: data.is_ghost ? 1 : 0,
-							message_type: data.message_type || 'text',
-							category: data.category || null,
-							parent_id: data.parent_id || null,
-							image_url: data.image_url || null,
-							created_at: new Date(data.created_at).getTime(),
-						});
+					const storeDuration = Math.round(performance.now() - startTime);
+					console.log(`[push] ✅ Message ${data.message_id} stored in SQLite in ${storeDuration}ms (fast path)`);
+					
+					// Refresh UI from SQLite
+					const activeGroupId = useChatStore.getState().activeGroup?.id;
+					if (activeGroupId === data.group_id && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
+						const refreshStart = performance.now();
+						await useChatStore.getState().refreshUIFromSQLite(data.group_id);
+						const refreshDuration = Math.round(performance.now() - refreshStart);
+						console.log(`[push] ✅ UI updated from SQLite in ${refreshDuration}ms`);
 						
-						console.log(`[push] ✅ Message written directly to SQLite from FCM payload (INSTANT)`);
-						messageHandled = true;
-						
-						// Trigger instant UI refresh via onWake
-						await useChatStore.getState().onWake?.(reason, data.group_id);
-						
-						// Update unread count
-						try {
-							const { unreadTracker } = await import('@/lib/unreadTracker');
-							await unreadTracker.triggerCallbacks(data.group_id);
-						} catch (unreadErr) {
-							console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
-						}
-						
-						// Show toast if not in active chat
-						try {
-							const activeGroupId = useChatStore.getState().activeGroup?.id;
-							if (activeGroupId !== data.group_id) {
-								const { toast } = await import('sonner');
-								toast.info(data.group_name || 'New message', {
-									description: data.message_preview || data.content?.substring(0, 50) || 'Tap to view',
-									duration: 5000,
-									action: {
-										label: 'View',
-										onClick: () => {
-											window.location.hash = `#/chat/${data.group_id}`;
-										}
-									}
-								});
+						// Auto-scroll to show new message
+						setTimeout(() => {
+							const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+							if (viewport) {
+								viewport.scrollTop = viewport.scrollHeight;
+								console.log(`[push] 📍 Auto-scrolled to bottom`);
 							}
-						} catch (toastErr) {
-							console.error('[push] ⚠️ Failed to show toast:', toastErr);
-						}
-						
-						console.log(`[push] 🏁 FAST PATH complete (instant message display)`);
-						return;
+						}, 50);
 					}
+					
+					// Update unread count
+					try {
+						const { unreadTracker } = await import('@/lib/unreadTracker');
+						await unreadTracker.triggerCallbacks(data.group_id);
+					} catch (unreadErr) {
+						console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
+					}
+					
+					// Show local notification only if:
+					// 1. Message is for a different group (not currently active)
+					// 2. OR app is backgrounded/device locked
+					try {
+						const activeGroupId = useChatStore.getState().activeGroup?.id;
+						const isActiveGroup = activeGroupId === data.group_id;
+						
+						// Check if app is in foreground
+						const { App } = await import('@capacitor/app');
+						const appState = await App.getState();
+						const isAppActive = appState.isActive;
+						
+						// Show notification if:
+						// - Message is for different group, OR
+						// - App is backgrounded/inactive
+						const shouldShowNotification = !isActiveGroup || !isAppActive;
+						
+						if (shouldShowNotification && Capacitor.isNativePlatform()) {
+							console.log(`[push] 📢 Showing notification (activeGroup=${isActiveGroup}, appActive=${isAppActive})`);
+							
+							// Dynamic import to avoid build errors on web
+							const LocalNotifications = (await import('@capacitor/local-notifications')).LocalNotifications;
+							
+							// Request permissions if needed
+							const permResult = await LocalNotifications.checkPermissions();
+							if (permResult.display !== 'granted') {
+								const requestResult = await LocalNotifications.requestPermissions();
+								if (requestResult.display !== 'granted') {
+									console.warn('[push] ⚠️ Local notification permissions not granted');
+									// Continue anyway - notification won't show but message is stored
+								}
+							}
+							
+							// Show local notification with group name and message preview
+							const groupName = data.group_name || 'New message';
+							const preview = data.content?.substring(0, 100) || 'You have a new message';
+							await LocalNotifications.schedule({
+								notifications: [{
+									title: groupName,
+									body: preview,
+									id: Date.now(),
+									extra: { group_id: data.group_id },
+									actionTypeId: 'OPEN_CHAT',
+									sound: 'default'
+								}]
+							});
+							console.log(`[push] 📢 Local notification shown: ${groupName}`);
+						} else {
+							console.log(`[push] 🔕 Skipping notification (activeGroup=${isActiveGroup}, appActive=${isAppActive})`);
+						}
+					} catch (notifErr) {
+						console.error('[push] ⚠️ Failed to show local notification:', notifErr);
+					}
+					
+					const totalDuration = Math.round(performance.now() - startTime);
+					console.log(`[push] 🏁 Fast path complete in ${totalDuration}ms`);
+					return;
 				}
-			} catch (fastPathErr) {
-				console.error('[push] ⚠️ Fast path failed, falling back to REST fetch:', fastPathErr);
+			} catch (fastPathErr: any) {
+				console.error(`[push] ❌ Fast path failed:`, fastPathErr?.message || fastPathErr);
+				console.log(`[push] 🔄 Falling back to REST fetch`);
+				// Fall through to REST fetch below
 			}
 		}
-
-		// FALLBACK: REST fetch if fast path not available
-		console.log(`[push] 📥 Attempting REST fetch for message ${data.message_id}`);
+		
+		// FALLBACK: REST fetch if fast path not available or failed
+		console.log(`[push] 📥 Starting direct REST fetch for message ${data.message_id}`);
+		const fallbackStartTime = performance.now();
 
 		try {
 			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
 
-			// 5-second timeout for REST fetch (faster response)
+			// 5-second timeout for REST fetch
 			const timeoutPromise = new Promise<boolean>((_, reject) =>
 				setTimeout(() => reject(new Error('Direct fetch timeout after 5s')), 5000)
 			);
 
 			const fetchPromise = backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id);
-
 			const success = await Promise.race([fetchPromise, timeoutPromise]);
 
 			if (success) {
-				console.log(`[push] ✅ REST fetch succeeded for message ${data.message_id}`);
-				messageHandled = true;
+				const fetchDuration = Math.round(performance.now() - fallbackStartTime);
+				console.log(`[bg-sync] ✅ Message ${data.message_id} stored successfully in ${fetchDuration}ms`);
 
-				// CRITICAL: Always refresh UI for active group after message is stored
+				// CRITICAL: Always refresh UI from SQLite after storing
 				const activeGroupId = useChatStore.getState().activeGroup?.id;
-				if (activeGroupId === data.group_id) {
-					console.log(`[push] 🔄 Refreshing UI for active group after REST fetch`);
-					if (typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
-						await useChatStore.getState().refreshUIFromSQLite(data.group_id);
-						console.log(`[push] ✅ UI refreshed from SQLite`);
-					}
+				if (activeGroupId === data.group_id && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
+					const refreshStart = performance.now();
+					await useChatStore.getState().refreshUIFromSQLite(data.group_id);
+					const refreshDuration = Math.round(performance.now() - refreshStart);
+					console.log(`[bg-sync] ✅ UI updated with messages from SQLite in ${refreshDuration}ms`);
 					
 					// Auto-scroll to show new message
 					setTimeout(() => {
 						const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
 						if (viewport) {
 							viewport.scrollTop = viewport.scrollHeight;
-							console.log(`[push] 📍 Auto-scrolled to bottom to show new message`);
+							console.log(`[bg-sync] 📍 Auto-scrolled to bottom to show new message`);
 						}
 					}, 50);
 				}
@@ -354,6 +418,7 @@ async function handleNotificationReceived(data: any): Promise<void> {
 
 				// Show toast if not in active chat
 				try {
+					const activeGroupId = useChatStore.getState().activeGroup?.id;
 					if (activeGroupId !== data.group_id) {
 						const { toast } = await import('sonner');
 						toast.info(data.group_name || 'New message', {
@@ -370,34 +435,62 @@ async function handleNotificationReceived(data: any): Promise<void> {
 				} catch (toastErr) {
 					console.error('[push] ⚠️ Failed to show toast:', toastErr);
 				}
-			} else {
-				console.warn(`[push] ⚠️ REST fetch returned false for message ${data.message_id}`);
+
+				const totalDuration = Math.round(performance.now() - fallbackStartTime);
+				console.log(`[push] 🏁 Push-first fast path complete in ${totalDuration}ms`);
+				return;
 			}
 		} catch (fetchErr: any) {
-			console.error(`[push] ❌ REST fetch failed for message ${data.message_id}:`, fetchErr?.message || fetchErr);
+			const elapsed = Math.round(performance.now() - fallbackStartTime);
+			console.error(`[push] ❌ Direct fetch failed after ${elapsed}ms:`, fetchErr?.message || fetchErr);
+			
+			// FALLBACK: Fetch missed messages for this specific group only (faster than all-groups sweep)
+			console.log(`[push] 🔄 Direct fetch timeout, fetching missed messages for group ${data.group_id}`);
+			try {
+				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
+				const missedCount = await backgroundMessageSync.fetchMissedMessages(data.group_id);
+				console.log(`[push] ✅ Fetched ${missedCount} missed messages for group ${data.group_id}`);
+				
+				// CRITICAL: Always refresh UI from SQLite after fetching
+				const activeGroupId = useChatStore.getState().activeGroup?.id;
+				if (activeGroupId === data.group_id && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
+					const refreshStart = performance.now();
+					await useChatStore.getState().refreshUIFromSQLite(data.group_id);
+					const refreshDuration = Math.round(performance.now() - refreshStart);
+					console.log(`[push] ✅ UI refreshed from SQLite after fallback fetch in ${refreshDuration}ms`);
+					
+					// Auto-scroll to show new message
+					setTimeout(() => {
+						const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+						if (viewport) {
+							viewport.scrollTop = viewport.scrollHeight;
+							console.log(`[push] 📍 Auto-scrolled to bottom after fallback`);
+						}
+					}, 50);
+				}
+				
+				// Update unread count
+				try {
+					const { unreadTracker } = await import('@/lib/unreadTracker');
+					await unreadTracker.triggerCallbacks(data.group_id);
+				} catch (unreadErr) {
+					console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
+				}
+				
+				const totalDuration = Math.round(performance.now() - fallbackStartTime);
+				console.log(`[push] 🏁 Fallback path complete in ${totalDuration}ms`);
+			} catch (fallbackErr) {
+				console.error('[push] ❌ Fallback fetch also failed:', fallbackErr);
+			}
 		}
-	}
-
-	// STEP 2: Trigger onWake if message not handled yet
-	if (!messageHandled) {
+	} else {
+		// Non-message notification, trigger general wake
 		try {
-			console.log(`[push] 🔄 Message not handled, triggering onWake for sync`);
+			console.log(`[push] 🔄 Non-message notification, triggering onWake`);
 			await useChatStore.getState().onWake?.(reason, data?.group_id);
 			console.log(`[push] ✅ onWake completed`);
 		} catch (wakeErr) {
-			console.error('[push] ❌ CRITICAL: onWake failed:', wakeErr);
-
-			// Last resort: Try direct fallback
-			try {
-				console.log('[push] 🆘 Attempting emergency fallback sync...');
-				const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-				if (data.group_id) {
-					await backgroundMessageSync.fetchMissedMessages(data.group_id);
-					console.log('[push] ✅ Emergency fallback sync completed');
-				}
-			} catch (emergencyErr) {
-				console.error('[push] ❌ Emergency fallback also failed:', emergencyErr);
-			}
+			console.error('[push] ❌ onWake failed:', wakeErr);
 		}
 	}
 
@@ -487,6 +580,24 @@ export async function initPush(): Promise<void> {
 		}
 
 		console.log('[push] ✅ Push initialization complete');
+
+		// Register local notification tap listener
+		try {
+			const LocalNotifications = (await import('@capacitor/local-notifications')).LocalNotifications;
+			LocalNotifications.addListener('localNotificationActionPerformed', (notification: any) => {
+				console.log('[push] 🔔 Local notification tapped:', notification);
+				const groupId = notification.notification?.extra?.group_id;
+				if (groupId) {
+					console.log('[push] 🔔 Navigating to group from local notification:', groupId);
+					setTimeout(() => {
+						window.location.href = `/dashboard?group=${groupId}`;
+					}, 300);
+				}
+			});
+			console.log('[push] ✅ Local notification listener registered');
+		} catch (localNotifErr) {
+			console.warn('[push] ⚠️ Failed to register local notification listener:', localNotifErr);
+		}
 
 		// App resume should nudge outbox processing (non-blocking)
 		try {
