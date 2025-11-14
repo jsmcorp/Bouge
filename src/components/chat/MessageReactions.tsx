@@ -21,7 +21,7 @@ export function MessageReactions({ reactions, onToggleReaction, className }: Mes
   const userReactions = user ? getUserReactions(reactions, user.id) : [];
 
   return (
-    <div className={`flex items-center flex-wrap gap-1.5 ${className}`}>
+    <div className={`flex items-center flex-wrap gap-1.5 select-none ${className}`}>
       <AnimatePresence mode="popLayout">
         {Object.entries(reactionCounts).map(([emoji, count]) => {
           const isUserReacted = userReactions.includes(emoji);
@@ -44,20 +44,20 @@ export function MessageReactions({ reactions, onToggleReaction, className }: Mes
                 variant="ghost"
                 size="sm"
                 onClick={() => onToggleReaction(emoji)}
-                className={`h-7 px-2.5 text-xs rounded-full transition-all duration-200 ${
+                className={`h-7 px-2.5 text-xs rounded-full transition-all duration-200 select-none ${
                   isUserReacted
                     ? 'bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 shadow-sm'
                     : 'bg-background/80 hover:bg-muted border border-border/60 shadow-sm'
                 }`}
               >
                 <motion.span 
-                  className="mr-1.5 text-base"
+                  className="mr-1.5 text-base select-none"
                   animate={isUserReacted ? { scale: [1, 1.3, 1] } : {}}
                   transition={{ duration: 0.3 }}
                 >
                   {emoji}
                 </motion.span>
-                <span className="text-xs font-semibold">{count}</span>
+                <span className="text-xs font-semibold select-none">{count}</span>
               </Button>
             </motion.div>
           );
