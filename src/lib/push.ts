@@ -307,69 +307,7 @@ async function handleNotificationReceived(data: any): Promise<void> {
 		}
 
 		// FALLBACK: REST fetch if fast path not available
-    try {
-      const { Capacitor } = await import('@capacitor/core');
-      const isNative = Capacitor.isNativePlatform();
-      if (isNative) {
-        const { sqliteService } = await import('@/lib/sqliteService');
-        const ready = await sqliteService.isReady();
-        if (ready) {
-          const placeholderContent = data.message_preview || '…';
-          await sqliteService.saveMessage({
-            id: data.message_id,
-            group_id: data.group_id,
-            user_id: data.user_id || 'unknown',
-            content: placeholderContent,
-            is_ghost: 0,
-            message_type: data.message_type || 'text',
-            category: 'placeholder',
-            parent_id: data.parent_id || null,
-            image_url: data.image_url || null,
-            created_at: new Date(data.created_at).getTime(),
-          });
-          console.log(`[push] ⚡ FAST PATH: placeholder saved to SQLite`);
-          messageHandled = true;
-          const startRefresh = performance.now();
-          await useChatStore.getState().onWake?.(reason, data.group_id);
-          const dur = Math.round(performance.now() - startRefresh);
-          console.log(`[ui] refresh group=${data.group_id} dur=${dur}ms mode=fast-path`);
-
-          try {
-            const { unreadTracker } = await import('@/lib/unreadTracker');
-            await unreadTracker.triggerCallbacks(data.group_id);
-          } catch (unreadErr) {
-            console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
-          }
-
-          try {
-            const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
-            backgroundMessageSync.fetchAndStoreMessage(data.message_id, data.group_id)
-              .then(async (success) => {
-                if (success) {
-                  console.log(`[reconcile] coalesced message id=${data.message_id} source=rest`);
-                  const activeGroupId = useChatStore.getState().activeGroup?.id;
-                  if (activeGroupId === data.group_id && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
-                    const start = performance.now();
-                    await useChatStore.getState().refreshUIFromSQLite(data.group_id);
-                    const t = Math.round(performance.now() - start);
-                    console.log(`[ui] refresh group=${data.group_id} dur=${t}ms mode=reconcile`);
-                  }
-                }
-              })
-              .catch((err) => {
-                console.warn(`[reconcile] verification failed id=${data.message_id}:`, err);
-              });
-          } catch (err) {
-            console.warn('[push] verification scheduling failed:', err);
-          }
-
-          return;
-        }
-      }
-    } catch (fastPlaceholderErr) {
-      console.error('[push] fast-path placeholder failed:', fastPlaceholderErr);
-    }
-    console.log(`[push] 📥 Attempting REST fetch for message ${data.message_id}`);
+		console.log(`[push] 📥 Attempting REST fetch for message ${data.message_id}`);
 
 		try {
 			const { backgroundMessageSync } = await import('@/lib/backgroundMessageSync');
