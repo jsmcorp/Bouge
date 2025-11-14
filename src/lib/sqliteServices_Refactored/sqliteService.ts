@@ -229,6 +229,14 @@ class SQLiteService {
     return this.reactionOps.getReactions(messageIds);
   }
 
+  public async deleteReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+    return this.reactionOps.deleteReaction(messageId, userId, emoji);
+  }
+
+  public async getReactionsForMessage(messageId: string): Promise<LocalReaction[]> {
+    return this.reactionOps.getReactionsForMessage(messageId);
+  }
+
   // Member operations
   public async saveGroupMember(member: LocalGroupMember): Promise<void> {
     return this.memberOps.saveGroupMember(member);

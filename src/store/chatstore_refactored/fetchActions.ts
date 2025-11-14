@@ -410,6 +410,33 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // Typing as nullable with id to allow optional chaining (user?.id)
             let user: { id?: string } | null = null;
 
+            // Fetch reactions for all messages
+            const messageIds = localMessages.map(msg => msg.id);
+            let reactionsData: any[] = [];
+            if (messageIds.length > 0) {
+              try {
+                reactionsData = await sqliteService.getReactions(messageIds);
+                console.log(`📱 Loaded ${reactionsData.length} reactions from SQLite`);
+              } catch (error) {
+                console.error('Error loading reactions from local storage:', error);
+              }
+            }
+
+            // Create reactions map for quick lookup
+            const reactionsMap = new Map<string, any[]>();
+            reactionsData.forEach(reaction => {
+              if (!reactionsMap.has(reaction.message_id)) {
+                reactionsMap.set(reaction.message_id, []);
+              }
+              reactionsMap.get(reaction.message_id)!.push({
+                id: reaction.id,
+                message_id: reaction.message_id,
+                user_id: reaction.user_id,
+                emoji: reaction.emoji,
+                created_at: new Date(reaction.created_at).toISOString()
+              });
+            });
+
             // Fetch poll data for poll messages
             let pollsData: any[] = [];
             let pollVotesData: any[] = [];
@@ -466,6 +493,9 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               // Get poll data if this is a poll message
               const pollData = msg.message_type === 'poll' ? pollDataMap.get(msg.id) : undefined;
 
+              // Get reactions for this message
+              const messageReactions = reactionsMap.get(msg.id) || [];
+
               // Build basic message object
               return {
                 id: msg.id,
@@ -482,7 +512,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 reply_count: 0,
                 replies: [],
                 delivery_status: 'delivered' as const,
-                reactions: [],
+                reactions: messageReactions,
                 poll: pollData
               };
             });
@@ -504,11 +534,27 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               }
             });
 
+            // Build messageReactions map
+            const messageReactionsMap: Record<string, any[]> = {};
+            reactionsData.forEach(reaction => {
+              if (!messageReactionsMap[reaction.message_id]) {
+                messageReactionsMap[reaction.message_id] = [];
+              }
+              messageReactionsMap[reaction.message_id].push({
+                id: reaction.id,
+                message_id: reaction.message_id,
+                user_id: reaction.user_id,
+                emoji: reaction.emoji,
+                created_at: new Date(reaction.created_at).toISOString()
+              });
+            });
+
             // Update cache with fresh SQLite data
             messageCache.setCachedMessages(groupId, messages);
 
             // Update UI with local data (only if we didn't already show cached data)
-            const hasMore = messages.length >= 20;
+            // Check if there are more messages by trying to fetch one more
+            const hasMore = messages.length >= 50;
             console.log(`📊 hasMoreOlder calculation: messages.length=${messages.length}, hasMore=${hasMore}`);
 
             if (!cachedMessages) {
@@ -516,18 +562,20 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: hasMore // If we got 20 messages, there might be more
+                messageReactions: messageReactionsMap,
+                hasMoreOlder: hasMore // If we got 50 messages, there might be more
               });
-              console.log(`✅ Loaded ${structuredMessages.length} recent messages and ${polls.length} polls from SQLite, hasMoreOlder=${hasMore}`);
+              console.log(`✅ Loaded ${structuredMessages.length} recent messages, ${polls.length} polls, and ${reactionsData.length} reactions from SQLite, hasMoreOlder=${hasMore}`);
             } else {
               // Silently update the UI with fresh data from SQLite
               setSafely({
                 messages: mergeWithPending(mergePendingReplies(structuredMessages)),
                 polls: polls,
                 userVotes: userVotesMap,
-                hasMoreOlder: hasMore // If we got 20 messages, there might be more
+                messageReactions: messageReactionsMap,
+                hasMoreOlder: hasMore // If we got 50 messages, there might be more
               });
-              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages from SQLite, hasMoreOlder=${hasMore}`);
+              console.log(`🔄 Background: Updated UI with ${structuredMessages.length} fresh messages and ${reactionsData.length} reactions from SQLite, hasMoreOlder=${hasMore}`);
             }
             localDataLoaded = true;
 
@@ -1062,16 +1110,23 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	loadOlderMessages: async (groupId: string, pageSize: number = 30) => {
   	  try {
   	    const state = get();
+  	    console.log(`📜 loadOlderMessages called: groupId=${groupId}, pageSize=${pageSize}, isLoadingOlder=${state.isLoadingOlder}, hasMoreOlder=${state.hasMoreOlder}`);
+  	    
   	    if (state.isLoadingOlder || !state.activeGroup || state.activeGroup.id !== groupId) {
+  	      console.log(`📜 loadOlderMessages: Skipping - isLoadingOlder=${state.isLoadingOlder}, activeGroup=${state.activeGroup?.id}, requestedGroup=${groupId}`);
   	      return 0;
   	    }
   	    const current = state.messages || [];
-  	    if (current.length === 0) return 0;
+  	    if (current.length === 0) {
+  	      console.log('📜 loadOlderMessages: No messages in current state');
+  	      return 0;
+  	    }
 
   	    set({ isLoadingOlder: true });
 
   	    const oldestIso = current[0].created_at;
   	    const oldestMs = new Date(oldestIso).getTime();
+  	    console.log(`📜 loadOlderMessages: Loading messages before ${oldestIso} (${oldestMs})`);
 
   	    let combined: Message[] = [];
 
@@ -1080,7 +1135,13 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	    const isSqliteReady = isNative && await sqliteService.isReady();
   	    if (isSqliteReady) {
   	      try {
-  	        const localOlder = await (sqliteService as any).getMessagesBefore(groupId, oldestMs, pageSize);
+  	        // First, check total message count for this group
+  	        const allMessages = await sqliteService.getAllMessagesForGroup(groupId);
+  	        console.log(`📜 loadOlderMessages: Total messages in DB for group: ${allMessages.length}`);
+  	        
+  	        const localOlder = await sqliteService.getMessagesBefore(groupId, oldestMs, pageSize);
+  	        console.log(`📜 loadOlderMessages: Requested ${pageSize} messages before ${oldestMs}, got ${localOlder?.length || 0} messages`);
+  	        
   	        if (localOlder && localOlder.length > 0) {
   	          console.log(`📜 loadOlderMessages: Loaded ${localOlder.length} messages from SQLite`);
 

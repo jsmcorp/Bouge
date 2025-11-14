@@ -36,4 +36,24 @@ export class ReactionOperations {
     const result = await db.query(sql, messageIds);
     return result.values || [];
   }
+
+  public async deleteReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    await db.run(
+      `DELETE FROM reactions 
+       WHERE message_id = ? AND user_id = ? AND emoji = ?`,
+      [messageId, userId, emoji]
+    );
+  }
+
+  public async getReactionsForMessage(messageId: string): Promise<LocalReaction[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `SELECT * FROM reactions WHERE message_id = ?`;
+    const result = await db.query(sql, [messageId]);
+    return result.values || [];
+  }
 }

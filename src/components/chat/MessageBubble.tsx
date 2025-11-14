@@ -115,10 +115,17 @@ export function MessageBubble({
   const reactions = messageReactions[message.id] || [];
   
   // Convert chatStore reactions to the format expected by MessageReactions component
-  const formattedReactions: Reaction[] = reactions.map(r => ({
+  const formattedReactions: Reaction[] = reactions.map((r: any) => ({
     ...r,
-    created_at: new Date().toISOString() // Add required created_at field
+    created_at: r.created_at || new Date().toISOString() // Use existing or add new created_at field
   }));
+
+  // Debug logging
+  useEffect(() => {
+    if (reactions.length > 0) {
+      console.log(`💬 Message ${message.id} has ${reactions.length} reactions:`, reactions);
+    }
+  }, [reactions.length, message.id]);
 
 
 

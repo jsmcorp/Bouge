@@ -49,10 +49,10 @@ export function MessageList() {
   const previousReplyingTo = useRef(replyingTo);
   const isLazyLoadingRef = useRef(false); // Track if we're currently lazy loading to prevent auto-scroll
 
-  // Debug logging for unread tracking
+  // Debug logging for unread tracking and lazy loading state
   useEffect(() => {
-    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}`);
-  }, [firstUnreadMessageId, unreadCount, messages.length]);
+    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}, hasMoreOlder=${hasMoreOlder}, isLoadingOlder=${isLoadingOlder}`);
+  }, [firstUnreadMessageId, unreadCount, messages.length, hasMoreOlder, isLoadingOlder]);
 
   // Auto-exit selection mode when no messages are selected
   useEffect(() => {
@@ -62,64 +62,63 @@ export function MessageList() {
   }, [selectionMode, selectedMessageIds, exitSelectionMode]);
 
   const loadingOlderRef = useRef(false);
+  const firstMessageRef = useRef<HTMLDivElement>(null);
 
-  // Attach scroll listener to the ScrollArea viewport for automatic lazy loading of older messages
-  // WhatsApp-style: automatically load when scrolling near the top
+  // Use Intersection Observer to detect when first message is visible (simpler and more reliable)
   useEffect(() => {
-    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-    if (!viewport) {
-      console.log('📜 Lazy loading: viewport not found');
+    if (!firstMessageRef.current || !hasMoreOlder || isLoadingOlder || !activeGroup) {
       return;
     }
 
-    console.log('📜 Lazy loading: scroll listener attached', { hasMoreOlder, isLoadingOlder });
-
-    const onScroll = async () => {
-      const scrollTop = viewport.scrollTop;
-      const scrollHeight = viewport.scrollHeight;
-      const clientHeight = viewport.clientHeight;
-
-      console.log('📜 Scroll event:', { scrollTop, scrollHeight, clientHeight, hasMoreOlder, isLoadingOlder, loadingRef: loadingOlderRef.current });
-
-      if (!activeGroup || loadingOlderRef.current) return;
-
-      // Trigger loading when within 150px of the top (WhatsApp-style threshold)
-      if (scrollTop <= 150 && hasMoreOlder && !isLoadingOlder) {
-        console.log('📜 Triggering lazy load of older messages...');
-        loadingOlderRef.current = true;
-        isLazyLoadingRef.current = true; // Set flag to prevent auto-scroll
-        const prevHeight = viewport.scrollHeight;
-        const prevTop = viewport.scrollTop;
-        try {
-          const loaded = await loadOlderMessages(activeGroup.id, 30);
-          console.log(`📜 Loaded ${loaded} older messages`);
-          if (loaded > 0) {
-            // Preserve scroll position to avoid jump after prepending
-            requestAnimationFrame(() => {
-              const newHeight = viewport.scrollHeight;
-              viewport.scrollTop = newHeight - prevHeight + prevTop;
-              console.log('📜 Scroll position preserved after loading');
-              // Reset flag after scroll position is preserved
-              setTimeout(() => {
-                isLazyLoadingRef.current = false;
-              }, 100);
-            });
-          } else {
-            // No messages loaded, reset flag immediately
+    const observer = new IntersectionObserver(
+      async (entries) => {
+        const firstEntry = entries[0];
+        
+        // When first message becomes visible and we're not already loading
+        if (firstEntry.isIntersecting && !loadingOlderRef.current && hasMoreOlder && !isLoadingOlder) {
+          loadingOlderRef.current = true;
+          isLazyLoadingRef.current = true;
+          
+          const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+          const prevHeight = viewport?.scrollHeight || 0;
+          const prevTop = viewport?.scrollTop || 0;
+          
+          try {
+            const loaded = await loadOlderMessages(activeGroup.id, 30);
+            
+            if (loaded > 0 && viewport) {
+              // Preserve scroll position
+              requestAnimationFrame(() => {
+                const newHeight = viewport.scrollHeight;
+                viewport.scrollTop = newHeight - prevHeight + prevTop;
+                setTimeout(() => {
+                  isLazyLoadingRef.current = false;
+                }, 100);
+              });
+            } else {
+              isLazyLoadingRef.current = false;
+            }
+          } catch (e) {
+            console.warn('Failed to load older messages:', e);
             isLazyLoadingRef.current = false;
+          } finally {
+            loadingOlderRef.current = false;
           }
-        } catch (e) {
-          console.warn('📜 Lazy-load older messages failed', e);
-          isLazyLoadingRef.current = false; // Reset flag on error
-        } finally {
-          loadingOlderRef.current = false;
         }
+      },
+      {
+        root: scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]'),
+        rootMargin: '200px 0px 0px 0px', // Trigger 200px before first message is visible
+        threshold: 0
       }
-    };
+    );
 
-    viewport.addEventListener('scroll', onScroll, { passive: true });
-    return () => viewport.removeEventListener('scroll', onScroll);
-  }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages]);
+    observer.observe(firstMessageRef.current);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages, messages.length]);
 
   // Auto-scroll to first unread message on initial load
   useEffect(() => {
@@ -314,8 +313,11 @@ export function MessageList() {
             prevMessage.user_id !== message.user_id ||
             prevMessage.is_ghost !== message.is_ghost;
 
+          // Attach ref to first message for lazy loading detection
+          const isFirstMessage = index === 0;
+
           return (
-            <div key={message.id}>
+            <div key={message.id} ref={isFirstMessage ? firstMessageRef : null}>
               {/* Show unread separator before first unread message */}
               {isFirstUnread && (
                 <div ref={unreadSeparatorRef}>
