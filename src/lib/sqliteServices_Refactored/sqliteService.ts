@@ -114,6 +114,10 @@ class SQLiteService {
     return this.messageOps.deleteMessage(messageId);
   }
 
+  public async deleteMessages(messageIds: string[]): Promise<void> {
+    return this.messageOps.deleteMessages(messageIds);
+  }
+
   public async messageExists(messageId: string): Promise<boolean> {
     return this.messageOps.messageExists(messageId);
   }

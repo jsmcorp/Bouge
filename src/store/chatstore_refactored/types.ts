@@ -148,4 +148,7 @@ export interface ChatState {
   // Join requests
   pendingJoinRequests: any[]; // Will be typed as JoinRequest[] from joinRequestService
   pendingRequestCounts: Record<string, number>; // Map of groupId -> pending request count
+  // Message selection
+  selectionMode: boolean;
+  selectedMessageIds: Set<string>;
 }

@@ -116,6 +116,25 @@ export class MessageOperations {
     }
   }
 
+  public async deleteMessages(messageIds: string[]): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    if (messageIds.length === 0) {
+      return;
+    }
+
+    try {
+      // Create placeholders for SQL IN clause
+      const placeholders = messageIds.map(() => '?').join(',');
+      await db.run(`DELETE FROM messages WHERE id IN (${placeholders})`, messageIds);
+      console.log(`🗑️ Deleted ${messageIds.length} messages`);
+    } catch (error) {
+      console.error(`❌ Error deleting messages:`, error);
+      throw error;
+    }
+  }
+
   /**
    * Check if a message exists in local storage
    * Used to avoid redundant fetches when message already delivered via realtime

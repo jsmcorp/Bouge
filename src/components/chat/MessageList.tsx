@@ -2,20 +2,49 @@ import { useEffect, useRef, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
+import { MessageSelectionToolbar } from '@/components/chat/MessageSelectionToolbar';
 import { TypingIndicator } from '@/components/chat/TypingIndicator';
 import { UnreadMessageSeparator } from '@/components/chat/UnreadMessageSeparator';
 import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
 import { Keyboard as CapacitorKeyboard } from '@capacitor/keyboard';
 import { Capacitor } from '@capacitor/core';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 export function MessageList() {
-  const { messages, typingUsers, activeGroup, loadOlderMessages, isLoadingOlder, hasMoreOlder, firstUnreadMessageId, unreadCount, replyingTo } = useChatStore();
+  const { 
+    messages, 
+    typingUsers, 
+    activeGroup, 
+    loadOlderMessages, 
+    isLoadingOlder, 
+    hasMoreOlder, 
+    firstUnreadMessageId, 
+    unreadCount, 
+    replyingTo,
+    selectionMode,
+    selectedMessageIds,
+    exitSelectionMode,
+    setReplyingTo,
+    deleteSelectedMessages,
+    starSelectedMessages,
+    reportSelectedMessages
+  } = useChatStore();
   const { user } = useAuthStore();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const previousMessagesLength = useRef(messages.length);
   const previousReplyingTo = useRef(replyingTo);
   const isLazyLoadingRef = useRef(false); // Track if we're currently lazy loading to prevent auto-scroll
@@ -24,6 +53,13 @@ export function MessageList() {
   useEffect(() => {
     console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}`);
   }, [firstUnreadMessageId, unreadCount, messages.length]);
+
+  // Auto-exit selection mode when no messages are selected
+  useEffect(() => {
+    if (selectionMode && selectedMessageIds.size === 0) {
+      exitSelectionMode();
+    }
+  }, [selectionMode, selectedMessageIds, exitSelectionMode]);
 
   const loadingOlderRef = useRef(false);
 
@@ -178,6 +214,36 @@ export function MessageList() {
     };
   }, []);
 
+  // Handle toolbar actions
+  const handleReply = () => {
+    const selectedMessage = messages.find(m => selectedMessageIds.has(m.id));
+    if (selectedMessage) {
+      setReplyingTo(selectedMessage);
+      exitSelectionMode();
+    }
+  };
+
+  const handleStar = async () => {
+    await starSelectedMessages();
+  };
+
+  const handleDelete = () => {
+    setShowDeleteDialog(true);
+  };
+
+  const handleConfirmDelete = async () => {
+    await deleteSelectedMessages();
+    setShowDeleteDialog(false);
+  };
+
+  const handleReport = async () => {
+    await reportSelectedMessages();
+  };
+
+  const handleCancelSelection = () => {
+    exitSelectionMode();
+  };
+
   if (messages.length === 0 && typingUsers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -192,10 +258,42 @@ export function MessageList() {
   }
 
   return (
-    <ScrollArea
-      className="h-full overflow-x-hidden smooth-scroll-messages"
-      ref={scrollAreaRef}
-    >
+    <>
+      {/* Selection Toolbar */}
+      {selectionMode && (
+        <MessageSelectionToolbar
+          selectedCount={selectedMessageIds.size}
+          onReply={handleReply}
+          onStar={handleStar}
+          onDelete={handleDelete}
+          onReport={handleReport}
+          onCancel={handleCancelSelection}
+        />
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete messages?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete {selectedMessageIds.size} message{selectedMessageIds.size > 1 ? 's' : ''} from your device. 
+              You won't be able to see {selectedMessageIds.size > 1 ? 'them' : 'it'} again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <ScrollArea
+        className="h-full overflow-x-hidden smooth-scroll-messages"
+        ref={scrollAreaRef}
+      >
       <div className="p-2 sm:p-3 md:p-4 space-y-1 overflow-x-hidden messages-container">
         {/* Loading indicator for older messages - WhatsApp style */}
         {isLoadingOlder && hasMoreOlder && (
@@ -244,5 +342,6 @@ export function MessageList() {
         <div ref={messagesEndRef} className="h-1" />
       </div>
     </ScrollArea>
+    </>
   );
 }

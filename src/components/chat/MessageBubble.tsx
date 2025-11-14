@@ -14,6 +14,7 @@ import { useAuthStore } from '@/store/authStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { PollComponent } from '@/components/chat/PollComponent';
 import { MessageReactions } from '@/components/chat/MessageReactions';
+import { QuickReactionBar } from '@/components/chat/QuickReactionBar';
 import { pseudonymService } from '@/lib/pseudonymService';
 import { cn } from '@/lib/utils';
 import { Reaction } from '@/store/chat/reactions';
@@ -70,11 +71,9 @@ export function MessageBubble({
   showSenderName = true,
   isNewSender = true
 }: MessageBubbleProps) {
-  const [showReactionPicker, setShowReactionPicker] = useState(false);
-  const [hoveredReactionIndex, setHoveredReactionIndex] = useState<number | null>(null);
+  const [showQuickReactions, setShowQuickReactions] = useState(false);
   const [activeEmoji, setActiveEmoji] = useState<string | null>(null);
   const longPressTimeoutRef = useRef<number | null>(null);
-  const reactionPickerRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
   const [ghostPseudonym, setGhostPseudonym] = useState<string>('Ghost');
   
@@ -89,7 +88,12 @@ export function MessageBubble({
     messageReactions, 
     addOrRemoveReaction,
     activeSwipeMessageId,
-    setActiveSwipeMessage
+    setActiveSwipeMessage,
+    selectionMode,
+    selectedMessageIds,
+    toggleMessageSelection,
+    enterSelectionMode,
+    exitSelectionMode
   } = useChatStore();
   const isGhost = message.is_ghost;
   const isConfession = message.message_type === 'confession';
@@ -116,7 +120,7 @@ export function MessageBubble({
     created_at: new Date().toISOString() // Add required created_at field
   }));
 
-  const REACTION_EMOJIS = ['👍', '❤️', '😂', '😢', '😮', '😡', '🔥', '👏', '🎉', '💯'];
+
 
   // Fetch pseudonym for ghost messages
   // CRITICAL FIX: Use pseudonym from message object if available (loaded during lazy load)
@@ -166,7 +170,7 @@ export function MessageBubble({
 
   // WhatsApp-exact swipe handlers
   const handleSwipeStart = (e: React.TouchEvent) => {
-    if (!isMobile || isThreadOriginal || isThreadReply || showReactionPicker) return;
+    if (!isMobile || isThreadOriginal || isThreadReply || selectionMode) return;
 
     const touch = e.touches[0];
     touchStartX.current = touch.clientX;
@@ -178,7 +182,7 @@ export function MessageBubble({
   };
 
   const handleSwipeMove = (e: React.TouchEvent) => {
-    if (!isMobile || isThreadOriginal || isThreadReply || swipeCancelled.current || showReactionPicker) return;
+    if (!isMobile || isThreadOriginal || isThreadReply || swipeCancelled.current || showQuickReactions) return;
 
     const touch = e.touches[0];
     const deltaX = touch.clientX - touchStartX.current;
@@ -245,7 +249,7 @@ export function MessageBubble({
     }, 150);
   };
 
-  // Long-press reaction picker handlers
+  // Simplified long-press handler - WhatsApp style
   const cancelLongPressTimer = () => {
     if (longPressTimeoutRef.current) {
       window.clearTimeout(longPressTimeoutRef.current);
@@ -254,72 +258,78 @@ export function MessageBubble({
   };
 
   const startLongPress = (e: React.PointerEvent) => {
-    if (isThreadOriginal || isThreadReply) return;
+    if (isThreadOriginal || isThreadReply || selectionMode) return;
     e.stopPropagation();
     cancelLongPressTimer();
+    
     longPressTimeoutRef.current = window.setTimeout(async () => {
-      setShowReactionPicker(true);
-      setHoveredReactionIndex(null);
+      // WhatsApp-style: Enter selection mode, select this message, show quick reactions
+      enterSelectionMode();
+      toggleMessageSelection(message.id);
+      setShowQuickReactions(true);
+      
       // Cancel any ongoing swipe
       swipeCancelled.current = true;
       isSwiping.current = false;
       swipeX.set(0);
+      
       try {
         await Haptics.impact({ style: ImpactStyle.Medium });
       } catch (_) {}
-    }, 350);
+    }, 500); // 500ms for long press
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
     e.stopPropagation();
-    if (showReactionPicker && hoveredReactionIndex !== null) {
-      const emoji = REACTION_EMOJIS[hoveredReactionIndex];
-      addOrRemoveReaction(message.id, emoji);
-      setActiveEmoji(emoji);
-      setTimeout(() => setActiveEmoji(null), 800);
-      setShowReactionPicker(false);
-      setHoveredReactionIndex(null);
-    }
     cancelLongPressTimer();
   };
 
   const handlePointerCancel = (e?: React.PointerEvent) => {
     e?.stopPropagation();
-    setShowReactionPicker(false);
-    setHoveredReactionIndex(null);
     cancelLongPressTimer();
   };
 
+  // Handle message click in selection mode
+  const handleMessageClick = (e: React.MouseEvent) => {
+    if (selectionMode) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMessageSelection(message.id);
+      
+      // Hide quick reactions when multiple messages are selected
+      if (selectedMessageIds.size >= 1) {
+        setShowQuickReactions(false);
+      }
+      
+      try {
+        Haptics.impact({ style: ImpactStyle.Light });
+      } catch (_) {}
+    }
+  };
+
+  // Handle quick reaction selection
+  const handleQuickReaction = async (emoji: string) => {
+    try {
+      await addOrRemoveReaction(message.id, emoji);
+      setActiveEmoji(emoji);
+      setTimeout(() => setActiveEmoji(null), 800);
+      
+      // Hide quick reactions and exit selection mode after reacting
+      setShowQuickReactions(false);
+      exitSelectionMode();
+    } catch (error) {
+      console.error('Failed to add reaction:', error);
+    }
+  };
+
+  // Hide quick reactions when exiting selection mode
   useEffect(() => {
-    if (!showReactionPicker) return;
-    const onMove = (ev: PointerEvent) => {
-      if (!reactionPickerRef.current) return;
-      const rect = reactionPickerRef.current.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      const widthPer = rect.width / REACTION_EMOJIS.length;
-      const idx = Math.floor(x / widthPer);
-      if (idx < 0 || idx >= REACTION_EMOJIS.length || Number.isNaN(idx)) {
-        setHoveredReactionIndex(null);
-      } else {
-        setHoveredReactionIndex(idx);
-      }
-    };
-    const onDownOutside = (ev: PointerEvent) => {
-      const target = ev.target as Node | null;
-      const insidePicker = reactionPickerRef.current?.contains(target as Node) ?? false;
-      const insideBubble = bubbleRef.current?.contains(target as Node) ?? false;
-      if (!insidePicker && !insideBubble) {
-        setShowReactionPicker(false);
-        setHoveredReactionIndex(null);
-      }
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerdown', onDownOutside, true);
-    return () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerdown', onDownOutside, true);
-    };
-  }, [showReactionPicker]);
+    if (!selectionMode) {
+      setShowQuickReactions(false);
+    }
+  }, [selectionMode]);
+
+
   const handleReply = (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
@@ -348,12 +358,6 @@ export function MessageBubble({
       document.body.removeChild(link);
     }
   };
-  const handleReaction = (emoji: string) => {
-    addOrRemoveReaction(message.id, emoji);
-    setActiveEmoji(emoji);
-    setTimeout(() => setActiveEmoji(null), 800);
-  };
-  
   const handleToggleReaction = (emoji: string) => {
     addOrRemoveReaction(message.id, emoji);
   };
@@ -421,21 +425,37 @@ export function MessageBubble({
     );
   }
 
+  const isSelected = selectedMessageIds.has(message.id);
+
   // Regular message rendering - WhatsApp style
   return (
-    <div className={cn(
-      "group relative mb-0.5",
-      isNewSender ? "mt-3" : "mt-0",
-      {
-        "bg-card/50 border-l-4 border-l-green-500 pl-4 rounded-lg p-3": isThreadOriginal,
-        "ml-8 pl-4 thread-reply-line": isThreadReply,
-        "bg-green-500/5 rounded-lg p-2": activeThread?.id === message.id && !isThreadOriginal,
-        "opacity-75": message.delivery_status === 'sending',
-        "border border-red-500/20 bg-red-500/5": message.delivery_status === 'failed'
-      }
-    )}>
+    <div 
+      className={cn(
+        "group relative mb-0.5",
+        isNewSender ? "mt-3" : "mt-0",
+        {
+          "bg-card/50 border-l-4 border-l-green-500 pl-4 rounded-lg p-3": isThreadOriginal,
+          "ml-8 pl-4 thread-reply-line": isThreadReply,
+          "bg-green-500/5 rounded-lg p-2": activeThread?.id === message.id && !isThreadOriginal,
+          "opacity-75": message.delivery_status === 'sending',
+          "border border-red-500/20 bg-red-500/5": message.delivery_status === 'failed',
+          "bg-primary/10": isSelected && selectionMode
+        }
+      )}
+      onClick={handleMessageClick}
+    >
+      {/* Quick Reactions Bar - positioned relative to message container */}
+      {showQuickReactions && (
+        <div className="flex justify-center w-full absolute bottom-full mb-2 z-30">
+          <QuickReactionBar
+            isVisible={showQuickReactions}
+            onReactionSelect={handleQuickReaction}
+          />
+        </div>
+      )}
+
       {/* Reply Icon - WhatsApp exact style */}
-      {isMobile && !isThreadOriginal && !isThreadReply && (
+      {isMobile && !isThreadOriginal && !isThreadReply && !selectionMode && (
         <motion.div
           className="absolute left-3 top-1/2 -translate-y-1/2 z-10 pointer-events-none"
           style={{ opacity: replyIconOpacity, scale: replyIconScale }}
@@ -472,50 +492,23 @@ export function MessageBubble({
               onPointerLeave={handlePointerCancel}
               onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
               style={{
-                backgroundColor: isImage ? undefined : bubbleColor.bg,
+                backgroundColor: isImage ? undefined : (isSelected && selectionMode ? 
+                  (isOwnMessage ? '#C1F0B5' : '#E8E8E8') : // Darker highlight when selected
+                  bubbleColor.bg),
                 color: isImage ? undefined : bubbleColor.text,
               }}
               className={cn(
-              "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative",
+              "rounded-2xl px-4 pt-3 pb-3 transition-all duration-200 max-w-[85%] w-fit relative select-none",
               "chat-bubble-base",
               {
                 // Apply special classes only for image
                 "chat-bubble-ultra-fade": isImage,
                 "chat-bubble-thread-reply": isThreadReply,
+                "ring-2 ring-primary/30": isSelected && selectionMode, // WhatsApp-style ring
               },
               isRightAligned ? "bubble-right ml-auto" : "bubble-left"
             )}
             >
-              {/* Long-press Reaction Picker */}
-              <AnimatePresence>
-                {showReactionPicker && (
-                  <motion.div
-                    ref={reactionPickerRef}
-                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 8, scale: 0.95 }}
-                    transition={{ duration: 0.15 }}
-                    className={cn(
-                      "absolute -top-12 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1",
-                      "rounded-full bg-background/95 border border-border/50 shadow-lg backdrop-blur-sm"
-                    )}
-                  >
-                    {REACTION_EMOJIS.map((emoji, index) => (
-                      <motion.button
-                        key={emoji}
-                        type="button"
-                        onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleReaction(emoji); setShowReactionPicker(false); setHoveredReactionIndex(null); }}
-                        className={cn("h-8 w-8 rounded-full flex items-center justify-center", hoveredReactionIndex === index ? "bg-muted" : "bg-transparent")}
-                        animate={hoveredReactionIndex === index ? { y: -4, scale: 1.15 } : { y: 0, scale: 1 }}
-                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                      >
-                        <span className="text-lg">{emoji}</span>
-                      </motion.button>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
               {/* Emoji pop animation */}
               <AnimatePresence>
                 {activeEmoji && (
@@ -642,9 +635,9 @@ export function MessageBubble({
 
             {/* Timestamp moved inside bubble; removing external gap */}
 
-            {/* Reactions */}
+            {/* Reactions - Telegram style, sticked below message */}
             {reactions.length > 0 && !isThreadReply && (
-              <div className="mt-2">
+              <div className="relative mt-1 mb-1">
                 <MessageReactions 
                   reactions={formattedReactions} 
                   onToggleReaction={handleToggleReaction}

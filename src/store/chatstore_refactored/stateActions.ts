@@ -42,6 +42,12 @@ export interface StateActions {
   onWake: (reason?: string, groupId?: string) => Promise<void>;
   startPollFallback: () => void;
   stopPollFallback: () => void;
+  // Message selection
+  enterSelectionMode: () => void;
+  exitSelectionMode: () => void;
+  toggleMessageSelection: (messageId: string) => void;
+  clearSelection: () => void;
+  selectAllMessages: () => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -384,5 +390,37 @@ export const createStateActions = (set: any, get: any): StateActions => ({
   
   closeGroupDetailsPanel: () => {
     set({ showGroupDetailsPanel: false });
+  },
+
+  // Message selection actions
+  enterSelectionMode: () => {
+    set({ selectionMode: true, selectedMessageIds: new Set() });
+  },
+
+  exitSelectionMode: () => {
+    set({ selectionMode: false, selectedMessageIds: new Set() });
+  },
+
+  toggleMessageSelection: (messageId: string) => {
+    set((state: any) => {
+      const newSelection = new Set(state.selectedMessageIds);
+      if (newSelection.has(messageId)) {
+        newSelection.delete(messageId);
+      } else {
+        newSelection.add(messageId);
+      }
+      return { selectedMessageIds: newSelection };
+    });
+  },
+
+  clearSelection: () => {
+    set({ selectedMessageIds: new Set() });
+  },
+
+  selectAllMessages: () => {
+    set((state: any) => {
+      const allMessageIds = new Set(state.messages.map((m: Message) => m.id));
+      return { selectedMessageIds: allMessageIds };
+    });
   },
 });
