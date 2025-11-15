@@ -1,20 +1,52 @@
 import { sqliteService } from '@/lib/sqliteService';
 import { toast } from 'sonner';
 
+// In-memory state for undo
+interface PendingDeletion {
+  messageIds: string[];
+  messages: any[]; // Store full message objects for restoration
+  timeoutId: NodeJS.Timeout;
+  timestamp: number;
+}
+
+let pendingDeletion: PendingDeletion | null = null;
+
+/**
+ * Finalize deletion after 3-second undo window expires
+ * Deletes from SQLite and creates tombstones
+ */
+async function finalizeDeletion(messageIds: string[]): Promise<void> {
+  try {
+    console.log(`🗑️ Finalizing deletion of ${messageIds.length} messages`);
+
+    // 1. Delete from local SQLite
+    await sqliteService.deleteMessages(messageIds);
+    console.log(`✅ Deleted ${messageIds.length} messages from SQLite`);
+
+    // 2. Create tombstones to prevent re-sync
+    await sqliteService.markMessagesAsDeleted(messageIds);
+    console.log(`🪦 Created tombstones for ${messageIds.length} messages`);
+
+  } catch (error) {
+    console.error('❌ Error finalizing deletion:', error);
+  }
+}
+
 export interface MessageSelectionActions {
   deleteSelectedMessages: () => Promise<void>;
+  undoDeleteMessages: () => Promise<void>;
   starSelectedMessages: () => Promise<void>;
   reportSelectedMessages: () => Promise<void>;
 }
 
 export const createMessageSelectionActions = (set: any, get: any): MessageSelectionActions => ({
   /**
-   * Delete selected messages from local SQLite database
-   * This ensures the user won't see these messages again
-   * Note: Messages are only deleted locally, not from the server
+   * Delete selected messages with 3-second undo window
+   * Messages are hidden immediately but can be restored within 3 seconds
+   * After 3 seconds, deletion is finalized with tombstone
    */
   deleteSelectedMessages: async () => {
-    const { selectedMessageIds, activeGroup } = get();
+    const { selectedMessageIds, activeGroup, messages } = get();
     
     if (selectedMessageIds.size === 0) {
       toast.error('No messages selected');
@@ -29,37 +61,91 @@ export const createMessageSelectionActions = (set: any, get: any): MessageSelect
     try {
       const messageIdsArray = Array.from(selectedMessageIds) as string[];
       
-      console.log(`🗑️ Deleting ${messageIdsArray.length} messages locally...`);
+      // Store messages for potential undo
+      const messagesToDelete = messages.filter((m: any) => selectedMessageIds.has(m.id));
+      
+      console.log(`🗑️ Preparing to delete ${messageIdsArray.length} messages (3s undo window)...`);
 
-      // 1. Delete from local SQLite (instant UI update)
-      try {
-        await sqliteService.deleteMessages(messageIdsArray);
-        console.log(`✅ Deleted ${messageIdsArray.length} messages from SQLite`);
-      } catch (error) {
-        console.error('Failed to delete from SQLite:', error);
-        toast.error('Failed to delete messages');
-        return;
-      }
-
-      // 2. Update UI immediately (optimistic update)
+      // 1. Immediately hide from UI (optimistic)
       set((state: any) => ({
         messages: state.messages.filter((m: any) => !selectedMessageIds.has(m.id)),
         selectionMode: false,
         selectedMessageIds: new Set()
       }));
 
-      toast.success(`Deleted ${messageIdsArray.length} message${messageIdsArray.length > 1 ? 's' : ''}`);
+      // 2. Cancel any existing pending deletion
+      if (pendingDeletion) {
+        clearTimeout(pendingDeletion.timeoutId);
+      }
 
-      // Note: We only delete locally. The messages will still exist on the server
-      // and in other users' devices. This is a local "hide" operation.
-      // To implement server-side deletion, you would need to:
-      // 1. Add a soft-delete column to the messages table
-      // 2. Update the message via supabasePipeline
-      // 3. Handle the deletion in realtime subscriptions
+      // 3. Set up new pending deletion with timeout
+      pendingDeletion = {
+        messageIds: messageIdsArray,
+        messages: messagesToDelete,
+        timeoutId: setTimeout(async () => {
+          await finalizeDeletion(messageIdsArray);
+          pendingDeletion = null;
+        }, 3000),
+        timestamp: Date.now()
+      };
+
+      // 4. Show undo toast
+      toast.success(
+        `Deleted ${messageIdsArray.length} message${messageIdsArray.length > 1 ? 's' : ''}`,
+        {
+          duration: 3000,
+          action: {
+            label: 'Undo',
+            onClick: async () => {
+              await get().undoDeleteMessages();
+            }
+          }
+        }
+      );
 
     } catch (error) {
       console.error('Error deleting messages:', error);
       toast.error('Failed to delete messages');
+    }
+  },
+
+  /**
+   * Undo message deletion within the 3-second window
+   */
+  undoDeleteMessages: async () => {
+    if (!pendingDeletion) {
+      console.log('⚠️ No pending deletion to undo');
+      return;
+    }
+
+    try {
+      console.log(`🔄 Undoing deletion of ${pendingDeletion.messageIds.length} messages`);
+
+      // 1. Cancel timeout
+      clearTimeout(pendingDeletion.timeoutId);
+
+      // 2. Restore messages in UI
+      set((state: any) => {
+        const existingIds = new Set(state.messages.map((m: any) => m.id));
+        const messagesToRestore = pendingDeletion!.messages.filter(
+          (m: any) => !existingIds.has(m.id)
+        );
+        
+        // Merge and sort by created_at
+        const merged = [...state.messages, ...messagesToRestore];
+        merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        
+        return { messages: merged };
+      });
+
+      // 3. Clear pending state
+      const count = pendingDeletion.messageIds.length;
+      pendingDeletion = null;
+
+      toast.success(`Restored ${count} message${count > 1 ? 's' : ''}`);
+    } catch (error) {
+      console.error('Error undoing deletion:', error);
+      toast.error('Failed to undo deletion');
     }
   },
 

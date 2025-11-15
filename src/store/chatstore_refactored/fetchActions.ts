@@ -479,8 +479,16 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               });
             });
 
+            // CRITICAL: Filter out tombstoned messages before converting
+            const deletedIds = await sqliteService.getAllDeletedMessageIds();
+            const filteredLocalMessages = localMessages.filter(msg => !deletedIds.has(msg.id));
+            
+            if (deletedIds.size > 0) {
+              console.log(`🪦 Filtered ${localMessages.length - filteredLocalMessages.length} tombstoned messages from local load`);
+            }
+
             // Convert local messages to the format expected by the UI
-            const messages: Message[] = localMessages.map((msg) => {
+            const messages: Message[] = filteredLocalMessages.map((msg) => {
               // Get user info from cache
               let author = undefined;
               if (!msg.is_ghost) {
@@ -703,7 +711,11 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                     });
                   });
 
-                  const allMessages: Message[] = allLocalMessages.map((msg) => {
+                  // Filter tombstones from background load too
+                  const deletedIds = await sqliteService.getAllDeletedMessageIds();
+                  const filteredAllMessages = allLocalMessages.filter(msg => !deletedIds.has(msg.id));
+
+                  const allMessages: Message[] = filteredAllMessages.map((msg) => {
                     let author = undefined;
                     if (!msg.is_ghost) {
                       author = userCache.get(msg.user_id) || {
@@ -841,10 +853,18 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             if (error) throw error;
 
-            // Sync to SQLite in background
-            if (isSqliteReady && data && data.length > 0) {
-              await sqliteService.syncMessagesFromRemote(groupId, data);
-              console.log(`🔄 Background: Synced ${data.length} messages from Supabase to SQLite`);
+            // CRITICAL: Filter tombstones before syncing
+            const deletedIds = await sqliteService.getAllDeletedMessageIds();
+            const filteredData = (data || []).filter((msg: any) => !deletedIds.has(msg.id));
+            
+            if (deletedIds.size > 0 && filteredData.length < (data || []).length) {
+              console.log(`🪦 Background: Filtered ${(data || []).length - filteredData.length} tombstoned messages`);
+            }
+
+            // Sync to SQLite in background (syncMessagesFromRemote also filters tombstones internally)
+            if (isSqliteReady && filteredData && filteredData.length > 0) {
+              await sqliteService.syncMessagesFromRemote(groupId, filteredData);
+              console.log(`🔄 Background: Synced ${filteredData.length} messages from Supabase to SQLite`);
             }
 
             // Update cache
@@ -854,13 +874,13 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
             // CRITICAL FIX (LOG52): Update UI state with new messages from background sync
             // This fixes the issue where messages sent while app was dead don't appear until user navigates away and back
-            if (data && data.length > 0) {
+            if (filteredData && filteredData.length > 0) {
               const currentState = get();
 
               // Only update if we're still viewing the same group
               if (currentState.activeGroup?.id === groupId) {
                 const existingIds = new Set(currentState.messages.map((m: Message) => m.id));
-                const newMessages = data.filter((msg: any) => !existingIds.has(msg.id));
+                const newMessages = filteredData.filter((msg: any) => !existingIds.has(msg.id));
 
                 if (newMessages.length > 0) {
                   console.log(`🔄 Background: Found ${newMessages.length} new messages from Supabase, updating UI`);
@@ -894,7 +914,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
                   console.log(`✅ Background: UI updated with ${builtMessages.length} new messages (sorted by timestamp)`);
                 } else {
-                  console.log(`🔄 Background: No new messages to add to UI (all ${data.length} already exist)`);
+                  console.log(`🔄 Background: No new messages to add to UI (all ${filteredData.length} already exist)`);
                 }
               } else {
                 console.log(`🔄 Background: User switched groups, skipping UI update`);
@@ -927,7 +947,15 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       if (error) throw error;
 
-      const rows = (data || []).slice().reverse();
+      // CRITICAL: Filter tombstones from remote fetch
+      const deletedIds = await sqliteService.getAllDeletedMessageIds();
+      const filteredData = (data || []).filter((msg: any) => !deletedIds.has(msg.id));
+      
+      if (deletedIds.size > 0 && filteredData.length < (data || []).length) {
+        console.log(`🪦 Filtered ${(data || []).length - filteredData.length} tombstoned messages from remote fetch`);
+      }
+
+      const rows = filteredData.slice().reverse();
       const messages = await Promise.all(rows.map(async (msg: any) => {
         const { count: replyCount } = await client
           .from('messages')
@@ -1193,7 +1221,15 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	            }
   	          }
 
-  	          const mapped: Message[] = localOlder.map((msg: any) => {
+  	          // CRITICAL: Filter tombstones before mapping
+  	          const deletedIds = await sqliteService.getAllDeletedMessageIds();
+  	          const filteredOlder = localOlder.filter((msg: any) => !deletedIds.has(msg.id));
+  	          
+  	          if (deletedIds.size > 0 && filteredOlder.length < localOlder.length) {
+  	            console.log(`🪦 Filtered ${localOlder.length - filteredOlder.length} tombstoned messages from pagination`);
+  	          }
+
+  	          const mapped: Message[] = filteredOlder.map((msg: any) => {
   	            const isGhost = msg.is_ghost === 1;
   	            const pseudonym = isGhost ? pseudonymCache.get(msg.user_id) : undefined;
 

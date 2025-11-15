@@ -906,6 +906,17 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
 
           log(`📨 Realtime INSERT received: id=${row.id}, group=${row.group_id}, content="${row.content?.substring(0, 20)}...", user=${row.user_id}, dedupe=${row.dedupe_key || 'none'}`);
 
+          // CRITICAL: Check tombstone before processing
+          try {
+            const isDeleted = await sqliteService.isMessageDeleted(row.id);
+            if (isDeleted) {
+              log(`🪦 Skipping tombstoned message from realtime: ${row.id}`);
+              return;
+            }
+          } catch (tombstoneErr) {
+            console.warn('⚠️ Tombstone check failed (non-critical):', tombstoneErr);
+          }
+
           try {
             const message = await buildMessageFromRow(row);
             log(`📨 Built message from row: id=${message.id}, group=${message.group_id}, delivery_status=${message.delivery_status}`);
@@ -966,26 +977,33 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             }
 
             // Persist to local storage immediately to avoid disappearing on navigation
+            // CRITICAL: Double-check tombstone before persisting (defense in depth)
             try {
               const { Capacitor } = await import('@capacitor/core');
               const isNative = Capacitor.isNativePlatform();
               if (isNative) {
                 const ready = await sqliteService.isReady();
                 if (ready) {
-                  await sqliteService.saveMessage({
-                    id: row.id,
-                    group_id: row.group_id,
-                    user_id: row.user_id,
-                    content: row.content,
-                    is_ghost: row.is_ghost ? 1 : 0,
-                    message_type: row.message_type,
-                    category: row.category || null,
-                    parent_id: row.parent_id || null,
-                    image_url: row.image_url || null,
-                    created_at: new Date(row.created_at).getTime(),
-                  });
-                  log(`📨 Message persisted to SQLite: id=${row.id}`);
-                  try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}
+                  // Final tombstone check before persisting
+                  const isDeleted = await sqliteService.isMessageDeleted(row.id);
+                  if (isDeleted) {
+                    log(`🪦 Skipping persist of tombstoned message: ${row.id}`);
+                  } else {
+                    await sqliteService.saveMessage({
+                      id: row.id,
+                      group_id: row.group_id,
+                      user_id: row.user_id,
+                      content: row.content,
+                      is_ghost: row.is_ghost ? 1 : 0,
+                      message_type: row.message_type,
+                      category: row.category || null,
+                      parent_id: row.parent_id || null,
+                      image_url: row.image_url || null,
+                      created_at: new Date(row.created_at).getTime(),
+                    });
+                    log(`📨 Message persisted to SQLite: id=${row.id}`);
+                    try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}
+                  }
                 }
               }
             } catch (persistErr) {

@@ -139,6 +139,34 @@ function AppContent() {
           try {
             await sqliteService.initialize();
             console.log('✅ SQLite initialized successfully');
+            
+            // Clean up old tombstones (48+ hours old)
+            try {
+              const cleanedCount = await sqliteService.cleanupOldTombstones();
+              if (cleanedCount > 0) {
+                console.log(`🧹 Cleaned up ${cleanedCount} old tombstones on app start`);
+              }
+            } catch (error) {
+              console.warn('⚠️ Tombstone cleanup failed (non-critical):', error);
+            }
+
+            // Check data integrity and clean up orphaned data
+            try {
+              const integrity = await sqliteService.checkDataIntegrity();
+              if (!integrity.valid) {
+                console.warn('⚠️ Data integrity issues detected:', integrity.issues);
+                console.log('🔧 Attempting to repair by cleaning up orphaned data...');
+                
+                const cleaned = await sqliteService.cleanupAllOrphanedData();
+                const totalCleaned = cleaned.reactions + cleaned.polls + cleaned.confessions;
+                
+                if (totalCleaned > 0) {
+                  console.log(`✅ Cleaned up ${totalCleaned} orphaned records (reactions: ${cleaned.reactions}, polls: ${cleaned.polls}, confessions: ${cleaned.confessions})`);
+                }
+              }
+            } catch (error) {
+              console.warn('⚠️ Data integrity check/repair failed (non-critical):', error);
+            }
           } catch (error) {
             console.error('❌ SQLite initialization failed:', error);
             // Continue without SQLite - app should still work with remote data only

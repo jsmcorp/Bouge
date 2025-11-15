@@ -301,9 +301,15 @@ export function MessageBubble({
     if (selectionMode) {
       e.preventDefault();
       e.stopPropagation();
+      
+      // If this message has quick reactions showing and we're selecting another message, hide them
+      if (showQuickReactions && !selectedMessageIds.has(message.id)) {
+        setShowQuickReactions(false);
+      }
+      
       toggleMessageSelection(message.id);
       
-      // Hide quick reactions when multiple messages are selected
+      // Hide quick reactions when selecting a second message (size will be 1 after toggle)
       if (selectedMessageIds.size >= 1) {
         setShowQuickReactions(false);
       }
@@ -335,6 +341,13 @@ export function MessageBubble({
       setShowQuickReactions(false);
     }
   }, [selectionMode]);
+
+  // Hide quick reactions when multiple messages are selected
+  useEffect(() => {
+    if (selectionMode && selectedMessageIds.size > 1) {
+      setShowQuickReactions(false);
+    }
+  }, [selectionMode, selectedMessageIds.size]);
 
 
   const handleReply = (e?: React.MouseEvent) => {

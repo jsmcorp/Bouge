@@ -12,6 +12,8 @@ import { UtilityOperations } from './utilityOperations';
 import { ContactOperations } from './contactOperations';
 import { SyncMetadataOperations } from './syncMetadataOperations';
 import { JoinRequestOperations, LocalJoinRequest } from './joinRequestOperations';
+import { TombstoneOperations } from './tombstoneOperations';
+import { RepairOperations } from './repairOperations';
 import {
   LocalMessage,
   LocalPoll,
@@ -45,6 +47,8 @@ class SQLiteService {
   private contactOps: ContactOperations;
   private syncMetadataOps: SyncMetadataOperations;
   private joinRequestOps: JoinRequestOperations;
+  private tombstoneOps: TombstoneOperations;
+  private repairOps: RepairOperations;
 
   private constructor() {
     this.dbManager = new DatabaseManager();
@@ -61,6 +65,8 @@ class SQLiteService {
     this.contactOps = new ContactOperations(this.dbManager);
     this.syncMetadataOps = new SyncMetadataOperations(this.dbManager);
     this.joinRequestOps = new JoinRequestOperations(this.dbManager);
+    this.tombstoneOps = new TombstoneOperations(this.dbManager);
+    this.repairOps = new RepairOperations(this.dbManager);
   }
 
   public static getInstance(): SQLiteService {
@@ -518,6 +524,102 @@ class SQLiteService {
 
   public async clearGroupJoinRequests(groupId: string): Promise<void> {
     return this.joinRequestOps.clearGroupRequests(groupId);
+  }
+
+  // ============================================
+  // TOMBSTONE OPERATIONS (Delete for Me)
+  // ============================================
+
+  /**
+   * Mark messages as locally deleted (tombstone)
+   */
+  public async markMessagesAsDeleted(messageIds: string[]): Promise<void> {
+    return this.tombstoneOps.markAsDeleted(messageIds);
+  }
+
+  /**
+   * Check if a message is locally deleted
+   */
+  public async isMessageDeleted(messageId: string): Promise<boolean> {
+    return this.tombstoneOps.isDeleted(messageId);
+  }
+
+  /**
+   * Get all locally deleted message IDs
+   */
+  public async getAllDeletedMessageIds(): Promise<Set<string>> {
+    return this.tombstoneOps.getAllDeletedIds();
+  }
+
+  /**
+   * Filter out locally deleted messages from a list
+   */
+  public async filterDeletedMessages<T extends { id: string }>(messages: T[]): Promise<T[]> {
+    return this.tombstoneOps.filterDeleted(messages);
+  }
+
+  /**
+   * Clean up tombstones older than 48 hours
+   */
+  public async cleanupOldTombstones(): Promise<number> {
+    return this.tombstoneOps.cleanupOldTombstones();
+  }
+
+  /**
+   * Remove tombstone (for undo)
+   */
+  public async removeTombstone(messageId: string): Promise<void> {
+    return this.tombstoneOps.removeTombstone(messageId);
+  }
+
+  /**
+   * Remove multiple tombstones (for undo)
+   */
+  public async removeTombstones(messageIds: string[]): Promise<void> {
+    return this.tombstoneOps.removeTombstones(messageIds);
+  }
+
+  // ============================================
+  // REPAIR OPERATIONS (Data Integrity)
+  // ============================================
+
+  /**
+   * Check for data integrity issues after CASCADE migration
+   */
+  public async checkDataIntegrity(): Promise<{ valid: boolean; issues: string[] }> {
+    return this.repairOps.checkDataIntegrity();
+  }
+
+  /**
+   * Clean up orphaned reactions (reactions with no matching message)
+   */
+  public async cleanupOrphanedReactions(): Promise<number> {
+    return this.repairOps.cleanupOrphanedReactions();
+  }
+
+  /**
+   * Clean up orphaned polls (polls with no matching message)
+   */
+  public async cleanupOrphanedPolls(): Promise<number> {
+    return this.repairOps.cleanupOrphanedPolls();
+  }
+
+  /**
+   * Clean up orphaned confessions (confessions with no matching message)
+   */
+  public async cleanupOrphanedConfessions(): Promise<number> {
+    return this.repairOps.cleanupOrphanedConfessions();
+  }
+
+  /**
+   * Clean up all orphaned data
+   */
+  public async cleanupAllOrphanedData(): Promise<{
+    reactions: number;
+    polls: number;
+    confessions: number;
+  }> {
+    return this.repairOps.cleanupAllOrphanedData();
   }
 }
 

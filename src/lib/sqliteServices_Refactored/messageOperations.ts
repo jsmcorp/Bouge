@@ -170,12 +170,29 @@ export class MessageOperations {
     deleted_at?: string | number | null;
   }>): Promise<number> {
     await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
 
     console.log(`🔄 Syncing ${messages.length} messages for group ${groupId} to local storage`);
+
+    // CRITICAL: Get tombstones first to filter out locally deleted messages
+    const tombstoneResult = await db.query('SELECT message_id FROM locally_deleted_messages');
+    const deletedIds = new Set(
+      (tombstoneResult.values || []).map((row: any) => row.message_id)
+    );
+
+    if (deletedIds.size > 0) {
+      console.log(`🪦 Filtering out ${deletedIds.size} tombstoned messages from sync`);
+    }
 
     let syncCount = 0;
 
     for (const message of messages) {
+      // Skip if message is tombstoned
+      if (deletedIds.has(message.id)) {
+        console.log(`⏭️ Skipping tombstoned message: ${message.id}`);
+        continue;
+      }
+
       try {
         const messageType = message.message_type || 'text';
 
@@ -209,7 +226,7 @@ export class MessageOperations {
 
     await this.cleanupTempMessages(groupId, messages.map(m => m.id));
 
-    console.log(`✅ Successfully synced ${syncCount} messages to local storage`);
+    console.log(`✅ Successfully synced ${syncCount} messages to local storage (filtered ${messages.length - syncCount} tombstoned)`);
     return syncCount;
   }
 

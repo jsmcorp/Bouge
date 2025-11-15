@@ -202,7 +202,7 @@ export class DatabaseManager {
         created_at INTEGER NOT NULL,
         closes_at INTEGER NOT NULL,
         created_by TEXT NOT NULL,
-        FOREIGN KEY (message_id) REFERENCES messages(id)
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
       );
 
       /* Poll votes table */
@@ -212,7 +212,7 @@ export class DatabaseManager {
         option_index INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (poll_id, user_id),
-        FOREIGN KEY (poll_id) REFERENCES polls(id)
+        FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE
       );
 
       /* Reactions table */
@@ -222,7 +222,7 @@ export class DatabaseManager {
         user_id TEXT NOT NULL,
         emoji TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        FOREIGN KEY (message_id) REFERENCES messages(id)
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
       );
 
       /* Group members table */
@@ -234,8 +234,8 @@ export class DatabaseManager {
         last_read_at INTEGER DEFAULT 0,
         last_read_message_id TEXT,
         PRIMARY KEY (group_id, user_id),
-        FOREIGN KEY (group_id) REFERENCES groups(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       /* User pseudonyms for ghost messages */
@@ -256,8 +256,8 @@ export class DatabaseManager {
         status TEXT NOT NULL DEFAULT 'pending',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        FOREIGN KEY (group_id) REFERENCES groups(id),
-        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         UNIQUE(group_id, user_id)
       );
 
@@ -267,7 +267,13 @@ export class DatabaseManager {
         message_id TEXT NOT NULL,
         confession_type TEXT NOT NULL,
         is_anonymous INTEGER DEFAULT 1,
-        FOREIGN KEY (message_id) REFERENCES messages(id)
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+      );
+
+      /* Locally deleted messages (tombstones) - for "delete for me" feature */
+      CREATE TABLE IF NOT EXISTS locally_deleted_messages (
+        message_id TEXT PRIMARY KEY,
+        deleted_at INTEGER NOT NULL
       );
 
       /* ============================================ */
@@ -330,6 +336,8 @@ export class DatabaseManager {
         ON user_pseudonyms(group_id);
       CREATE INDEX IF NOT EXISTS idx_confessions_message
         ON confessions(message_id);
+      CREATE INDEX IF NOT EXISTS idx_locally_deleted_message_id
+        ON locally_deleted_messages(message_id);
 
       /* Contacts indexes for fast search and lookup */
       CREATE INDEX IF NOT EXISTS idx_contacts_phone
@@ -410,9 +418,186 @@ export class DatabaseManager {
       await ensureColumn('group_members', 'last_read_at', 'INTEGER', 'DEFAULT 0');
       await ensureColumn('group_members', 'last_read_message_id', 'TEXT');
 
+      // CRITICAL: Migrate tables to add ON DELETE CASCADE for foreign keys
+      // This is required for "delete for me" feature to work properly
+      await this.migrateForeignKeysWithCascade();
+
       console.log('✅ Database migration completed');
     } catch (error) {
       console.error('❌ Database migration failed:', error);
+    }
+  }
+
+  private async migrateForeignKeysWithCascade(): Promise<void> {
+    try {
+      console.log('🔄 Checking if foreign key CASCADE migration is needed...');
+
+      // Check if reactions table has CASCADE by inspecting foreign_key_list
+      const fkCheck = await this.db!.query('PRAGMA foreign_key_list(reactions);');
+      const hasCascade = (fkCheck.values || []).some((fk: any) => 
+        fk.on_delete === 'CASCADE'
+      );
+
+      if (hasCascade) {
+        console.log('✅ Foreign keys already have CASCADE, skipping migration');
+        
+        // Verify data integrity - check if reactions have valid message_ids
+        try {
+          const integrityCheck = await this.db!.query(`
+            SELECT COUNT(*) as invalid_count 
+            FROM reactions r 
+            LEFT JOIN messages m ON r.message_id = m.id 
+            WHERE m.id IS NULL
+          `);
+          const invalidCount = integrityCheck.values?.[0]?.invalid_count || 0;
+          if (invalidCount > 0) {
+            console.warn(`⚠️ Found ${invalidCount} reactions with invalid message_ids - data may be corrupted`);
+            console.warn('⚠️ Consider clearing local data and re-syncing from server');
+          }
+        } catch (checkErr) {
+          console.warn('⚠️ Could not verify data integrity:', checkErr);
+        }
+        
+        return;
+      }
+
+      console.log('🔄 Migrating tables to add ON DELETE CASCADE...');
+
+      // Disable foreign keys temporarily
+      await this.db!.execute('PRAGMA foreign_keys = OFF;');
+
+      // Migrate reactions table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS reactions_new (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          emoji TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO reactions_new (id, message_id, user_id, emoji, created_at)
+        SELECT id, message_id, user_id, emoji, created_at FROM reactions;
+      `);
+      await this.db!.execute('DROP TABLE reactions;');
+      await this.db!.execute('ALTER TABLE reactions_new RENAME TO reactions;');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);');
+
+      // Migrate polls table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS polls_new (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          question TEXT NOT NULL,
+          options TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          closes_at INTEGER NOT NULL,
+          created_by TEXT NOT NULL,
+          FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO polls_new (id, message_id, question, options, created_at, closes_at, created_by)
+        SELECT id, message_id, question, options, created_at, closes_at, created_by FROM polls;
+      `);
+      await this.db!.execute('DROP TABLE polls;');
+      await this.db!.execute('ALTER TABLE polls_new RENAME TO polls;');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_poll_message ON polls(message_id);');
+
+      // Migrate poll_votes table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS poll_votes_new (
+          poll_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          option_index INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (poll_id, user_id),
+          FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO poll_votes_new (poll_id, user_id, option_index, created_at)
+        SELECT poll_id, user_id, option_index, created_at FROM poll_votes;
+      `);
+      await this.db!.execute('DROP TABLE poll_votes;');
+      await this.db!.execute('ALTER TABLE poll_votes_new RENAME TO poll_votes;');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_poll_vote_poll ON poll_votes(poll_id);');
+
+      // Migrate confessions table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS confessions_new (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          confession_type TEXT NOT NULL,
+          is_anonymous INTEGER DEFAULT 1,
+          FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO confessions_new (id, message_id, confession_type, is_anonymous)
+        SELECT id, message_id, confession_type, is_anonymous FROM confessions;
+      `);
+      await this.db!.execute('DROP TABLE confessions;');
+      await this.db!.execute('ALTER TABLE confessions_new RENAME TO confessions;');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_confessions_message ON confessions(message_id);');
+
+      // Migrate group_members table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS group_members_new (
+          group_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          role TEXT DEFAULT 'participant',
+          joined_at INTEGER NOT NULL,
+          last_read_at INTEGER DEFAULT 0,
+          last_read_message_id TEXT,
+          PRIMARY KEY (group_id, user_id),
+          FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO group_members_new (group_id, user_id, role, joined_at, last_read_at, last_read_message_id)
+        SELECT group_id, user_id, role, joined_at, last_read_at, last_read_message_id FROM group_members;
+      `);
+      await this.db!.execute('DROP TABLE group_members;');
+      await this.db!.execute('ALTER TABLE group_members_new RENAME TO group_members;');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);');
+      await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);');
+
+      // Migrate group_join_requests table
+      await this.db!.execute(`
+        CREATE TABLE IF NOT EXISTS group_join_requests_new (
+          id TEXT PRIMARY KEY,
+          group_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          invited_by TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          UNIQUE(group_id, user_id)
+        );
+      `);
+      await this.db!.execute(`
+        INSERT INTO group_join_requests_new (id, group_id, user_id, invited_by, status, created_at, updated_at)
+        SELECT id, group_id, user_id, invited_by, status, created_at, updated_at FROM group_join_requests;
+      `);
+      await this.db!.execute('DROP TABLE group_join_requests;');
+      await this.db!.execute('ALTER TABLE group_join_requests_new RENAME TO group_join_requests;');
+
+      // Re-enable foreign keys
+      await this.db!.execute('PRAGMA foreign_keys = ON;');
+
+      console.log('✅ Foreign key CASCADE migration completed');
+    } catch (error) {
+      console.error('❌ Foreign key CASCADE migration failed:', error);
+      // Re-enable foreign keys even on error
+      try {
+        await this.db!.execute('PRAGMA foreign_keys = ON;');
+      } catch {}
     }
   }
 
