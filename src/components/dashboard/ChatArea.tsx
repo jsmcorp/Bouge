@@ -75,57 +75,111 @@ export function ChatArea() {
       setTimeout(async () => {
         const currentMessages = useChatStore.getState().messages;
         if (currentMessages.length > 0) {
-          const lastMessage = currentMessages[currentMessages.length - 1];
+          // Find the last non-temp message (in case there are optimistic messages)
+          const lastRealMessage = [...currentMessages].reverse().find(msg => 
+            msg.id && !msg.id.startsWith('temp-')
+          );
           
-          if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
+          if (lastRealMessage) {
             console.log('[unread] ⚡ INSTANT: Marking all messages as read (local-first)');
             // Mark as read locally FIRST, sync to Supabase later
             // Pass the message timestamp so we mark at the correct time
-            const messageTimestamp = new Date(lastMessage.created_at).getTime();
-            await unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp);
+            const messageTimestamp = new Date(lastRealMessage.created_at).getTime();
+            await unreadTracker.markGroupAsRead(activeGroup.id, lastRealMessage.id, messageTimestamp);
             console.log('[unread] ✅ All messages marked as read locally');
+          } else {
+            console.log('[unread] ℹ️ No real messages to mark as read (all optimistic)');
           }
         }
       }, 100); // Small delay to ensure messages are loaded
     }
   }, [activeGroup?.id, fetchMessages]);
 
-  // WHATSAPP STYLE: Mark as read periodically while viewing AND when closing
+  // REALTIME: Mark new messages as read instantly when they arrive while viewing
   useEffect(() => {
     if (!activeGroup?.id) return;
 
-    // Mark as read after 1 second of viewing (WhatsApp style)
-    const markAsReadTimer = setTimeout(() => {
-      const currentMessages = useChatStore.getState().messages;
-      if (currentMessages.length > 0) {
-        const lastMessage = currentMessages[currentMessages.length - 1];
-        
-        if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
-          console.log('[unread] 📝 WhatsApp-style: Auto-marking as read after 1s viewing');
-          // Pass the message timestamp so we mark at the correct time
-          const messageTimestamp = new Date(lastMessage.created_at).getTime();
-          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp)
-            .catch(err => console.error('[unread] ❌ Auto mark as read failed:', err));
+    // Helper to get the last real (non-temp) message ID
+    const getLastRealMessageId = (messages: any[]) => {
+      const lastReal = [...messages].reverse().find(msg => 
+        msg.id && !msg.id.startsWith('temp-')
+      );
+      return lastReal?.id || null;
+    };
+
+    // Get initial state
+    const initialMessages = useChatStore.getState().messages;
+    let lastMessageCount = initialMessages.length;
+    let lastMessageId = getLastRealMessageId(initialMessages);
+
+    console.log('[unread] 🎬 REALTIME: Starting subscription, initial last message:', lastMessageId?.slice(0, 8));
+
+    // Subscribe to store changes to detect new messages
+    const unsubscribe = useChatStore.subscribe((state) => {
+      // Only process if we're still on the same group
+      if (state.activeGroup?.id !== activeGroup.id) return;
+
+      const currentMessages = state.messages;
+      const currentCount = currentMessages.length;
+      const currentLastMessageId = getLastRealMessageId(currentMessages);
+
+      // Check if new real messages arrived (count increased OR last message ID changed)
+      if ((currentCount > lastMessageCount || currentLastMessageId !== lastMessageId) && currentLastMessageId) {
+        // Only process if the last message ID actually changed (not just a state update)
+        if (currentLastMessageId !== lastMessageId) {
+          console.log('[unread] 📨 REALTIME: New message detected!');
+          console.log(`[unread] 📨 Previous: ${lastMessageId?.slice(0, 8) || 'none'}, Current: ${currentLastMessageId.slice(0, 8)}`);
+          
+          // Find the actual new message
+          const latestRealMessage = currentMessages.find(msg => msg.id === currentLastMessageId);
+          
+          if (latestRealMessage) {
+            console.log('[unread] ⚡ REALTIME: Marking as read instantly');
+            // Mark as read immediately
+            const messageTimestamp = new Date(latestRealMessage.created_at).getTime();
+            unreadTracker.markGroupAsRead(activeGroup.id, latestRealMessage.id, messageTimestamp)
+              .then(() => {
+                console.log('[unread] ✅ REALTIME: Marked as read successfully');
+              })
+              .catch(err => console.error('[unread] ❌ Realtime mark as read failed:', err));
+          }
+          
+          lastMessageId = currentLastMessageId;
         }
       }
-    }, 1000); // 1 second
+
+      lastMessageCount = currentCount;
+    });
+
+    return () => {
+      console.log('[unread] 🛑 REALTIME: Unsubscribing');
+      unsubscribe();
+    };
+  }, [activeGroup?.id]);
+
+  // WHATSAPP STYLE: Mark as read when closing chat
+  useEffect(() => {
+    if (!activeGroup?.id) return;
 
     // Cleanup: Mark as read when closing chat
     return () => {
-      clearTimeout(markAsReadTimer);
-      
       // On unmount (closing chat), mark as read
       const currentMessages = useChatStore.getState().messages;
       if (currentMessages.length > 0) {
-        const lastMessage = currentMessages[currentMessages.length - 1];
+        // Find the last non-temp message (in case we just sent a message that's still optimistic)
+        const lastRealMessage = [...currentMessages].reverse().find(msg => 
+          msg.id && !msg.id.startsWith('temp-')
+        );
         
-        if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
-          console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE');
+        if (lastRealMessage) {
+          console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE (last real message)');
           // Mark as read when closing - this sets the baseline for next open
           // Pass the message timestamp so we mark at the correct time
-          const messageTimestamp = new Date(lastMessage.created_at).getTime();
-          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp)
+          const messageTimestamp = new Date(lastRealMessage.created_at).getTime();
+          unreadTracker.markGroupAsRead(activeGroup.id, lastRealMessage.id, messageTimestamp)
             .catch(err => console.error('[unread] ❌ Mark as read on close failed:', err));
+        } else {
+          console.log('[unread] ⚠️ No real messages to mark as read on close (all optimistic)');
         }
       }
       
