@@ -150,6 +150,18 @@ class SupabasePipeline {
   public getLastRealtimeAuthToken(): string | null {
     return this.sessionState.realtimeToken;
   }
+  
+  /** Get cached session without making any auth calls - for fast unread count fetching */
+  public async getCachedSession(): Promise<{ user: { id: string } } | null> {
+    if (this.sessionState.userId && this.sessionState.accessToken) {
+      return {
+        user: {
+          id: this.sessionState.userId
+        }
+      };
+    }
+    return null;
+  }
 
 
   /**

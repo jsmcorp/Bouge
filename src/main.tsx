@@ -115,13 +115,46 @@ console.log('[main] 🚀 IIFE starting - about to initialize push notifications'
 
 		lastResumeTime = now;
 
-		// Trigger outbox processing and light session recovery on app resume
+		// Trigger outbox processing and light session recovery on app resume (non-blocking)
+		(async () => {
+			try {
+				const { supabasePipeline } = await import('@/lib/supabasePipeline');
+				await supabasePipeline.onAppResume();
+				mobileLogger.log('info', 'general', 'Triggered outbox processing on app resume');
+			} catch (error) {
+				mobileLogger.log('error', 'general', 'Failed to trigger outbox on app resume', { error });
+			}
+		})();
+
+		// Sync unread counts from Supabase on app resume (runs immediately, doesn't wait for session recovery)
 		try {
-			const { supabasePipeline } = await import('@/lib/supabasePipeline');
-			await supabasePipeline.onAppResume();
-			mobileLogger.log('info', 'general', 'Triggered outbox processing on app resume');
+			console.log('[main] 📱 App resumed - syncing unread counts from Supabase');
+			console.log('[main] 🔄 Importing unreadTracker...');
+			const { unreadTracker } = await import('@/lib/unreadTracker');
+			console.log('[main] ✅ unreadTracker imported');
+			
+			console.log('[main] 🔄 Fetching fresh counts from Supabase (fast mode - uses cached session)...');
+			const freshCounts = await unreadTracker.getAllUnreadCountsFast();
+			console.log('[main] ✅ Got fresh counts from Supabase:', Array.from(freshCounts.entries()));
+			
+			// Update UI if helper is available
+			if (typeof (window as any).__updateUnreadCount === 'function') {
+				console.log('[main] 🔄 Updating UI with fresh counts...');
+				for (const [groupId, count] of freshCounts.entries()) {
+					(window as any).__updateUnreadCount(groupId, count);
+					console.log('[main] ✅ Updated count for group:', groupId, '→', count);
+				}
+				console.log('[main] ✅ Unread counts synced to UI');
+			} else {
+				console.log('[main] ℹ️ UI helper not ready, Sidebar will fetch on mount');
+			}
 		} catch (error) {
-			mobileLogger.log('error', 'general', 'Failed to trigger outbox on app resume', { error });
+			console.error('[main] ❌ Error syncing unread counts on resume:', error);
+			console.error('[main] ❌ Error details:', {
+				message: (error as any)?.message,
+				stack: (error as any)?.stack,
+				error
+			});
 		}
 
 		// The WhatsApp-style connection system will handle the reconnection

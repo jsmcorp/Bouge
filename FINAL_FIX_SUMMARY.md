@@ -1,224 +1,118 @@
-# 🎯 FINAL FIX: Data-Only Payload for Push Notifications
+# Final Fix Summary: Unread Count Issue
 
-## Date: 2025-10-02
+## Problem
 
----
+After app resume, the unread count was showing **31** instead of the correct count (should be **1** or **2**).
 
-## ✅ What Was Fixed
+## Root Cause Analysis (from log26.txt)
 
-**Root Cause**: Adding `notification` block to FCM payload prevented the `notificationReceived` listener from firing in background/killed app states.
+### What Happened:
 
-**Solution**: Reverted to data-only payload (removed `notification` block) to ensure listener fires in all app states.
+1. **18:12:26** - User opens chat, app calls `markGroupAsRead` to save read status
+2. **18:12:26-27** - `markGroupAsRead` hangs at `auth.getUser()` because session refresh is in progress
+3. **Session refresh times out** after 10 seconds - `markGroupAsRead` never completes
+4. **Read status is NEVER saved to Supabase** ❌
+5. **18:12:47** - New message arrives, local count increments to 1 ✅
+6. **18:13:04** - App resumes, fetches from Supabase: gets **31** (stale count) ❌
 
----
+### Why 31?
 
-## 📋 Changes Made
+The database still has the OLD `last_read_at` timestamp (from before opening the chat). When `get_all_unread_counts` runs, it counts all messages after that old timestamp = 31 messages.
 
-### 1. Edge Function: `supabase/functions/push-fanout/index.ts`
+## The Fixes Applied
 
-**Removed `notification` block from both FCM v1 and Legacy payloads**
+### 1. SQL Functions (Already Applied)
 
-#### FCM v1 Payload (Lines 127-150):
+**File**: `supabase/migrations/20251120_fix_unread_count_inflation.sql`
+
+- `mark_group_as_read`: Added NULL safety check and monotonic timestamp protection
+- `get_all_unread_counts`: Uses `auth.uid()` and strict timestamp logic
+
+### 2. TypeScript - Use Cached Session (NEW FIX)
+
+**File**: `src/lib/unreadTracker.ts`
+
+**Problem**: `auth.getUser()` hangs during session refresh
+
+**Solution**: Use `getCachedSession()` instead
+
 ```typescript
-// ✅ Data-only payload
-const body = {
-	message: {
-		token,
-		data: {
-			type: 'new_message',
-			group_id: '...',
-			message_id: '...',
-			created_at: '...'
-		},
-		android: {
-			priority: 'HIGH',
-		},
-		apns: {
-			headers: { 'apns-priority': '10' },
-			payload: {
-				aps: {
-					'content-available': 1,
-					sound: 'default'
-				}
-			},
-		},
-	}
-};
+// BEFORE (hangs during session refresh):
+const { data: { user } } = await client.auth.getUser();
+
+// AFTER (uses cached session, never hangs):
+const session = await supabasePipeline.getCachedSession();
+if (!session?.user) {
+  return false;
+}
+// Use session.user.id
 ```
 
-#### Legacy FCM Payload (Lines 170-192):
-```typescript
-// ✅ Data-only payload
-const payload = {
-	registration_ids: tokens,
-	priority: 'high',
-	data: {
-		type: 'new_message',
-		group_id: '...',
-		message_id: '...',
-		created_at: '...'
-	},
-	android: {
-		priority: 'high',
-	},
-	apns: {
-		headers: { 'apns-priority': '10' },
-		payload: {
-			aps: {
-				'content-available': 1,
-				sound: 'default'
-			}
-		}
-	},
-};
+**Benefits**:
+- ✅ Never hangs during session refresh
+- ✅ Completes quickly (uses already-cached data)
+- ✅ Read status is reliably saved to Supabase
+- ✅ App resume fetches correct count
+
+### 3. Frontend - Parameter Removal (Already Applied)
+
+**File**: `src/lib/unreadTracker.ts`
+
+- `getAllUnreadCountsFast()`: Removed `p_user_id` parameter (uses `auth.uid()` in SQL)
+- `getAllUnreadCounts()`: Removed `p_user_id` parameter
+
+## Testing
+
+### Before Fix:
+1. Open chat with 29 unread messages
+2. Messages load, `markGroupAsRead` is called
+3. `markGroupAsRead` hangs (no success log)
+4. Lock device, unlock after 12 seconds
+5. App resumes, shows **31** unread ❌
+
+### After Fix:
+1. Open chat with 29 unread messages
+2. Messages load, `markGroupAsRead` is called
+3. `markGroupAsRead` completes successfully (uses cached session)
+4. Lock device, unlock after 12 seconds
+5. App resumes, shows **0** unread ✅
+
+## Deployment Checklist
+
+- [x] SQL migration created: `20251120_fix_unread_count_inflation.sql`
+- [x] TypeScript updated: `src/lib/unreadTracker.ts` (uses cached session)
+- [x] Safety checks added: NULL parameter validation
+- [ ] **Run SQL migration in Supabase Dashboard**
+- [ ] Test: Open chat, verify `markGroupAsRead` completes
+- [ ] Test: Lock/unlock device, verify count stays correct
+
+## Key Logs to Verify Fix
+
+### Success Pattern:
+```
+[unread] 🔵 markGroupAsRead CALLED
+[unread] 📡 Getting cached session...
+[unread] ✅ Got cached user: 852432e2...
+[unread] 📡 Getting Supabase client...
+[unread] ✅ Got Supabase client
+[unread] 📡 Calling Supabase RPC mark_group_as_read
+[unread] 📡 RPC call completed
+[unread] ✅ Supabase RPC mark_group_as_read succeeded
+[unread] 💾 Persisted read status to Supabase
 ```
 
----
-
-## 🎯 Expected Behavior
-
-### ✅ All Scenarios Should Work:
-
-| Scenario | Expected Behavior |
-|----------|-------------------|
-| **Foreground** | `notificationReceived` fires → Toast notification + unread badge |
-| **Background** | `notificationReceived` fires → Message synced + unread badge |
-| **Killed** | `notificationReceived` fires → Message synced + unread badge |
-| **Locked Screen** | `notificationReceived` fires → Message synced |
-
----
-
-## 🔧 How It Works
-
-### Capacitor Firebase Messaging Behavior:
-
-**`notificationReceived` listener:**
-- **Foreground**: Called for **ALL** push notifications ✅
-- **Background/killed**: Called **ONLY** for **data-only** push notifications ✅
-
-**Data-only payload ensures:**
-1. High priority delivery (`android.priority: 'HIGH'`)
-2. Android wakes app in background
-3. `notificationReceived` listener fires in all app states
-4. App has full control over notification display
-5. Compatible with ghost mode (no system notification)
-
----
-
-## 🚀 Deployment Status
-
-✅ **Edge Function Deployed**: `push-fanout` deployed to Supabase  
-✅ **App Built**: `npm run build` completed successfully  
-✅ **Android Synced**: `npx cap sync android` completed successfully  
-
----
-
-## 🧪 Testing Instructions
-
-### Test 1: Foreground Notification
-1. Open app on Device A (navigate to dashboard)
-2. Send message from Device B
-3. **Expected**: Toast notification appears on Device A
-4. **Expected**: Unread badge updates on Device A
-5. **Check logs**: `adb logcat | grep "push\|FirebaseMessaging"`
-
-### Test 2: Background Notification
-1. Open app on Device A
-2. Press home button (app in background)
-3. Send message from Device B
-4. Wait 5 seconds
-5. Open app on Device A
-6. **Expected**: Message visible in chat
-7. **Expected**: Unread badge shows correct count
-8. **Check logs**: `adb logcat | grep "push\|FirebaseMessaging"`
-
-### Test 3: Killed App Notification
-1. Kill app on Device A (swipe away from recent apps)
-2. Send message from Device B
-3. Wait 10 seconds
-4. Open app on Device A
-5. **Expected**: Message visible in chat
-6. **Expected**: Unread badge shows correct count
-7. **Check logs**: `adb logcat | grep "push\|FirebaseMessaging"`
-
-### Test 4: Locked Screen Notification
-1. Lock Device A (screen off)
-2. Send message from Device B
-3. Wait 10 seconds
-4. Unlock Device A and open app
-5. **Expected**: Message visible in chat
-6. **Expected**: Unread badge shows correct count
-7. **Check logs**: `adb logcat | grep "push\|FirebaseMessaging"`
-
----
-
-## 📊 What to Look For in Logs
-
-### ✅ Success Indicators:
-
+### After Resume:
 ```
-[push] 🔔 CRITICAL: FirebaseMessaging.notificationReceived FIRED!
-[push] 🔔 Raw notification object: {"data":{"type":"new_message","group_id":"...","message_id":"...","created_at":"..."}}
-[push] 🔔 Extracted data: {"type":"new_message","group_id":"...","message_id":"...","created_at":"..."}
-[push] Notification received, reason=data, data: {...}
-[backgroundMessageSync] Fetching message: message_id=... group_id=...
-[backgroundMessageSync] ✅ Message fetched and stored successfully
-[unreadTracker] Triggering callbacks for group: ...
+[main] 📱 App resumed - syncing unread counts from Supabase
+[unread] 🚀 Fast fetch: Getting cached session and token...
+[unread] ✅ Fetched counts: 04a965fb...,0  ← Should be 0 or correct count
+[SidebarRow] Rendering badge for Admin: count=0
 ```
 
-### ❌ Failure Indicators:
+## Files Changed
 
-```
-No listeners found for event notificationReceived
-[push] ⚠️ Notification missing required fields (type/message_id)
-[backgroundMessageSync] ❌ Failed to fetch message
-```
-
----
-
-## 📝 Key Insights
-
-1. **Context7 MCP was the key**: Official Capacitor Firebase docs revealed the behavior
-2. **Data-only payload required**: `notification` block prevents listener from firing in background
-3. **High priority ensures delivery**: `android.priority: 'HIGH'` wakes app in background
-4. **Silent push for iOS**: `content-available: 1` enables background processing
-5. **Full control over display**: App decides how to show notifications (ghost mode compatible)
-
----
-
-## 🎉 Summary
-
-**Problem**: No notifications in any app state (foreground, background, killed)
-
-**Root Cause**: `notification` block in FCM payload prevented `notificationReceived` listener from firing in background/killed states
-
-**Solution**: Removed `notification` block to use data-only payload
-
-**Result**: `notificationReceived` listener now fires in all app states ✅
-
----
-
-## 📄 Documentation
-
-See `ROOT_CAUSE_DATA_ONLY_PAYLOAD.md` for detailed explanation of:
-- Why hybrid payload failed
-- How data-only payload works
-- Capacitor Firebase Messaging behavior
-- Complete code changes
-- Testing instructions
-
----
-
-## 🚀 Next Steps
-
-1. **Build and install app** on test device
-2. **Test all scenarios** (foreground, background, killed, locked)
-3. **Share logs** from `adb logcat | grep "push\|FirebaseMessaging"`
-4. **Confirm notifications work** in all app states
-
----
-
-**The fix is deployed and ready to test!** 🎯
-
-**Deploy the app to your device and test it now!**
-
+1. `supabase/migrations/20251120_fix_unread_count_inflation.sql` - SQL functions
+2. `src/lib/unreadTracker.ts` - Use cached session, remove parameters
+3. `UNREAD_COUNT_INFLATION_FIX.md` - Documentation
+4. `DEBUG_UNREAD_COUNT_ISSUE.md` - Root cause analysis
+5. `FINAL_FIX_SUMMARY.md` - This file

@@ -798,3 +798,10 @@ if (typeof window !== 'undefined') {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	(window as any).__debugUpsertPushToken = forceRefreshPushToken;
 }
+
+// ============================================================================
+// APP RESUME: Unread count sync moved to src/main.tsx handleAppResume()
+// ============================================================================
+// The app resume listener is already registered in main.tsx, so we add the
+// unread count sync logic there instead of creating a duplicate listener here.
+// ============================================================================
