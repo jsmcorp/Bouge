@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -42,27 +42,60 @@ export function Sidebar() {
     group.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Fetch unread counts when groups change
+  // CLEAN IMPLEMENTATION: Fetch unread counts when groups change
   useEffect(() => {
     if (groups.length > 0) {
+      console.log('[unread] Fetching counts for', groups.length, 'groups');
       unreadTracker.getAllUnreadCounts().then(counts => {
+        console.log('[unread] Got counts:', Array.from(counts.entries()));
         setUnreadCounts(counts);
       });
     }
   }, [groups]);
 
-  // Subscribe to unread count updates
+  // CLEAN IMPLEMENTATION: Refresh when returning to dashboard
   useEffect(() => {
-    const unsubscribe = unreadTracker.onUnreadCountUpdate((groupId, count) => {
-      setUnreadCounts(prev => {
-        const newCounts = new Map(prev);
-        newCounts.set(groupId, count);
-        return newCounts;
+    if (!activeGroup && groups.length > 0) {
+      console.log('[unread] Dashboard visible, refreshing counts');
+      unreadTracker.getAllUnreadCounts().then(counts => {
+        setUnreadCounts(counts);
       });
-    });
+    }
+  }, [activeGroup, groups.length]);
 
-    return unsubscribe;
+  // CLEAN IMPLEMENTATION: Helper to update count (called from ChatArea)
+  const updateUnreadCount = useCallback((groupId: string, count: number) => {
+    console.log('[unread] Updating count:', groupId, '→', count);
+    setUnreadCounts(prev => {
+      const next = new Map(prev);
+      next.set(groupId, count);
+      return next;
+    });
   }, []);
+
+  // CLEAN IMPLEMENTATION: Helper to increment count (called from realtime/FCM)
+  const incrementUnreadCount = useCallback((groupId: string) => {
+    console.log('[unread] 📈 incrementUnreadCount called for:', groupId);
+    setUnreadCounts(prev => {
+      const current = prev.get(groupId) || 0;
+      const next = current + 1;
+      console.log('[unread] 📊', groupId, ':', current, '→', next);
+      const newCounts = new Map(prev);
+      newCounts.set(groupId, next);
+      console.log('[unread] ✅ State updated, new counts:', Array.from(newCounts.entries()));
+      return newCounts;
+    });
+  }, []);
+
+  // Expose helpers globally for ChatArea and realtime/FCM to call
+  useEffect(() => {
+    (window as any).__updateUnreadCount = updateUnreadCount;
+    (window as any).__incrementUnreadCount = incrementUnreadCount;
+    return () => {
+      delete (window as any).__updateUnreadCount;
+      delete (window as any).__incrementUnreadCount;
+    };
+  }, [updateUnreadCount, incrementUnreadCount]);
 
   const handleLogout = async () => {
     try {
@@ -171,11 +204,18 @@ export function Sidebar() {
                     )}
                   </div>
                   {/* Unread badge */}
-                  {unreadCounts.get(group.id) && unreadCounts.get(group.id)! > 0 && (
-                    <div className="flex-shrink-0 flex items-center justify-center min-w-[20px] h-5 px-1.5 bg-green-500 text-white text-xs font-semibold rounded-full">
-                      {unreadCounts.get(group.id)! > 99 ? '99+' : unreadCounts.get(group.id)}
-                    </div>
-                  )}
+                  {(() => {
+                    const count = unreadCounts.get(group.id);
+                    // Log badge render for debugging
+                    if (count !== undefined) {
+                      console.log(`[SidebarRow] Rendering badge for ${group.name}: count=${count}`);
+                    }
+                    return count && count > 0 ? (
+                      <div className="flex-shrink-0 flex items-center justify-center min-w-[20px] h-5 px-1.5 bg-green-500 text-white text-xs font-semibold rounded-full">
+                        {count > 99 ? '99+' : count}
+                      </div>
+                    ) : null;
+                  })()}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button

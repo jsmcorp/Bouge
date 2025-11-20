@@ -64,21 +64,42 @@ export function ChatArea() {
     }
   }, [activeGroup?.id, fetchMessages]);
 
-  // Mark messages as read when viewing the chat
+  // CLEAN IMPLEMENTATION: Mark as read when messages load
   useEffect(() => {
-    if (activeGroup?.id && messages.length > 0) {
-      // Mark as read after a short delay (user has actually viewed the messages)
-      const markReadTimer = setTimeout(() => {
-        const lastMessage = messages[messages.length - 1];
-        if (lastMessage) {
-          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id);
-          console.log(`✅ Marked group ${activeGroup.id} as read up to message ${lastMessage.id}`);
-        }
-      }, 2000); // 2 second delay to ensure user is actually viewing
+    console.log('[ChatArea] Mark as read effect triggered:', {
+      hasActiveGroup: !!activeGroup?.id,
+      groupId: activeGroup?.id,
+      messagesCount: messages.length,
+    });
 
-      return () => clearTimeout(markReadTimer);
+    if (activeGroup?.id && messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+      console.log('[unread] 📝 Marking group as read:', activeGroup.id, 'lastMessageId:', lastMessage.id);
+      
+      unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id).then(success => {
+        if (success) {
+          console.log('[unread] ✅ Marked as read successfully, updating UI');
+          console.log('[unread] 💾 Persisted read status to Supabase for group', activeGroup.id);
+          
+          // Update Sidebar count to 0
+          if (typeof (window as any).__updateUnreadCount === 'function') {
+            (window as any).__updateUnreadCount(activeGroup.id, 0);
+            console.log('[unread] ✅ UI updated, badge set to 0');
+          } else {
+            console.warn('[unread] ⚠️ __updateUnreadCount not available');
+          }
+        } else {
+          console.error('[unread] ❌ Failed to mark as read');
+        }
+      }).catch(error => {
+        console.error('[unread] ❌ Exception marking as read:', error);
+      });
+    } else {
+      console.log('[ChatArea] Skipping mark as read:', {
+        reason: !activeGroup?.id ? 'no active group' : 'no messages',
+      });
     }
-  }, [activeGroup?.id, messages]);
+  }, [activeGroup?.id, messages.length]);
 
   // Cleanup on unmount
   useEffect(() => {

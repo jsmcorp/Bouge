@@ -316,13 +316,14 @@ class BackgroundMessageSyncService {
             console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
           }
 
-          // Trigger unread tracker callbacks
+          // Increment unread count for background group
           try {
-            const { unreadTracker } = await import('./unreadTracker');
-            await unreadTracker.triggerCallbacks(groupId);
-            console.log(`[bg-sync] 📊 Unread count updated for group ${groupId}`);
+            if (typeof (window as any).__incrementUnreadCount === 'function') {
+              (window as any).__incrementUnreadCount(groupId);
+              console.log(`[bg-sync] 📊 Unread count incremented for group ${groupId}`);
+            }
           } catch (error) {
-            console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
+            console.warn('[bg-sync] ⚠️ Failed to increment unread count:', error);
           }
 
           return true;
@@ -424,13 +425,14 @@ class BackgroundMessageSyncService {
         console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
       }
 
-      // Trigger unread tracker callbacks to update dashboard badges
+      // Increment unread count for background group
       try {
-        const { unreadTracker } = await import('./unreadTracker');
-        await unreadTracker.triggerCallbacks(groupId);
-        console.log(`[bg-sync] 📊 Unread count updated for group ${groupId}`);
+        if (typeof (window as any).__incrementUnreadCount === 'function') {
+          (window as any).__incrementUnreadCount(groupId);
+          console.log(`[bg-sync] 📊 Unread count incremented for group ${groupId}`);
+        }
       } catch (error) {
-        console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
+        console.warn('[bg-sync] ⚠️ Failed to increment unread count:', error);
       }
 
       return true;
@@ -618,12 +620,13 @@ class BackgroundMessageSyncService {
           console.warn('[bg-sync] ⚠️ Failed to refresh chat store:', error);
         }
 
-        // Trigger unread tracker callbacks
+        // Increment unread count for background group
         try {
-          const { unreadTracker } = await import('./unreadTracker');
-          await unreadTracker.triggerCallbacks(groupId);
+          if (typeof (window as any).__incrementUnreadCount === 'function') {
+            (window as any).__incrementUnreadCount(groupId);
+          }
         } catch (error) {
-          console.warn('[bg-sync] ⚠️ Failed to trigger unread tracker callbacks:', error);
+          console.warn('[bg-sync] ⚠️ Failed to increment unread count:', error);
         }
       }
 

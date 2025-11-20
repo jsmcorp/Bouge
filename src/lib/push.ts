@@ -96,15 +96,17 @@ if (Capacitor.isNativePlatform()) {
 						}, 50);
 					}
 					
-					// Update unread count
-					try {
-						const { unreadTracker } = await import('@/lib/unreadTracker');
-						await unreadTracker.triggerCallbacks(groupId);
-					} catch (unreadErr) {
-						console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
-					}
+					// Unread count handled by increment logic above
 				} else {
-					console.log('[push] ⚠️ Native event for non-active group, ignoring');
+					console.log('[push] 📬 Native event for non-active group, incrementing unread count');
+					
+					// Increment unread count for the group
+					if (typeof window.__incrementUnreadCount === 'function') {
+						window.__incrementUnreadCount(groupId);
+						console.log('[push] ✅ Unread count incremented for group:', groupId);
+					} else {
+						console.warn('[push] ⚠️ __incrementUnreadCount not available');
+					}
 				}
 			} catch (error) {
 				console.error('[push] ❌ Error handling native new message event:', error);
@@ -345,7 +347,9 @@ async function handleNotificationReceived(data: any): Promise<void> {
 					
 					// Refresh UI from SQLite
 					const activeGroupId = useChatStore.getState().activeGroup?.id;
-					if (activeGroupId === data.group_id && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
+					const isActiveGroup = activeGroupId === data.group_id;
+					
+					if (isActiveGroup && typeof useChatStore.getState().refreshUIFromSQLite === 'function') {
 						const refreshStart = performance.now();
 						await useChatStore.getState().refreshUIFromSQLite(data.group_id);
 						const refreshDuration = Math.round(performance.now() - refreshStart);
@@ -361,12 +365,36 @@ async function handleNotificationReceived(data: any): Promise<void> {
 						}, 50);
 					}
 					
-					// Update unread count
+					// CLEAN IMPLEMENTATION: Increment unread count
 					try {
-						const { unreadTracker } = await import('@/lib/unreadTracker');
-						await unreadTracker.triggerCallbacks(data.group_id);
-					} catch (unreadErr) {
-						console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
+						const { useAuthStore } = await import('@/store/authStore');
+						const currentUser = useAuthStore.getState().user;
+						const isOwnMessage = data.user_id === currentUser?.id;
+						
+						console.log('[unread] FCM increment check:', {
+							groupId: data.group_id,
+							messageFrom: data.user_id,
+							currentUser: currentUser?.id,
+							isOwnMessage,
+							isActiveGroup,
+							helperAvailable: typeof (window as any).__incrementUnreadCount === 'function'
+						});
+						
+						if (!isOwnMessage && !isActiveGroup) {
+							console.log('[unread] ✅ Incrementing for group:', data.group_id);
+							if (typeof (window as any).__incrementUnreadCount === 'function') {
+								(window as any).__incrementUnreadCount(data.group_id);
+								console.log('[unread] ✅ Increment helper called');
+							} else {
+								console.warn('[unread] ⚠️ Increment helper not available (Sidebar not mounted?)');
+							}
+						} else if (isOwnMessage) {
+							console.log('[unread] ⏭️ Skipping increment (own message)');
+						} else {
+							console.log('[unread] ⏭️ Skipping increment (active group)');
+						}
+					} catch (err) {
+						console.error('[unread] ❌ Failed to increment:', err);
 					}
 					
 					// Show local notification only if:
@@ -471,13 +499,7 @@ async function handleNotificationReceived(data: any): Promise<void> {
 					}, 50);
 				}
 
-				// Update unread count
-				try {
-					const { unreadTracker } = await import('@/lib/unreadTracker');
-					await unreadTracker.triggerCallbacks(data.group_id);
-				} catch (unreadErr) {
-					console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
-				}
+				// Unread count handled by increment logic above
 
 				// Show toast if not in active chat
 				try {
@@ -532,13 +554,7 @@ async function handleNotificationReceived(data: any): Promise<void> {
 					}, 50);
 				}
 				
-				// Update unread count
-				try {
-					const { unreadTracker } = await import('@/lib/unreadTracker');
-					await unreadTracker.triggerCallbacks(data.group_id);
-				} catch (unreadErr) {
-					console.error('[push] ⚠️ Failed to update unread count:', unreadErr);
-				}
+				// Unread count handled by increment logic above
 				
 				const totalDuration = Math.round(performance.now() - fallbackStartTime);
 				console.log(`[push] 🏁 Fallback path complete in ${totalDuration}ms`);

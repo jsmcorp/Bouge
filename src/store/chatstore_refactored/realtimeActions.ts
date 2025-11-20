@@ -8,7 +8,6 @@ import { resetOutboxProcessingState } from './offlineActions';
 import { Message, Poll, TypingUser } from './types';
 import { webViewLifecycle } from '@/lib/webViewLifecycle';
 import { mobileLogger } from '@/lib/mobileLogger';
-import { unreadTracker } from '@/lib/unreadTracker';
 
 type Author = { display_name: string; avatar_url: string | null };
 
@@ -974,6 +973,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               } catch (eventErr) {
                 console.warn('⚠️ Failed to dispatch background message event:', eventErr);
               }
+
+              // CLEAN IMPLEMENTATION: Increment unread for background group
+              const { user } = useAuthStore.getState();
+              const isOwnMessage = row.user_id === user?.id;
+              
+              if (!isOwnMessage) {
+                log(`[unread] Incrementing for background group: ${row.group_id}`);
+                if (typeof (window as any).__incrementUnreadCount === 'function') {
+                  (window as any).__incrementUnreadCount(row.group_id);
+                }
+              } else {
+                log(`[unread] Skipping increment (own message)`);
+              }
             }
 
             // Persist to local storage immediately to avoid disappearing on navigation
@@ -1017,9 +1029,11 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               const isOwnMessage = row.user_id === user.id;
 
               if (!isOwnMessage && !isInActiveChat) {
-                // CRITICAL FIX (LOG54): Trigger callbacks to update dashboard badges in real-time
-                await unreadTracker.triggerCallbacks(row.group_id);
-                log(`📊 Unread count callbacks triggered for group ${row.group_id}`);
+                // Increment unread count for background group
+                if (typeof (window as any).__incrementUnreadCount === 'function') {
+                  (window as any).__incrementUnreadCount(row.group_id);
+                  log(`📊 Unread count incremented for group ${row.group_id}`);
+                }
               }
             } catch (unreadErr) {
               console.warn('⚠️ Failed to update unread count:', unreadErr);

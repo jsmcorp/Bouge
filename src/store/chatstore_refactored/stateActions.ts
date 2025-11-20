@@ -264,12 +264,13 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         }
       } else if (groupIdOverride) {
         console.log(`[realtime-v2] 📨 New message in background group ${groupIdOverride} - staying on current screen`);
-        // Update unread count for background group
+        // Increment unread count for background group
         try {
-          const { unreadTracker } = await import('@/lib/unreadTracker');
-          await unreadTracker.triggerCallbacks(groupIdOverride);
+          if (typeof (window as any).__incrementUnreadCount === 'function') {
+            (window as any).__incrementUnreadCount(groupIdOverride);
+          }
         } catch (err) {
-          console.error('[realtime-v2] Failed to update unread count:', err);
+          console.error('[realtime-v2] Failed to increment unread count:', err);
         }
       }
 
@@ -297,15 +298,19 @@ export const createStateActions = (set: any, get: any): StateActions => ({
         // Update unread counts for all groups that received messages
         if (totalMissed > 0) {
           try {
-            const { unreadTracker } = await import('@/lib/unreadTracker');
-            for (const [gId, count] of Object.entries(results)) {
-              if (count > 0) {
-                await unreadTracker.triggerCallbacks(gId);
-                console.log(`[realtime-v2] 📊 Updated unread count for group ${gId}`);
+            if (typeof (window as any).__incrementUnreadCount === 'function') {
+              for (const [gId, count] of Object.entries(results)) {
+                if (count > 0) {
+                  // Increment for each missed message
+                  for (let i = 0; i < count; i++) {
+                    (window as any).__incrementUnreadCount(gId);
+                  }
+                  console.log(`[realtime-v2] 📊 Incremented unread count for group ${gId} by ${count}`);
+                }
               }
             }
           } catch (error) {
-            console.warn('[realtime-v2] Failed to update unread counts:', error);
+            console.warn('[realtime-v2] Failed to increment unread counts:', error);
           }
         }
       } catch (error) {

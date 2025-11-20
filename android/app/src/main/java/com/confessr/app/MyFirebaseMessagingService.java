@@ -124,7 +124,7 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
             );
             Log.d(TAG, "✅ Notification shown (app in background)");
         } else if (!isActiveGroup) {
-            // App is foreground but different group - show notification
+            // App is foreground but different group - show notification AND notify JS for unread increment
             showNotification(
                 groupName != null ? groupName : "New message", 
                 content != null ? content : "You have a new message",
@@ -132,6 +132,14 @@ public class MyFirebaseMessagingService extends FirebaseMessagingService {
                 remoteMessage
             );
             Log.d(TAG, "✅ Notification shown (app in foreground, different group)");
+            
+            // CRITICAL: Notify JavaScript layer for unread count increment
+            try {
+                NativeEventsPlugin.notifyNewMessage(groupId, messageId);
+                Log.d(TAG, "✅ JS layer notified for unread increment");
+            } catch (Exception e) {
+                Log.e(TAG, "❌ Failed to notify JS layer: " + e.getMessage(), e);
+            }
         } else {
             // App is foreground AND same group - notify JS to refresh UI
             Log.d(TAG, "🔕 Skipping notification (app in foreground, active group - notifying JS)");
