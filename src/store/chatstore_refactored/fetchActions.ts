@@ -22,6 +22,8 @@ export interface FetchActions {
   deltaSyncSince: (groupId: string, sinceIso: string) => Promise<void>;
   // Missed sync wrapper
   syncMissed: (groupId: string) => Promise<void>;
+  // Recalculate unread separator position
+  recalculateUnreadSeparator: (groupId: string) => Promise<void>;
 }
 
 export const createFetchActions = (set: any, get: any): FetchActions => ({
@@ -232,6 +234,89 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
         } catch (e) {
           console.warn('⚠️ SQLite ready check failed:', e);
           isSqliteReady = false;
+        }
+      }
+
+      // LOCAL-FIRST: Ensure group_members row exists locally for unread tracking
+      // Create locally FIRST, then sync to Supabase in background
+      if (isNative && isSqliteReady) {
+        try {
+          const session = await supabasePipeline.getCachedSession();
+          if (session?.user) {
+            const hasLocalMember = await sqliteService.getLocalLastReadAt(groupId, session.user.id);
+            
+            if (hasLocalMember === null) {
+              console.log('[unread] 📥 FIRST TIME: No local group_members row, creating locally...');
+              
+              // Create local group_members row with initial state (never read = 0)
+              // This allows separator calculation to work immediately
+              await sqliteService.updateLocalLastReadAt(
+                groupId,
+                session.user.id,
+                0, // Never read yet
+                '' // No last read message
+              );
+              
+              console.log('[unread] ✅ FIRST TIME: Created local group_members row (never read)');
+              
+              // BACKGROUND: Try to sync from Supabase to get actual read status
+              // This happens AFTER local row is created, so separator calculation works
+              setTimeout(async () => {
+                try {
+                  console.log('[unread] 🔄 BACKGROUND: Syncing read status from Supabase...');
+                  const client = await supabasePipeline.getDirectClient();
+                  const { data: memberData, error } = await client
+                    .from('group_members')
+                    .select('last_read_at, last_read_message_id')
+                    .eq('group_id', groupId)
+                    .eq('user_id', session.user.id)
+                    .single();
+                  
+                  if (!error && memberData && memberData.last_read_at) {
+                    // Update local with Supabase data
+                    const lastReadAt = new Date(memberData.last_read_at).getTime();
+                    await sqliteService.syncReadStatusFromSupabase(
+                      groupId,
+                      session.user.id,
+                      lastReadAt,
+                      memberData.last_read_message_id
+                    );
+                    console.log('[unread] ✅ BACKGROUND: Synced read status from Supabase');
+                    
+                    // Recalculate separator with updated data
+                    if (stillCurrent()) {
+                      const currentMessages = get().messages || [];
+                      const messagesForCalc = currentMessages.map((msg: Message) => ({
+                        id: msg.id,
+                        created_at: new Date(msg.created_at).getTime(),
+                        user_id: msg.user_id
+                      }));
+                      
+                      const { firstUnreadId, unreadCount } = await sqliteService.calculateFirstUnreadLocal(
+                        groupId,
+                        session.user.id,
+                        messagesForCalc
+                      );
+                      
+                      setSafely({
+                        firstUnreadMessageId: firstUnreadId,
+                        unreadCount: unreadCount
+                      });
+                      console.log('[unread] ✅ BACKGROUND: Updated separator with Supabase data');
+                    }
+                  } else {
+                    console.log('[unread] ℹ️ BACKGROUND: No read status in Supabase (truly first time)');
+                  }
+                } catch (error) {
+                  console.warn('[unread] ⚠️ BACKGROUND: Failed to sync from Supabase:', error);
+                  // Not critical - local row already exists
+                }
+              }, 500); // Background sync after messages are displayed
+            }
+          }
+        } catch (error) {
+          console.warn('[unread] ⚠️ Failed to ensure local group_members row:', error);
+          // Continue anyway - separator will show as "first time"
         }
       }
 
@@ -613,65 +698,74 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             }
             localDataLoaded = true;
 
-            // Fetch first unread message ID from Supabase (background, non-blocking)
-            // This runs AFTER messages are displayed for better UX
-            setTimeout(async () => {
+            // LOCAL-FIRST: Calculate separator from local SQLite INSTANTLY
+            // No Supabase fetch needed - pure local calculation
+            const calculateFirstUnreadLocal = async () => {
               try {
                 if (!stillCurrent()) return;
                 
                 const session = await supabasePipeline.getCachedSession();
-                
-                if (session?.user) {
-                  const client = await supabasePipeline.getDirectClient();
-                  
-                  // Get last_read_at from group_members
-                  const { data: memberData } = await client
-                    .from('group_members')
-                    .select('last_read_at')
-                    .eq('group_id', groupId)
-                    .eq('user_id', session.user.id)
-                    .single();
-                  
-                  if (memberData?.last_read_at) {
-                    // Find first message after last_read_at in our loaded messages
-                    // EXCLUDE user's own messages from unread
-                    const lastReadTime = new Date(memberData.last_read_at).getTime();
-                    const unreadMessages = structuredMessages.filter(msg => 
-                      new Date(msg.created_at).getTime() > lastReadTime &&
-                      msg.user_id !== session.user.id // Exclude own messages
-                    );
+                if (!session?.user) {
+                  console.warn('[unread] ⚠️ No session for separator calculation');
+                  return;
+                }
+
+                const userId = session.user.id;
+
+                // ALWAYS use local SQLite (native only)
+                if (Capacitor.isNativePlatform()) {
+                  try {
+                    const isReady = await sqliteService.isReady();
+                    if (!isReady) {
+                      console.warn('[unread] ⚠️ SQLite not ready');
+                      return;
+                    }
+
+                    // Get local read status (instant - no network call)
+                    // LOCAL IS THE SOURCE OF TRUTH - no Supabase dependency
+                    const localLastReadAt = await sqliteService.getLocalLastReadAt(groupId, userId);
                     
-                    if (unreadMessages.length > 0 && stillCurrent()) {
-                      const firstUnreadId = unreadMessages[0].id;
-                      const unreadCountValue = unreadMessages.length;
-                      
+                    console.log(`[unread] 📱 LOCAL-FIRST: last_read_at=${localLastReadAt ? new Date(localLastReadAt).toISOString() : 'NEVER READ (will show all as unread)'}`);
+                    
+                    // Calculate separator from local data ONLY
+                    const messagesForCalc = structuredMessages.map(msg => ({
+                      id: msg.id,
+                      created_at: new Date(msg.created_at).getTime(),
+                      user_id: msg.user_id
+                    }));
+
+                    const { firstUnreadId, unreadCount } = await sqliteService.calculateFirstUnreadLocal(
+                      groupId,
+                      userId,
+                      messagesForCalc
+                    );
+
+                    if (stillCurrent()) {
                       setSafely({
                         firstUnreadMessageId: firstUnreadId,
-                        unreadCount: unreadCountValue
+                        unreadCount: unreadCount
                       });
-                      console.log(`📍 Set firstUnreadMessageId: ${firstUnreadId}, unreadCount: ${unreadCountValue} (excluding own messages)`);
-                    } else if (stillCurrent()) {
-                      // No unread messages, clear the state
-                      setSafely({
-                        firstUnreadMessageId: null,
-                        unreadCount: 0
-                      });
-                      console.log(`📍 No unread messages, cleared firstUnreadMessageId`);
+                      console.log(`[unread] ✅ LOCAL separator: firstUnreadId=${firstUnreadId}, count=${unreadCount}`);
                     }
-                  } else if (stillCurrent()) {
-                    // No last_read_at means all messages are unread (or never read)
-                    // Don't show separator in this case, just mark as read when opened
-                    setSafely({
-                      firstUnreadMessageId: null,
-                      unreadCount: 0
-                    });
-                    console.log(`📍 No last_read_at, treating as all read`);
+                  } catch (error) {
+                    console.error('[unread] ❌ Local separator calculation failed:', error);
                   }
+                } else {
+                  // Web fallback - no separator for now (could add localStorage later)
+                  console.log('[unread] ℹ️ Web platform - no local separator');
+                  setSafely({
+                    firstUnreadMessageId: null,
+                    unreadCount: 0
+                  });
                 }
               } catch (error) {
-                console.warn('⚠️ Failed to fetch first unread message ID:', error);
+                console.error('[unread] ❌ Separator calculation error:', error);
               }
-            }, 100);
+            };
+            
+            // Calculate separator IMMEDIATELY (synchronous, no delay)
+            // This is instant because it only reads from local SQLite
+            calculateFirstUnreadLocal();
 
             // Background task: Refresh poll votes with user context (non-blocking)
             if (polls.length > 0) {
@@ -1529,6 +1623,101 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       }
     } catch (e) {
       console.error('❌ Missed sync failed:', e);
+    }
+  },
+
+  /**
+   * SIMPLE: Calculate unread separator from Supabase
+   * No local SQLite complexity - just works
+   */
+  recalculateUnreadSeparator: async (groupId: string) => {
+    try {
+      console.log('[unread] 🔄 Recalculating unread separator for group:', groupId.slice(0, 8) + '...');
+      
+      const session = await supabasePipeline.getCachedSession();
+      if (!session?.user) {
+        console.log('[unread] ⚠️ No session');
+        return;
+      }
+
+      const userId = session.user.id;
+      const currentMessages = get().messages || [];
+
+      // LOCAL-FIRST: Try to get read status from SQLite first (native only)
+      let lastReadTime: number | null = null;
+      
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const isReady = await sqliteService.isReady();
+          if (isReady) {
+            const localLastReadAt = await sqliteService.getLocalLastReadAt(groupId, userId);
+            if (localLastReadAt !== null) {
+              lastReadTime = localLastReadAt;
+              console.log('[unread] 📱 Using local read status:', new Date(lastReadTime).toISOString());
+            }
+          }
+        } catch (error) {
+          console.warn('[unread] ⚠️ Failed to get local read status:', error);
+        }
+      }
+
+      // Fallback to Supabase if local not available
+      if (lastReadTime === null) {
+        console.log('[unread] 🌐 Fetching read status from Supabase...');
+        const client = await supabasePipeline.getDirectClient();
+        
+        const { data: memberData } = await client
+          .from('group_members')
+          .select('last_read_at')
+          .eq('group_id', groupId)
+          .eq('user_id', userId)
+          .single();
+        
+        if (memberData?.last_read_at) {
+          lastReadTime = new Date(memberData.last_read_at).getTime();
+          console.log('[unread] 🌐 Using Supabase read status:', new Date(lastReadTime).toISOString());
+        }
+      }
+      
+      if (lastReadTime !== null) {
+        const unreadMessages = currentMessages.filter((msg: Message) => 
+          new Date(msg.created_at).getTime() > lastReadTime &&
+          msg.user_id !== userId
+        );
+        
+        if (unreadMessages.length > 0) {
+          set({
+            firstUnreadMessageId: unreadMessages[0].id,
+            unreadCount: unreadMessages.length
+          });
+          console.log(`[unread] ✅ Found ${unreadMessages.length} unread messages`);
+        } else {
+          set({
+            firstUnreadMessageId: null,
+            unreadCount: 0
+          });
+          console.log('[unread] ✅ No unread messages');
+        }
+      } else {
+        // No last_read_at means never read - show all messages as unread
+        const unreadMessages = currentMessages.filter((msg: Message) => msg.user_id !== userId);
+        
+        if (unreadMessages.length > 0) {
+          set({
+            firstUnreadMessageId: unreadMessages[0].id,
+            unreadCount: unreadMessages.length
+          });
+          console.log(`[unread] ✅ All unread: ${unreadMessages.length}`);
+        } else {
+          set({
+            firstUnreadMessageId: null,
+            unreadCount: 0
+          });
+          console.log('[unread] ✅ No messages to show as unread');
+        }
+      }
+    } catch (error) {
+      console.error('[unread] ❌ Failed to recalculate unread separator:', error);
     }
   },
 });

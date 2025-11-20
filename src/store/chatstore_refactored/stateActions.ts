@@ -48,6 +48,8 @@ export interface StateActions {
   toggleMessageSelection: (messageId: string) => void;
   clearSelection: () => void;
   selectAllMessages: () => void;
+  // Unread tracking
+  clearUnreadSeparator: () => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -242,6 +244,17 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     } catch (error) {
       console.error('[realtime-v2] Failed to trigger outbox processing on resume:', error);
     }
+
+    // CRITICAL: Refresh messages to recalculate unread separator
+    // This ensures the separator shows correctly after app resume/unlock
+    console.log('[unread] 🔄 App resumed - refreshing messages to recalculate unread separator');
+    const state = get() as any;
+    if (typeof state.fetchMessages === 'function') {
+      // Use setTimeout to avoid blocking the resume flow
+      setTimeout(() => {
+        state.fetchMessages(activeGroup.id);
+      }, 100);
+    }
   },
 
   // WHATSAPP-STYLE: Wake handler with instant message display
@@ -426,6 +439,15 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     set((state: any) => {
       const allMessageIds = new Set(state.messages.map((m: Message) => m.id));
       return { selectedMessageIds: allMessageIds };
+    });
+  },
+
+  // WhatsApp-style: Clear unread separator instantly when opening chat
+  clearUnreadSeparator: () => {
+    console.log('[unread] 🧹 Clearing unread separator instantly (WhatsApp style)');
+    set({ 
+      firstUnreadMessageId: null,
+      unreadCount: 0 
     });
   },
 });

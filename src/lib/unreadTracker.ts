@@ -101,9 +101,69 @@ class UnreadTrackerService {
   }
 
   /**
-   * Mark a group as read up to a specific message
+   * Sync local read status to Supabase
+   * Call this on app start or network reconnect to sync any pending changes
    */
-  public async markGroupAsRead(groupId: string, lastMessageId: string): Promise<boolean> {
+  public async syncLocalToSupabase(): Promise<void> {
+    try {
+      const { Capacitor } = await import('@capacitor/core');
+      if (!Capacitor.isNativePlatform()) {
+        return; // Only for native
+      }
+
+      const { sqliteService } = await import('./sqliteService');
+      const isReady = await sqliteService.isReady();
+      if (!isReady) {
+        return;
+      }
+
+      console.log('[unread] 🔄 Syncing local read status to Supabase...');
+
+      const session = await supabasePipeline.getCachedSession();
+      if (!session?.user) {
+        console.log('[unread] ⚠️ No session for sync');
+        return;
+      }
+
+      const client = await supabasePipeline.getDirectClient();
+      
+      // Get all local group_members with read status
+      const { sqliteService: sqlite } = await import('./sqliteService');
+      const localMembers = await sqlite.getAllLocalReadStatus(session.user.id);
+      
+      console.log(`[unread] 📊 Found ${localMembers.length} local read statuses to sync`);
+
+      // Sync each one to Supabase
+      for (const member of localMembers) {
+        try {
+          await client
+            .from('group_members')
+            .update({
+              last_read_at: new Date(member.last_read_at).toISOString(),
+              last_read_message_id: member.last_read_message_id,
+            })
+            .eq('group_id', member.group_id)
+            .eq('user_id', session.user.id);
+          
+          console.log(`[unread] ✅ Synced group ${member.group_id.slice(0, 8)}`);
+        } catch (error) {
+          console.error(`[unread] ❌ Failed to sync group ${member.group_id.slice(0, 8)}:`, error);
+        }
+      }
+
+      console.log('[unread] ✅ Sync complete');
+    } catch (error) {
+      console.error('[unread] ❌ Sync failed:', error);
+    }
+  }
+
+  /**
+   * Mark a group as read up to a specific message
+   * @param groupId - The group ID
+   * @param lastMessageId - The ID of the last message to mark as read
+   * @param messageTimestamp - Optional: The timestamp of the message (if not provided, uses current time)
+   */
+  public async markGroupAsRead(groupId: string, lastMessageId: string, messageTimestamp?: number): Promise<boolean> {
     // SAFETY CHECK: Fail fast if ID is missing
     // This aligns with our SQL fix to prevent accidental "null" calls wiping out counts
     if (!groupId || !lastMessageId) {
@@ -118,8 +178,10 @@ class UnreadTrackerService {
       console.log('[unread] 🔵 markGroupAsRead CALLED:', {
         groupId,
         lastMessageId,
+        messageTimestamp: messageTimestamp ? new Date(messageTimestamp).toISOString() : 'using current time',
         timestamp: new Date().toISOString(),
       });
+      console.log('[unread] 📋 Message ID type:', typeof lastMessageId, 'length:', lastMessageId?.length);
       
       // Use cached session instead of auth.getUser() to avoid hanging during session refresh
       console.log('[unread] 📡 Getting cached session...');
@@ -136,35 +198,86 @@ class UnreadTrackerService {
       const client = await supabasePipeline.getDirectClient();
       console.log('[unread] ✅ Got Supabase client');
       
-      console.log('[unread] 📡 Calling Supabase RPC mark_group_as_read with params:', {
-        p_group_id: groupId,
-        p_user_id: session.user.id,
-        p_last_message_id: lastMessageId,
-      });
-
-      const { error } = await client.rpc('mark_group_as_read', {
-        p_group_id: groupId,
-        p_user_id: session.user.id,
-        p_last_message_id: lastMessageId,
-      });
-
-      console.log('[unread] 📡 RPC call completed');
-
-      if (error) {
-        console.error('[unread] ❌ Mark as read RPC error:', {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-          fullError: error,
-        });
-        return false;
+      // LOCAL-FIRST: Update local SQLite IMMEDIATELY (no Supabase checks first!)
+      console.log('[unread] ⚡ LOCAL-FIRST: Updating SQLite immediately...');
+      
+      // Use provided timestamp or current time as fallback
+      const lastReadTime = messageTimestamp || Date.now();
+      console.log('[unread] 📅 Using timestamp:', new Date(lastReadTime).toISOString());
+      
+      try {
+        const { Capacitor } = await import('@capacitor/core');
+        if (Capacitor.isNativePlatform()) {
+          const { sqliteService } = await import('./sqliteService');
+          const isReady = await sqliteService.isReady();
+          if (isReady) {
+            await sqliteService.updateLocalLastReadAt(
+              groupId,
+              session.user.id,
+              lastReadTime,
+              lastMessageId
+            );
+            console.log('[unread] ✅ LOCAL: Updated SQLite read status instantly');
+          } else {
+            console.warn('[unread] ⚠️ SQLite not ready, skipping local update');
+          }
+        }
+      } catch (error) {
+        console.error('[unread] ❌ Failed to update local SQLite:', error);
+        // Continue anyway - we'll try Supabase
       }
-
-      console.log('[unread] ✅ Supabase RPC mark_group_as_read succeeded');
-      console.log('[unread] 💾 Persisted read status to Supabase for group:', groupId);
+      
+      // BACKGROUND: Sync to Supabase (non-blocking, happens after local update)
+      console.log('[unread] 🌐 BACKGROUND: Syncing to Supabase...');
+      
+      // Don't await - let it happen in background
+      // First get the message timestamp, then update
+      client
+        .from('messages')
+        .select('created_at')
+        .eq('id', lastMessageId)
+        .single()
+        .then(({ data: messageData, error: messageError }: { data: any; error: any }) => {
+          if (messageError || !messageData) {
+            console.error('[unread] ❌ BACKGROUND: Failed to get message timestamp:', messageError);
+            return;
+          }
+          
+          // Now update Supabase with the correct timestamp
+          return client
+            .from('group_members')
+            .update({
+              last_read_at: messageData.created_at,
+              last_read_message_id: lastMessageId,
+            })
+            .eq('group_id', groupId)
+            .eq('user_id', session.user.id)
+            .select();
+        })
+        .then((result: any) => {
+          if (!result) return; // Error already logged
+          
+          const { data: updateData, error: updateError } = result;
+          if (updateError) {
+            console.error('[unread] ❌ BACKGROUND: Supabase sync failed:', updateError.message);
+            return;
+          }
+          
+          if (!updateData || updateData.length === 0) {
+            console.error('[unread] ❌ BACKGROUND: No rows updated - RLS policy issue');
+            return;
+          }
+          
+          console.log('[unread] ✅ BACKGROUND: Synced to Supabase:', updateData[0].last_read_at);
+        })
+        .catch((error: any) => {
+          console.error('[unread] ❌ BACKGROUND: Supabase sync exception:', error);
+        });
+      
+      // Return immediately - local update is done
+      console.log('[unread] ✅ Returning immediately (local update complete)');
       return true;
-    } catch (error) {
+    } catch (error: any) {
       console.error('[unread] ❌ Exception in markGroupAsRead:', error);
       return false;
     }

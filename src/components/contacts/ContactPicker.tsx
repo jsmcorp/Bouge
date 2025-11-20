@@ -50,6 +50,7 @@ export function ContactPicker({
     permissionGranted,
     error,
     requestPermission,
+    syncContacts,
     discoverInBackgroundV3,
     searchContacts,
   } = useContactsStore();
@@ -105,13 +106,23 @@ export function ContactPicker({
     });
   };
 
-  // Handle sync
+  // Handle sync - fetch from device then discover registered users
   const handleSync = async () => {
     setIsSyncing(true);
     try {
+      console.log('📇 [ContactPicker] Starting full sync...');
+      
+      // Step 1: Sync contacts from device to SQLite
+      console.log('📇 [ContactPicker] Step 1: Syncing contacts from device...');
+      await syncContacts();
+      console.log('📇 [ContactPicker] ✅ Device contacts synced');
+      
+      // Step 2: Discover which contacts are registered users
+      console.log('📇 [ContactPicker] Step 2: Discovering registered users...');
       await discoverInBackgroundV3();
+      console.log('📇 [ContactPicker] ✅ Discovery complete');
     } catch (error) {
-      console.error('Failed to sync contacts:', error);
+      console.error('📇 [ContactPicker] ❌ Failed to sync contacts:', error);
     } finally {
       setIsSyncing(false);
     }

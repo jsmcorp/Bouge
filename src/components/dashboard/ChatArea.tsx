@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
@@ -32,13 +32,12 @@ export function ChatArea() {
   const {
     activeGroup,
     fetchMessages,
-    messages,
     activeThread,
     connectionStatus,
     cleanupRealtimeSubscription,
     showGroupDetailsPanel,
     setShowGroupDetailsPanel,
-    groupMembers
+    groupMembers,
   } = useChatStore();
 
   // Check if current user is a member of the active group
@@ -52,100 +51,87 @@ export function ChatArea() {
   // The emoji selection is handled by the WhatsAppEmojiPanel component
   const handleEmojiSelect = () => {};
 
+  // LOCAL-FIRST: Mark as read INSTANTLY when opening chat
   useEffect(() => {
     if (activeGroup?.id) {
       console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
       const startTime = performance.now();
       
+      // INSTANT: Update sidebar unread count to 0 immediately (WhatsApp style)
+      // This clears the badge in the sidebar instantly
+      if (typeof (window as any).__updateUnreadCount === 'function') {
+        (window as any).__updateUnreadCount(activeGroup.id, 0);
+        console.log('[unread] 📊 Cleared unread count in sidebar instantly');
+      }
+      
+      // Load messages - separator will be calculated from LOCAL last_read_at
       fetchMessages(activeGroup.id).then(() => {
         const endTime = performance.now();
         console.log(`💬 ChatArea: Messages loaded in ${(endTime - startTime).toFixed(2)}ms`);
       });
+      
+      // CRITICAL: Mark ALL messages as read INSTANTLY (no waiting)
+      // This happens immediately when opening chat
+      setTimeout(async () => {
+        const currentMessages = useChatStore.getState().messages;
+        if (currentMessages.length > 0) {
+          const lastMessage = currentMessages[currentMessages.length - 1];
+          
+          if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
+            console.log('[unread] ⚡ INSTANT: Marking all messages as read (local-first)');
+            // Mark as read locally FIRST, sync to Supabase later
+            // Pass the message timestamp so we mark at the correct time
+            const messageTimestamp = new Date(lastMessage.created_at).getTime();
+            await unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp);
+            console.log('[unread] ✅ All messages marked as read locally');
+          }
+        }
+      }, 100); // Small delay to ensure messages are loaded
     }
   }, [activeGroup?.id, fetchMessages]);
 
-  // Track which (groupId, lastMessageId) we've already marked to avoid duplicates
-  const markedAsReadRef = useRef<Set<string>>(new Set());
-
-  // CLEAN IMPLEMENTATION: Mark as read when messages load
-  // Only mark when:
-  // 1. We have messages
-  // 2. Last message has a real ID (not temp)
-  // 3. We haven't already marked this (groupId, lastMessageId) pair
-  // 4. Wait 2 seconds to allow user to see unread separator first
+  // WHATSAPP STYLE: Mark as read periodically while viewing AND when closing
   useEffect(() => {
-    console.log('[ChatArea] Mark as read effect triggered:', {
-      hasActiveGroup: !!activeGroup?.id,
-      groupId: activeGroup?.id,
-      messagesCount: messages.length,
-    });
+    if (!activeGroup?.id) return;
 
-    if (!activeGroup?.id || messages.length === 0) {
-      const reason = !activeGroup?.id ? 'no active group' : 'no messages';
-      console.log(`[ChatArea] Skipping mark as read: ${reason}`);
-      return;
-    }
-
-    const lastMessage = messages[messages.length - 1];
-    
-    // Check if last message has a real ID (not a temp ID like "temp-...")
-    if (!lastMessage.id || lastMessage.id.startsWith('temp-') || lastMessage.id.startsWith('1762')) {
-      console.log('[ChatArea] Skipping mark as read: last message has temp ID:', lastMessage.id);
-      return;
-    }
-
-    // Check if we've already marked this combination
-    const markKey = `${activeGroup.id}:${lastMessage.id}`;
-    if (markedAsReadRef.current.has(markKey)) {
-      console.log('[ChatArea] Skipping mark as read: already marked', markKey);
-      return;
-    }
-
-    // Wait 2 seconds before marking as read to allow user to see unread separator
-    const timer = setTimeout(() => {
-      console.log('[unread] 📝 Marking group as read:', activeGroup.id, 'lastMessageId:', lastMessage.id);
-      
-      // Add to marked set immediately to prevent duplicate calls
-      markedAsReadRef.current.add(markKey);
-      
-      unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id).then(success => {
-        if (success) {
-          console.log('[unread] ✅ Marked as read successfully, updating UI');
-          console.log('[unread] 💾 Persisted read status to Supabase for group', activeGroup.id);
-          
-          // Update Sidebar count to 0
-          if (typeof (window as any).__updateUnreadCount === 'function') {
-            (window as any).__updateUnreadCount(activeGroup.id, 0);
-            console.log('[unread] ✅ UI updated, badge set to 0');
-          } else {
-            console.warn('[unread] ⚠️ __updateUnreadCount not available');
-          }
-        } else {
-          console.error('[unread] ❌ Failed to mark as read');
-          // Remove from marked set so we can retry
-          markedAsReadRef.current.delete(markKey);
+    // Mark as read after 1 second of viewing (WhatsApp style)
+    const markAsReadTimer = setTimeout(() => {
+      const currentMessages = useChatStore.getState().messages;
+      if (currentMessages.length > 0) {
+        const lastMessage = currentMessages[currentMessages.length - 1];
+        
+        if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
+          console.log('[unread] 📝 WhatsApp-style: Auto-marking as read after 1s viewing');
+          // Pass the message timestamp so we mark at the correct time
+          const messageTimestamp = new Date(lastMessage.created_at).getTime();
+          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp)
+            .catch(err => console.error('[unread] ❌ Auto mark as read failed:', err));
         }
-      }).catch(error => {
-        console.error('[unread] ❌ Exception marking as read:', error);
-        // Remove from marked set so we can retry
-        markedAsReadRef.current.delete(markKey);
-      });
-    }, 2000); // 2 second delay
+      }
+    }, 1000); // 1 second
 
-    return () => clearTimeout(timer);
-  }, [activeGroup?.id, messages, messages.length]);
-
-  // Clear marked set when changing groups
-  useEffect(() => {
-    markedAsReadRef.current.clear();
-  }, [activeGroup?.id]);
-
-  // Cleanup on unmount
-  useEffect(() => {
+    // Cleanup: Mark as read when closing chat
     return () => {
+      clearTimeout(markAsReadTimer);
+      
+      // On unmount (closing chat), mark as read
+      const currentMessages = useChatStore.getState().messages;
+      if (currentMessages.length > 0) {
+        const lastMessage = currentMessages[currentMessages.length - 1];
+        
+        if (lastMessage.id && !lastMessage.id.startsWith('temp-')) {
+          console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE');
+          // Mark as read when closing - this sets the baseline for next open
+          // Pass the message timestamp so we mark at the correct time
+          const messageTimestamp = new Date(lastMessage.created_at).getTime();
+          unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id, messageTimestamp)
+            .catch(err => console.error('[unread] ❌ Mark as read on close failed:', err));
+        }
+      }
+      
       cleanupRealtimeSubscription();
     };
-  }, [cleanupRealtimeSubscription]);
+  }, [activeGroup?.id, cleanupRealtimeSubscription]);
 
   const handleSyncMessages = async () => {
     if (!activeGroup?.id) return;

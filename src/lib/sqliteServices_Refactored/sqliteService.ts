@@ -268,6 +268,48 @@ class SQLiteService {
     return this.memberOps.updateGroupMemberRole(groupId, userId, role);
   }
 
+  public async getLocalLastReadAt(groupId: string, userId: string): Promise<number | null> {
+    return this.memberOps.getLocalLastReadAt(groupId, userId);
+  }
+
+  public async getLocalLastReadMessageId(groupId: string, userId: string): Promise<string | null> {
+    return this.memberOps.getLocalLastReadMessageId(groupId, userId);
+  }
+
+  public async syncReadStatusFromSupabase(
+    groupId: string,
+    userId: string,
+    lastReadAt: number,
+    lastReadMessageId: string | null
+  ): Promise<void> {
+    return this.memberOps.syncReadStatusFromSupabase(groupId, userId, lastReadAt, lastReadMessageId);
+  }
+
+  public async updateLocalLastReadAt(
+    groupId: string,
+    userId: string,
+    lastReadAt: number,
+    lastReadMessageId: string
+  ): Promise<void> {
+    return this.memberOps.updateLocalLastReadAt(groupId, userId, lastReadAt, lastReadMessageId);
+  }
+
+  public async calculateFirstUnreadLocal(
+    groupId: string,
+    userId: string,
+    messages: Array<{ id: string; created_at: number; user_id: string }>
+  ): Promise<{ firstUnreadId: string | null; unreadCount: number }> {
+    return this.memberOps.calculateFirstUnreadLocal(groupId, userId, messages);
+  }
+
+  public async getAllLocalReadStatus(userId: string): Promise<Array<{
+    group_id: string;
+    last_read_at: number;
+    last_read_message_id: string | null;
+  }>> {
+    return this.memberOps.getAllLocalReadStatus(userId);
+  }
+
   // Confession operations
   public async saveConfession(confession: LocalConfession): Promise<void> {
     return this.confessionOps.saveConfession(confession);

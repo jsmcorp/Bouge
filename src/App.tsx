@@ -167,6 +167,17 @@ function AppContent() {
             } catch (error) {
               console.warn('⚠️ Data integrity check/repair failed (non-critical):', error);
             }
+
+            // Sync local read status to Supabase (background, non-blocking)
+            try {
+              const { unreadTracker } = await import('@/lib/unreadTracker');
+              unreadTracker.syncLocalToSupabase().catch(err => {
+                console.warn('⚠️ Read status sync failed (non-critical):', err);
+              });
+              console.log('🔄 Started background sync of read status to Supabase');
+            } catch (error) {
+              console.warn('⚠️ Failed to start read status sync (non-critical):', error);
+            }
           } catch (error) {
             console.error('❌ SQLite initialization failed:', error);
             // Continue without SQLite - app should still work with remote data only
@@ -183,6 +194,17 @@ function AppContent() {
             console.log('📇 Calling initializeContacts()...');
             await initializeContacts();
             console.log('✅ Contacts store initialized successfully');
+            
+            // If permission is granted but no contacts in SQLite, trigger initial sync
+            const contactsState = useContactsStore.getState();
+            if (contactsState.permissionGranted && contactsState.contacts.length === 0) {
+              console.log('📇 Permission granted but no contacts found, triggering initial sync...');
+              // Run in background without blocking app startup
+              contactsState.syncContacts()
+                .then(() => contactsState.discoverInBackgroundV3())
+                .then(() => console.log('✅ Background contact sync complete'))
+                .catch(err => console.warn('⚠️ Background contact sync failed:', err));
+            }
           } catch (error) {
             console.error('❌ Contacts store initialization failed:', error);
             console.error('❌ Error details:', {
