@@ -929,6 +929,21 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               attachMessageToState(message);
               log(`📨 Message attached to state: id=${message.id} (active group)`);
               
+              // Mark message as read immediately since user is viewing the chat
+              // This prevents it from counting as unread if user closes chat quickly
+              const isOwnMessage = row.user_id === user.id;
+              if (!isOwnMessage) {
+                (async () => {
+                  try {
+                    const { unreadTracker } = await import('@/lib/unreadTracker');
+                    await unreadTracker.markGroupAsRead(row.group_id, message.id);
+                    log(`📨 Auto-marked message as read (active group): ${message.id}`);
+                  } catch (error) {
+                    console.warn('⚠️ Failed to auto-mark message as read:', error);
+                  }
+                })();
+              }
+              
               // WHATSAPP-STYLE INSTANT DISPLAY: Auto-scroll to show new message immediately
               // This ensures messages appear instantly like WhatsApp
               setTimeout(() => {
@@ -945,7 +960,6 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                       log(`📍 User is reading old messages, not auto-scrolling`);
                       
                       // Show "New message" indicator if user is reading old messages
-                      const isOwnMessage = row.user_id === user.id;
                       if (!isOwnMessage) {
                         try {
                           // Dispatch event to show "scroll to bottom" button

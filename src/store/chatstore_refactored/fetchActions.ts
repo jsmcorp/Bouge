@@ -243,11 +243,38 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           // Create a map of incoming messages by ID for quick lookup
           const incomingMap = new Map(incoming.map(m => [m.id, m]));
 
+          // Create incoming messages map with timestamp for duplicate detection
+          // Use timestamp tolerance to handle optimistic vs server timestamp differences
+          const incomingMessagesWithTime = incoming.map(m => ({
+            id: m.id,
+            user_id: m.user_id,
+            content: m.content,
+            timestamp: new Date(m.created_at).getTime()
+          }));
+
           // Find messages in existing state that are NOT in incoming
           // These could be:
           // 1. Optimistic messages still sending (delivery_status !== 'delivered')
           // 2. Realtime messages that arrived after the fetch started
-          const existingNotInIncoming = existing.filter(m => !incomingMap.has(m.id));
+          const existingNotInIncoming = existing.filter(m => {
+            // Skip if already in incoming by ID
+            if (incomingMap.has(m.id)) return false;
+            
+            // Skip if it's a duplicate by content+user+timestamp (with 5 second tolerance)
+            const mTime = new Date(m.created_at).getTime();
+            const isDuplicate = incomingMessagesWithTime.some((incoming: any) => 
+              incoming.user_id === m.user_id &&
+              incoming.content === m.content &&
+              Math.abs(incoming.timestamp - mTime) < 5000 // 5 second tolerance
+            );
+            
+            if (isDuplicate) {
+              console.log(`🔄 Skipping duplicate message with different ID: ${m.id} (content+user match with timestamp tolerance)`);
+              return false;
+            }
+            
+            return true;
+          });
 
           // Separate into two categories
           const optimisticMessages = existingNotInIncoming.filter(m => m.delivery_status !== 'delivered');
@@ -267,7 +294,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           // Merge: incoming + optimistic + recent realtime
           const merged = [...incoming, ...optimisticMessages, ...recentRealtimeMessages];
 
-          // Deduplicate by ID (shouldn't be necessary but just in case)
+          // Final deduplication by ID
           const uniqueMap = new Map(merged.map(m => [m.id, m]));
           const uniqueMessages = Array.from(uniqueMap.values());
 
@@ -586,6 +613,66 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             }
             localDataLoaded = true;
 
+            // Fetch first unread message ID from Supabase (background, non-blocking)
+            // This runs AFTER messages are displayed for better UX
+            setTimeout(async () => {
+              try {
+                if (!stillCurrent()) return;
+                
+                const session = await supabasePipeline.getCachedSession();
+                
+                if (session?.user) {
+                  const client = await supabasePipeline.getDirectClient();
+                  
+                  // Get last_read_at from group_members
+                  const { data: memberData } = await client
+                    .from('group_members')
+                    .select('last_read_at')
+                    .eq('group_id', groupId)
+                    .eq('user_id', session.user.id)
+                    .single();
+                  
+                  if (memberData?.last_read_at) {
+                    // Find first message after last_read_at in our loaded messages
+                    // EXCLUDE user's own messages from unread
+                    const lastReadTime = new Date(memberData.last_read_at).getTime();
+                    const unreadMessages = structuredMessages.filter(msg => 
+                      new Date(msg.created_at).getTime() > lastReadTime &&
+                      msg.user_id !== session.user.id // Exclude own messages
+                    );
+                    
+                    if (unreadMessages.length > 0 && stillCurrent()) {
+                      const firstUnreadId = unreadMessages[0].id;
+                      const unreadCountValue = unreadMessages.length;
+                      
+                      setSafely({
+                        firstUnreadMessageId: firstUnreadId,
+                        unreadCount: unreadCountValue
+                      });
+                      console.log(`📍 Set firstUnreadMessageId: ${firstUnreadId}, unreadCount: ${unreadCountValue} (excluding own messages)`);
+                    } else if (stillCurrent()) {
+                      // No unread messages, clear the state
+                      setSafely({
+                        firstUnreadMessageId: null,
+                        unreadCount: 0
+                      });
+                      console.log(`📍 No unread messages, cleared firstUnreadMessageId`);
+                    }
+                  } else if (stillCurrent()) {
+                    // No last_read_at means all messages are unread (or never read)
+                    // Don't show separator in this case, just mark as read when opened
+                    setSafely({
+                      firstUnreadMessageId: null,
+                      unreadCount: 0
+                    });
+                    console.log(`📍 No last_read_at, treating as all read`);
+                  }
+                }
+              } catch (error) {
+                console.warn('⚠️ Failed to fetch first unread message ID:', error);
+              }
+            }, 100);
+
             // Background task: Refresh poll votes with user context (non-blocking)
             if (polls.length > 0) {
               setTimeout(async () => {
@@ -868,7 +955,38 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
               // Only update if we're still viewing the same group
               if (currentState.activeGroup?.id === groupId) {
                 const existingIds = new Set(currentState.messages.map((m: Message) => m.id));
-                const newMessages = filteredData.filter((msg: any) => !existingIds.has(msg.id));
+                
+                // Create signature map with timestamp tolerance (±5 seconds)
+                // This handles the case where optimistic message timestamp differs slightly from server timestamp
+                const existingMessagesWithTime = currentState.messages.map((m: Message) => ({
+                  id: m.id,
+                  user_id: m.user_id,
+                  content: m.content,
+                  timestamp: new Date(m.created_at).getTime()
+                }));
+                
+                const newMessages = filteredData.filter((msg: any) => {
+                  // Skip if already exists by ID
+                  if (existingIds.has(msg.id)) {
+                    console.log(`🔄 Background: Skipping message ${msg.id} (already exists by ID)`);
+                    return false;
+                  }
+                  
+                  // Skip if it's a duplicate by content+user+timestamp (with 5 second tolerance)
+                  const msgTime = new Date(msg.created_at).getTime();
+                  const isDuplicate = existingMessagesWithTime.some((existing: any) => 
+                    existing.user_id === msg.user_id &&
+                    existing.content === msg.content &&
+                    Math.abs(existing.timestamp - msgTime) < 5000 // 5 second tolerance
+                  );
+                  
+                  if (isDuplicate) {
+                    console.log(`🔄 Background: Skipping duplicate message ${msg.id} (content+user match with timestamp tolerance)`);
+                    return false;
+                  }
+                  
+                  return true;
+                });
 
                 if (newMessages.length > 0) {
                   console.log(`🔄 Background: Found ${newMessages.length} new messages from Supabase, updating UI`);

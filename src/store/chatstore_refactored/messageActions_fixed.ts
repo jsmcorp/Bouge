@@ -559,8 +559,11 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               });
             }
 
-            // Remove the temporary message if it exists
-            if (messageId.startsWith('temp-') || messageId.includes('-')) {
+            // Remove the temporary message if it exists (temp IDs are not UUIDs)
+            // Temp IDs format: "temp-{timestamp}-{random}" or "{timestamp}-{random}"
+            // Real IDs are UUIDs with format: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId);
+            if (!isUUID) {
               try {
                 await sqliteService.deleteMessage(messageId);
                 console.log(`🗑️ Removed temp message ${messageId} after saving server message ${successData.id}`);

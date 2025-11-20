@@ -122,15 +122,24 @@ export function MessageList() {
 
   // Auto-scroll to first unread message on initial load
   useEffect(() => {
-    if (firstUnreadMessageId && !hasScrolledToUnread && messages.length > 0 && unreadSeparatorRef.current) {
+    if (firstUnreadMessageId && !hasScrolledToUnread && messages.length > 0) {
       console.log(`📍 Auto-scrolling to first unread message: ${firstUnreadMessageId}`);
+      
+      // Wait for DOM to render, then scroll
       setTimeout(() => {
-        unreadSeparatorRef.current?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'center'
-        });
-        setHasScrolledToUnread(true);
-      }, 300); // Small delay to ensure DOM is fully rendered
+        if (unreadSeparatorRef.current) {
+          // Use scrollIntoView with specific options for better cross-platform support
+          unreadSeparatorRef.current.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start', // Changed from 'center' to 'start' for better visibility
+            inline: 'nearest'
+          });
+          setHasScrolledToUnread(true);
+          console.log('📍 Scrolled to unread separator');
+        } else {
+          console.warn('⚠️ Unread separator ref not found');
+        }
+      }, 500); // Increased delay for Android to ensure DOM is fully rendered
     }
   }, [firstUnreadMessageId, messages.length, hasScrolledToUnread]);
 

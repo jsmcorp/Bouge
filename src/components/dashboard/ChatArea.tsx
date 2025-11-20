@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
@@ -64,7 +64,15 @@ export function ChatArea() {
     }
   }, [activeGroup?.id, fetchMessages]);
 
+  // Track which (groupId, lastMessageId) we've already marked to avoid duplicates
+  const markedAsReadRef = useRef<Set<string>>(new Set());
+
   // CLEAN IMPLEMENTATION: Mark as read when messages load
+  // Only mark when:
+  // 1. We have messages
+  // 2. Last message has a real ID (not temp)
+  // 3. We haven't already marked this (groupId, lastMessageId) pair
+  // 4. Wait 2 seconds to allow user to see unread separator first
   useEffect(() => {
     console.log('[ChatArea] Mark as read effect triggered:', {
       hasActiveGroup: !!activeGroup?.id,
@@ -72,9 +80,33 @@ export function ChatArea() {
       messagesCount: messages.length,
     });
 
-    if (activeGroup?.id && messages.length > 0) {
-      const lastMessage = messages[messages.length - 1];
+    if (!activeGroup?.id || messages.length === 0) {
+      const reason = !activeGroup?.id ? 'no active group' : 'no messages';
+      console.log(`[ChatArea] Skipping mark as read: ${reason}`);
+      return;
+    }
+
+    const lastMessage = messages[messages.length - 1];
+    
+    // Check if last message has a real ID (not a temp ID like "temp-...")
+    if (!lastMessage.id || lastMessage.id.startsWith('temp-') || lastMessage.id.startsWith('1762')) {
+      console.log('[ChatArea] Skipping mark as read: last message has temp ID:', lastMessage.id);
+      return;
+    }
+
+    // Check if we've already marked this combination
+    const markKey = `${activeGroup.id}:${lastMessage.id}`;
+    if (markedAsReadRef.current.has(markKey)) {
+      console.log('[ChatArea] Skipping mark as read: already marked', markKey);
+      return;
+    }
+
+    // Wait 2 seconds before marking as read to allow user to see unread separator
+    const timer = setTimeout(() => {
       console.log('[unread] 📝 Marking group as read:', activeGroup.id, 'lastMessageId:', lastMessage.id);
+      
+      // Add to marked set immediately to prevent duplicate calls
+      markedAsReadRef.current.add(markKey);
       
       unreadTracker.markGroupAsRead(activeGroup.id, lastMessage.id).then(success => {
         if (success) {
@@ -90,16 +122,23 @@ export function ChatArea() {
           }
         } else {
           console.error('[unread] ❌ Failed to mark as read');
+          // Remove from marked set so we can retry
+          markedAsReadRef.current.delete(markKey);
         }
       }).catch(error => {
         console.error('[unread] ❌ Exception marking as read:', error);
+        // Remove from marked set so we can retry
+        markedAsReadRef.current.delete(markKey);
       });
-    } else {
-      console.log('[ChatArea] Skipping mark as read:', {
-        reason: !activeGroup?.id ? 'no active group' : 'no messages',
-      });
-    }
-  }, [activeGroup?.id, messages.length]);
+    }, 2000); // 2 second delay
+
+    return () => clearTimeout(timer);
+  }, [activeGroup?.id, messages, messages.length]);
+
+  // Clear marked set when changing groups
+  useEffect(() => {
+    markedAsReadRef.current.clear();
+  }, [activeGroup?.id]);
 
   // Cleanup on unmount
   useEffect(() => {

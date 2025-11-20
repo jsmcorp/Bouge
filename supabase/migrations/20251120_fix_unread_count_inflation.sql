@@ -63,10 +63,12 @@ BEGIN
   WHERE gm.user_id = auth.uid()
     -- Count messages created strictly AFTER the last read timestamp
     AND (gm.last_read_at IS NULL OR m.created_at > gm.last_read_at)
+    -- Exclude user's own messages from unread count
+    AND m.user_id != auth.uid()
   GROUP BY m.group_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Add comment for documentation
 COMMENT ON FUNCTION mark_group_as_read IS 'Marks messages as read with protection against backward-moving read pointer';
-COMMENT ON FUNCTION get_all_unread_counts IS 'Returns unread counts using strict timestamp-based logic to prevent inflation';
+COMMENT ON FUNCTION get_all_unread_counts IS 'Returns unread counts using strict timestamp-based logic to prevent inflation, excluding user own messages';
