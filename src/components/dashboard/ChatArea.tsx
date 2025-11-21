@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
@@ -40,6 +40,10 @@ export function ChatArea() {
     groupMembers,
   } = useChatStore();
 
+  // ✅ FIX: Use refs to track state and avoid stale closures
+  const messagesRef = useRef<any[]>([]);
+  const lastProcessedMessageIdRef = useRef<string | null>(null);
+
   // Check if current user is a member of the active group
   const isMember = useMemo(() => {
     if (!activeGroup?.id || !user?.id || !groupMembers || groupMembers.length === 0) {
@@ -48,10 +52,23 @@ export function ChatArea() {
     return groupMembers.some(member => member.user_id === user.id);
   }, [activeGroup?.id, user?.id, groupMembers]);
 
+  // ✅ FIX: Keep messagesRef updated with latest messages to avoid stale closure
+  useEffect(() => {
+    // Subscribe to messages changes and keep ref updated
+    const unsubscribe = useChatStore.subscribe((state) => {
+      messagesRef.current = state.messages;
+    });
+    
+    // Initialize with current messages
+    messagesRef.current = useChatStore.getState().messages;
+    
+    return unsubscribe;
+  }, []);
+
   // The emoji selection is handled by the WhatsAppEmojiPanel component
   const handleEmojiSelect = () => {};
 
-  // LOCAL-FIRST: Mark as read INSTANTLY when opening chat
+  // LOCAL-FIRST: Load messages when opening chat
   useEffect(() => {
     if (activeGroup?.id) {
       console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
@@ -70,34 +87,18 @@ export function ChatArea() {
         console.log(`💬 ChatArea: Messages loaded in ${(endTime - startTime).toFixed(2)}ms`);
       });
       
-      // CRITICAL: Mark ALL messages as read INSTANTLY (no waiting)
-      // This happens immediately when opening chat
-      setTimeout(async () => {
-        const currentMessages = useChatStore.getState().messages;
-        if (currentMessages.length > 0) {
-          // Find the last non-temp message (in case there are optimistic messages)
-          const lastRealMessage = [...currentMessages].reverse().find(msg => 
-            msg.id && !msg.id.startsWith('temp-')
-          );
-          
-          if (lastRealMessage) {
-            console.log('[unread] ⚡ INSTANT: Marking all messages as read (local-first)');
-            // Mark as read locally FIRST, sync to Supabase later
-            // Pass the message timestamp so we mark at the correct time
-            const messageTimestamp = new Date(lastRealMessage.created_at).getTime();
-            await unreadTracker.markGroupAsRead(activeGroup.id, lastRealMessage.id, messageTimestamp);
-            console.log('[unread] ✅ All messages marked as read locally');
-          } else {
-            console.log('[unread] ℹ️ No real messages to mark as read (all optimistic)');
-          }
-        }
-      }, 100); // Small delay to ensure messages are loaded
+      // ✅ FIX: Removed the setTimeout that was marking cache messages as read
+      // The realtime effect below will handle marking NEW messages as read
+      // We don't need to mark cache messages on open - they're already in the correct state
     }
   }, [activeGroup?.id, fetchMessages]);
 
   // REALTIME: Mark new messages as read instantly when they arrive while viewing
   useEffect(() => {
     if (!activeGroup?.id) return;
+
+    // Reset the ref when switching groups
+    lastProcessedMessageIdRef.current = null;
 
     // Helper to get the last real (non-temp) message ID
     const getLastRealMessageId = (messages: any[]) => {
@@ -110,9 +111,9 @@ export function ChatArea() {
     // Get initial state
     const initialMessages = useChatStore.getState().messages;
     let lastMessageCount = initialMessages.length;
-    let lastMessageId = getLastRealMessageId(initialMessages);
+    const initialLastMessageId = getLastRealMessageId(initialMessages);
 
-    console.log('[unread] 🎬 REALTIME: Starting subscription, initial last message:', lastMessageId?.slice(0, 8));
+    console.log('[unread] 🎬 REALTIME: Starting subscription, initial last message:', initialLastMessageId?.slice(0, 8) || 'none');
 
     // Subscribe to store changes to detect new messages
     const unsubscribe = useChatStore.subscribe((state) => {
@@ -123,12 +124,17 @@ export function ChatArea() {
       const currentCount = currentMessages.length;
       const currentLastMessageId = getLastRealMessageId(currentMessages);
 
-      // Check if new real messages arrived (count increased OR last message ID changed)
-      if ((currentCount > lastMessageCount || currentLastMessageId !== lastMessageId) && currentLastMessageId) {
-        // Only process if the last message ID actually changed (not just a state update)
-        if (currentLastMessageId !== lastMessageId) {
+      if (!currentLastMessageId) return;
+
+      const previousLastMessageId = lastProcessedMessageIdRef.current;
+
+      // ✅ FIX: Only mark as read if we had a previous message ID
+      // This prevents marking cache's old message on initial load
+      if (currentLastMessageId !== previousLastMessageId) {
+        if (previousLastMessageId) {
+          // We had a previous message, so this is a NEW message arriving
           console.log('[unread] 📨 REALTIME: New message detected!');
-          console.log(`[unread] 📨 Previous: ${lastMessageId?.slice(0, 8) || 'none'}, Current: ${currentLastMessageId.slice(0, 8)}`);
+          console.log(`[unread] 📨 Previous: ${previousLastMessageId.slice(0, 8)}, Current: ${currentLastMessageId.slice(0, 8)}`);
           
           // Find the actual new message
           const latestRealMessage = currentMessages.find(msg => msg.id === currentLastMessageId);
@@ -143,8 +149,41 @@ export function ChatArea() {
               })
               .catch(err => console.error('[unread] ❌ Realtime mark as read failed:', err));
           }
+        } else {
+          // First load from cache - don't mark as read, just set the reference
+          console.log('[unread] 🎬 REALTIME: Initial load from cache, NOT marking as read');
+          console.log(`[unread] 🎬 Cache last message: ${currentLastMessageId.slice(0, 8)}`);
+        }
+        
+        // Update ref to current message ID
+        lastProcessedMessageIdRef.current = currentLastMessageId;
+      }
+
+      // CRITICAL FIX: Mark ALL visible messages as viewed (including temp messages)
+      // This ensures we track which temp messages the user saw before they got real IDs
+      if (currentCount > lastMessageCount) {
+        const newMessages = currentMessages.slice(lastMessageCount);
+        const messageIdsToMarkViewed = newMessages.map(msg => msg.id);
+        
+        if (messageIdsToMarkViewed.length > 0) {
+          console.log(`[viewed] 👁️ Marking ${messageIdsToMarkViewed.length} new messages as viewed (including temp IDs)`);
           
-          lastMessageId = currentLastMessageId;
+          // Mark as viewed in SQLite (non-blocking)
+          (async () => {
+            try {
+              const { Capacitor } = await import('@capacitor/core');
+              if (Capacitor.isNativePlatform()) {
+                const { sqliteService } = await import('@/lib/sqliteService');
+                const isReady = await sqliteService.isReady();
+                if (isReady) {
+                  await sqliteService.markMessagesAsViewed(messageIdsToMarkViewed);
+                  console.log(`[viewed] ✅ Marked ${messageIdsToMarkViewed.length} messages as viewed in SQLite`);
+                }
+              }
+            } catch (error) {
+              console.error('[viewed] ❌ Failed to mark messages as viewed:', error);
+            }
+          })();
         }
       }
 
@@ -163,8 +202,9 @@ export function ChatArea() {
 
     // Cleanup: Mark as read when closing chat
     return () => {
-      // On unmount (closing chat), mark as read
-      const currentMessages = useChatStore.getState().messages;
+      // ✅ FIX: Access the REF to get the LATEST messages at the moment of closing
+      // This prevents stale closure from reverting the read status
+      const currentMessages = messagesRef.current;
       if (currentMessages.length > 0) {
         // Find the last non-temp message (in case we just sent a message that's still optimistic)
         const lastRealMessage = [...currentMessages].reverse().find(msg => 
@@ -172,7 +212,8 @@ export function ChatArea() {
         );
         
         if (lastRealMessage) {
-          console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE (last real message)');
+          console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE (last real message from ref)');
+          console.log(`[unread] 📝 Last message ID: ${lastRealMessage.id.slice(0, 8)}`);
           // Mark as read when closing - this sets the baseline for next open
           // Pass the message timestamp so we mark at the correct time
           const messageTimestamp = new Date(lastRealMessage.created_at).getTime();

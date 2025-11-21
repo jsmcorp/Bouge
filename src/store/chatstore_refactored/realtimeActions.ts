@@ -648,6 +648,24 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
               const { sqliteService } = await import('@/lib/sqliteService');
               const ready = await sqliteService.isReady();
               if (ready) {
+                // CRITICAL FIX: Transfer viewed status before deleting old message
+                // This ensures if user saw the temp message, the real message gets marked as read
+                const wasViewed = await sqliteService.transferViewedStatus(oldMessageId, message.id);
+                
+                if (wasViewed) {
+                  console.log(`👁️ Transferred viewed status: ${oldMessageId} → ${message.id}`);
+                  
+                  // Mark the real message as read since user already viewed the temp version
+                  try {
+                    const { unreadTracker } = await import('@/lib/unreadTracker');
+                    const messageTimestamp = new Date(message.created_at).getTime();
+                    await unreadTracker.markGroupAsRead(message.group_id, message.id, messageTimestamp);
+                    console.log(`✅ Auto-marked real message as read (user viewed temp version): ${message.id}`);
+                  } catch (error) {
+                    console.warn('⚠️ Failed to auto-mark real message as read:', error);
+                  }
+                }
+                
                 await sqliteService.deleteMessage(oldMessageId);
                 console.log(`🗑️ Deleted old optimistic message from SQLite: ${oldMessageId} (replaced by server message: ${message.id})`);
               }

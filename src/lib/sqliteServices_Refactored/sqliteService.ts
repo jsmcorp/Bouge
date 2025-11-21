@@ -108,6 +108,10 @@ class SQLiteService {
     return this.messageOps.getRecentMessages(groupId, limit);
   }
 
+  public async getLastMessageForGroup(groupId: string): Promise<LocalMessage | null> {
+    return this.messageOps.getLastMessageForGroup(groupId);
+  }
+
   public async getMessagesBefore(groupId: string, beforeTimestamp: number, limit = 30): Promise<LocalMessage[]> {
     return this.messageOps.getMessagesBefore(groupId, beforeTimestamp, limit);
   }
@@ -143,6 +147,49 @@ class SQLiteService {
     deleted_at?: string | number | null;
   }>): Promise<number> {
     return this.messageOps.syncMessagesFromRemote(groupId, messages);
+  }
+
+  // ============================================
+  // MESSAGE VIEWED STATUS OPERATIONS
+  // ============================================
+
+  /**
+   * Mark a message as viewed by the user
+   * Critical for tracking which temp messages were seen before they got real IDs
+   */
+  public async markMessageAsViewed(messageId: string): Promise<void> {
+    return this.messageOps.markMessageAsViewed(messageId);
+  }
+
+  /**
+   * Mark multiple messages as viewed (batch operation for performance)
+   */
+  public async markMessagesAsViewed(messageIds: string[]): Promise<void> {
+    return this.messageOps.markMessagesAsViewed(messageIds);
+  }
+
+  /**
+   * Check if a message was viewed by the user
+   * Used to determine if we should mark the real ID as read when temp message resolves
+   */
+  public async isMessageViewed(messageId: string): Promise<boolean> {
+    return this.messageOps.isMessageViewed(messageId);
+  }
+
+  /**
+   * Get all viewed temp messages for a group
+   * Used during outbox processing to mark real IDs as read
+   */
+  public async getViewedTempMessages(groupId: string): Promise<string[]> {
+    return this.messageOps.getViewedTempMessages(groupId);
+  }
+
+  /**
+   * Transfer viewed status from temp ID to real ID
+   * Called when outbox processes a message and gets the real ID from server
+   */
+  public async transferViewedStatus(tempId: string, realId: string): Promise<boolean> {
+    return this.messageOps.transferViewedStatus(tempId, realId);
   }
 
   // Group operations

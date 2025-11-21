@@ -10,8 +10,8 @@ export class MessageOperations {
 
     await db.run(
       `INSERT OR REPLACE INTO messages
-       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at, is_viewed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         message.id,
         message.group_id,
@@ -24,7 +24,8 @@ export class MessageOperations {
         message.image_url,
         message.created_at,
         message.updated_at || null,
-        message.deleted_at || null
+        message.deleted_at || null,
+        message.is_viewed || 0
       ]
     );
   }
@@ -57,6 +58,21 @@ export class MessageOperations {
 
     const result = await db.query(sql, [groupId, limit]);
     return result.values || [];
+  }
+
+  public async getLastMessageForGroup(groupId: string): Promise<LocalMessage | null> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `
+      SELECT * FROM messages
+      WHERE group_id = ? AND id NOT LIKE 'temp-%'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+
+    const result = await db.query(sql, [groupId]);
+    return result.values && result.values.length > 0 ? result.values[0] : null;
   }
 
   // New: efficient pagination by timestamp for lazy-loading older messages
@@ -255,6 +271,125 @@ export class MessageOperations {
       }
     } catch (error) {
       console.error('❌ Error cleaning up temp messages:', error);
+    }
+  }
+
+  /**
+   * Mark a message as viewed by the user
+   * This is critical for tracking which temp messages were seen before they got real IDs
+   */
+  public async markMessageAsViewed(messageId: string): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    try {
+      await db.run(
+        'UPDATE messages SET is_viewed = 1 WHERE id = ?',
+        [messageId]
+      );
+      console.log(`👁️ Marked message as viewed: ${messageId}`);
+    } catch (error) {
+      console.error(`❌ Error marking message as viewed ${messageId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Mark multiple messages as viewed (batch operation for performance)
+   */
+  public async markMessagesAsViewed(messageIds: string[]): Promise<void> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    if (messageIds.length === 0) {
+      return;
+    }
+
+    try {
+      const placeholders = messageIds.map(() => '?').join(',');
+      await db.run(
+        `UPDATE messages SET is_viewed = 1 WHERE id IN (${placeholders})`,
+        messageIds
+      );
+      console.log(`👁️ Marked ${messageIds.length} messages as viewed`);
+    } catch (error) {
+      console.error(`❌ Error marking messages as viewed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a message was viewed by the user
+   * Used to determine if we should mark the real ID as read when temp message resolves
+   */
+  public async isMessageViewed(messageId: string): Promise<boolean> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    try {
+      const result = await db.query(
+        'SELECT is_viewed FROM messages WHERE id = ? LIMIT 1',
+        [messageId]
+      );
+      return (result.values?.[0]?.is_viewed || 0) === 1;
+    } catch (error) {
+      console.error(`❌ Error checking if message is viewed ${messageId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get all viewed temp messages for a group
+   * Used during outbox processing to mark real IDs as read
+   */
+  public async getViewedTempMessages(groupId: string): Promise<string[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    try {
+      const result = await db.query(
+        `SELECT id FROM messages 
+         WHERE group_id = ? 
+         AND is_viewed = 1 
+         AND id LIKE 'temp-%'`,
+        [groupId]
+      );
+      return (result.values || []).map((row: any) => row.id);
+    } catch (error) {
+      console.error(`❌ Error getting viewed temp messages for group ${groupId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Transfer viewed status from temp ID to real ID
+   * Called when outbox processes a message and gets the real ID from server
+   */
+  public async transferViewedStatus(tempId: string, realId: string): Promise<boolean> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    try {
+      // Check if temp message was viewed
+      const wasViewed = await this.isMessageViewed(tempId);
+      
+      if (wasViewed) {
+        console.log(`👁️ Transferring viewed status: ${tempId} → ${realId}`);
+        
+        // Mark the real message as viewed
+        await db.run(
+          'UPDATE messages SET is_viewed = 1 WHERE id = ?',
+          [realId]
+        );
+        
+        console.log(`✅ Viewed status transferred successfully`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error(`❌ Error transferring viewed status from ${tempId} to ${realId}:`, error);
+      return false;
     }
   }
 }

@@ -12,6 +12,7 @@ export interface LocalMessage {
   updated_at?: number;
   deleted_at?: number;
   local_id?: number; // Auto-increment unique ID
+  is_viewed?: number; // SQLite uses INTEGER for boolean - tracks if user has viewed this message
 }
 
 export interface LocalPoll {
