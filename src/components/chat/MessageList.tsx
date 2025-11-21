@@ -146,7 +146,18 @@ export function MessageList() {
   // Reset scroll flag when changing groups
   useEffect(() => {
     setHasScrolledToUnread(false);
-  }, [activeGroup?.id]);
+    
+    // ✅ FIX: If there's no unread message, scroll to bottom immediately
+    if (!firstUnreadMessageId && messages.length > 0) {
+      const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+      if (viewport) {
+        setTimeout(() => {
+          viewport.scrollTop = viewport.scrollHeight;
+          console.log('📍 Auto-scrolled to bottom (no unread on open)');
+        }, 100); // Small delay to ensure DOM is ready
+      }
+    }
+  }, [activeGroup?.id, firstUnreadMessageId, messages.length]);
 
   // Auto-scroll to bottom when new messages arrive (only if no unread or already scrolled to unread)
   // WhatsApp-style: instant scroll to bottom, respecting bottom padding
