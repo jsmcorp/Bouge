@@ -130,6 +130,9 @@ class SupabasePipeline {
   private lastFailureAt = 0;
   private circuitBreakerOpen = false;
 
+  // Client corruption detection
+  private clientCorrupted = false;
+
   constructor() {
     this.log('🚀 Pipeline initialized');
     this.log('🧪 Debug tag: PHASE2-state-reduction');
@@ -142,6 +145,155 @@ class SupabasePipeline {
 
   // PHASE 2: Terminal watchdog system removed (51 lines deleted)
   // Reason: Overly complex, not needed - timeout handling is sufficient
+
+  /**
+   * DIAGNOSTIC: Capture comprehensive state when auth calls hang
+   * This helps identify the root cause of timeouts
+   */
+  private async captureAuthDiagnostics(callId: string, phase: string): Promise<any> {
+    const diagnostics: any = {
+      callId,
+      phase,
+      timestamp: new Date().toISOString(),
+      timeSinceStart: Date.now(),
+    };
+
+    try {
+      // 1. Network State
+      if (typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform?.()) {
+        try {
+          const { Network } = await import('@capacitor/network');
+          const networkStatus = await Network.getStatus();
+          diagnostics.network = {
+            connected: networkStatus.connected,
+            connectionType: networkStatus.connectionType,
+          };
+        } catch (e) {
+          diagnostics.network = { error: 'Failed to get network status' };
+        }
+      } else {
+        diagnostics.network = {
+          navigatorOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+        };
+      }
+
+      // 2. Client State
+      diagnostics.client = {
+        exists: !!this.client,
+        isInitialized: this.isInitialized,
+        hasAuth: !!(this.client?.auth),
+      };
+
+      // 3. Session State
+      diagnostics.session = {
+        hasUserId: !!this.sessionState.userId,
+        hasAccessToken: !!this.sessionState.accessToken,
+        hasRefreshToken: !!this.sessionState.refreshToken,
+        hasCachedSession: !!this.sessionState.cached,
+        cachedSessionAge: this.sessionState.cached 
+          ? Date.now() - this.sessionState.cached.timestamp 
+          : null,
+        consecutiveFailures: this.sessionState.consecutiveFailures,
+        lastCorruptionCheck: Date.now() - this.sessionState.lastCorruptionCheck,
+      };
+
+      // 4. Token Expiration (if available)
+      if (this.sessionState.cached?.session?.expires_at) {
+        const expiresAt = this.sessionState.cached.session.expires_at;
+        const nowSec = Math.floor(Date.now() / 1000);
+        diagnostics.session.tokenExpiresIn = expiresAt - nowSec;
+        diagnostics.session.tokenExpired = expiresAt <= nowSec;
+      }
+
+      // 5. Circuit Breaker State
+      diagnostics.circuitBreaker = {
+        failureCount: this.failureCount,
+        isOpen: this.circuitBreakerOpen,
+        lastFailureAt: this.lastFailureAt,
+        timeSinceLastFailure: this.lastFailureAt ? Date.now() - this.lastFailureAt : null,
+      };
+
+      // 6. In-Flight State
+      diagnostics.inFlight = {
+        hasRefreshInFlight: !!this.refreshInFlight,
+      };
+
+      // 7. Check storage state (SKIP getSession() check - it has internal Supabase bug causing 500ms hang)
+      // The storage adapter works perfectly (< 0.10ms), but Supabase's getSession() hangs internally
+      // See LOG41_ANALYSIS.md for details
+      if (this.client?.auth) {
+        this.log(`🔍 [${callId}] Checking storage state (skipping getSession() due to Supabase internal hang)...`);
+        
+        try {
+          // Check storage state only
+          if (typeof window !== 'undefined' && window.localStorage) {
+            const storageKeys = Object.keys(window.localStorage);
+            const supabaseKeys = storageKeys.filter(k => k.includes('supabase'));
+            this.log(`🔍 [${callId}] localStorage accessible, ${supabaseKeys.length} supabase keys`);
+            diagnostics.storage = {
+              accessible: true,
+              supabaseKeyCount: supabaseKeys.length,
+            };
+          }
+        } catch (storageError) {
+          this.log(`🔍 [${callId}] localStorage check failed: ${stringifyError(storageError)}`);
+          diagnostics.storage = {
+            accessible: false,
+            error: stringifyError(storageError),
+          };
+        }
+        
+        // Note: We skip the getSession() check because it causes a 500ms hang
+        // even though our storage adapter works perfectly (< 0.10ms operations)
+        // This is a Supabase internal issue, not a storage issue
+        diagnostics.clientSession = {
+          skipped: true,
+            reason: 'getSession() has Supabase internal hang issue',
+        };
+      }
+
+      // 8. WebView State (if available)
+      if (typeof window !== 'undefined') {
+        diagnostics.webview = {
+          userAgent: navigator.userAgent,
+          language: navigator.language,
+          onLine: navigator.onLine,
+          cookieEnabled: navigator.cookieEnabled,
+        };
+      }
+
+      // 9. Memory/Performance
+      if (typeof performance !== 'undefined' && (performance as any).memory) {
+        const mem = (performance as any).memory;
+        diagnostics.memory = {
+          usedJSHeapSize: mem.usedJSHeapSize,
+          totalJSHeapSize: mem.totalJSHeapSize,
+          jsHeapSizeLimit: mem.jsHeapSizeLimit,
+          usagePercent: Math.round((mem.usedJSHeapSize / mem.jsHeapSizeLimit) * 100),
+        };
+      }
+
+      // 10. Pending Fetch Requests (if we can detect them)
+      if (typeof window !== 'undefined' && (window as any).performance?.getEntriesByType) {
+        try {
+          const resources = (window as any).performance.getEntriesByType('resource');
+          const recentFetches = resources
+            .filter((r: any) => r.initiatorType === 'fetch' && Date.now() - r.startTime < 10000)
+            .length;
+          diagnostics.pendingRequests = {
+            recentFetchCount: recentFetches,
+          };
+        } catch (e) {
+          diagnostics.pendingRequests = { error: 'Failed to check' };
+        }
+      }
+
+    } catch (error) {
+      diagnostics.captureError = stringifyError(error);
+    }
+
+    return diagnostics;
+  }
 
   /** Lightweight accessors for cached/auth tokens used by reconnectionManager fast-path */
   public getCachedAccessToken(): string | null {
@@ -183,103 +335,302 @@ class SupabasePipeline {
     timeout?: number;
     background?: boolean;
   } = {}): Promise<boolean> {
-    // OPTIMIZATION: Single-flight - if refresh is already in progress, wait for it
-    if (this.refreshInFlight) {
-      this.log(`🔄 refreshSessionUnified: waiting for in-flight refresh`);
-      return await this.refreshInFlight;
-    }
-
     const { timeout = 5000, background = false } = options;
     const started = Date.now();
     const mode = background ? 'background' : 'direct';
+    const callId = `${mode}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    this.log(`🔄 refreshSessionUnified(${mode}, timeout=${timeout}ms) start`);
+    // OPTIMIZATION: Single-flight - if refresh is already in progress, wait for it
+    if (this.refreshInFlight) {
+      this.log(`🔄 [${callId}] refreshSessionUnified: ⏳ WAITING for in-flight refresh`);
+      try {
+        const result = await this.refreshInFlight;
+        const took = Date.now() - started;
+        this.log(`🔄 [${callId}] refreshSessionUnified: ✅ WAIT COMPLETED in ${took}ms, result=${result}`);
+        return result;
+      } catch (waitError) {
+        const took = Date.now() - started;
+        this.log(`🔄 [${callId}] refreshSessionUnified: ❌ WAIT FAILED after ${took}ms: ${stringifyError(waitError)}`);
+        throw waitError;
+      }
+    }
+
+    this.log(`🔄 [${callId}] refreshSessionUnified(${mode}, timeout=${timeout}ms) 🚀 START (taking lock)`);
+
+    // NOTE: Client corruption check removed - it was triggered by false positive from getSession() hang
+    // The hang is a Supabase internal issue, not actual client corruption
+    // See LOG41_ANALYSIS.md for details
 
     // Create the refresh promise and store it
     this.refreshInFlight = (async (): Promise<boolean> => {
+    this.log(`🔄 [${callId}] 📍 Inside refresh promise execution`);
 
     try {
+      this.log(`🔄 [${callId}] 📞 Calling getClient()...`);
       const client = await this.getClient();
+      this.log(`🔄 [${callId}] ✅ getClient() returned successfully`);
 
       // Strategy 1: Try setSession() with cached tokens first (most reliable)
       if (this.sessionState.accessToken && this.sessionState.refreshToken) {
-        this.log(`🔄 Attempting setSession() with cached tokens`);
+        this.log(`🔄 [${callId}] 🔑 Strategy 1: Attempting setSession() with cached tokens`);
+        this.log(`🔄 [${callId}] 🔑 Token info: accessToken=${this.sessionState.accessToken?.substring(0, 20)}... refreshToken=${this.sessionState.refreshToken?.substring(0, 20)}...`);
+        
+        // DIAGNOSTIC: Capture environment state before auth call
         try {
+          const diagnostics = await this.captureAuthDiagnostics(callId, 'setSession-before');
+          this.log(`🔄 [${callId}] 🔍 PRE-CALL DIAGNOSTICS: ${JSON.stringify(diagnostics)}`);
+        } catch (diagError) {
+          this.log(`🔄 [${callId}] ⚠️ Failed to capture pre-call diagnostics: ${stringifyError(diagError)}`);
+        }
+        
+        try {
+          this.log(`🔄 [${callId}] 📞 Calling client.auth.setSession()...`);
+          
+          // Deep diagnostics before setSession call
+          this.log(`🔍 [${callId}] PRE-setSession state:`);
+          this.log(`🔍 [${callId}]   - client.auth exists: ${!!client.auth}`);
+          this.log(`🔍 [${callId}]   - typeof setSession: ${typeof client.auth.setSession}`);
+          
+          // Check if there are any pending auth operations
+          try {
+            const authState = (client.auth as any)._currentSession;
+            this.log(`🔍 [${callId}]   - _currentSession exists: ${!!authState}`);
+          } catch (e) {
+            this.log(`🔍 [${callId}]   - Cannot access _currentSession`);
+          }
+          
+          const setSessionCallStart = Date.now();
           const setSessionPromise = client.auth.setSession({
             access_token: this.sessionState.accessToken,
             refresh_token: this.sessionState.refreshToken
           });
+          
+          // Log immediately after call
+          this.log(`🔍 [${callId}] setSession() called, promise created at ${Date.now() - setSessionCallStart}ms`);
 
+          const setSessionTimeoutMs = Math.min(timeout, 3000);
+          this.log(`🔄 [${callId}] ⏱️ Setting up timeout race (${setSessionTimeoutMs}ms)...`);
+          
+          // Monitor event loop during wait
+          let eventLoopChecks = 0;
+          const eventLoopMonitor = setInterval(() => {
+            eventLoopChecks++;
+            const checkTime = Date.now();
+            setTimeout(() => {
+              const delay = Date.now() - checkTime;
+              if (delay > 100) {
+                this.log(`🔍 [${callId}] ⚠️ Event loop blocked: ${delay}ms delay on check #${eventLoopChecks}`);
+              }
+            }, 0);
+          }, 500);
+          
+          let setSessionTimeoutId: ReturnType<typeof setTimeout> | null = null;
           const setSessionTimeout = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('setSession timeout')), Math.min(timeout, 3000));
+            setSessionTimeoutId = setTimeout(() => {
+              clearInterval(eventLoopMonitor);
+              this.log(`🔄 [${callId}] ⏰ setSession timeout fired after ${setSessionTimeoutMs}ms (event loop checks: ${eventLoopChecks})`);
+              reject(new Error('setSession timeout'));
+            }, setSessionTimeoutMs);
           });
 
+          this.log(`🔄 [${callId}] 🏁 Starting Promise.race for setSession...`);
           const setSessionResult = await Promise.race([setSessionPromise, setSessionTimeout]);
+          
+          // Cancel the timeout and monitoring since the race completed
+          clearInterval(eventLoopMonitor);
+          if (setSessionTimeoutId) {
+            clearTimeout(setSessionTimeoutId);
+            const elapsed = Date.now() - setSessionCallStart;
+            this.log(`🔄 [${callId}] ✅ setSession timeout cancelled (race completed in ${elapsed}ms, ${eventLoopChecks} event loop checks)`);
+          }
+          
+          this.log(`🔄 [${callId}] ✅ setSession Promise.race completed`);
 
           if (setSessionResult?.data?.session) {
+            this.log(`🔄 [${callId}] ✅ setSession returned valid session`);
             // Update session cache (includes realtime token update)
             this.updateSessionCache(setSessionResult.data.session);
             this.sessionState.consecutiveFailures = 0;
 
             const took = Date.now() - started;
-            this.log(`🔄 refreshSessionUnified: ✅ SUCCESS via setSession() in ${took}ms`);
+            this.log(`🔄 [${callId}] ✅ SUCCESS via setSession() in ${took}ms`);
             return true;
+          } else {
+            this.log(`🔄 [${callId}] ⚠️ setSession returned but no valid session in result`);
           }
         } catch (setSessionError: any) {
-          if (setSessionError?.message !== 'setSession timeout') {
-            this.log(`🔄 setSession() error: ${stringifyError(setSessionError)}`);
+          const took = Date.now() - started;
+          if (setSessionError?.message === 'setSession timeout') {
+            this.log(`🔄 [${callId}] ⏰ setSession TIMEOUT after ${took}ms`);
+            
+            // DIAGNOSTIC: Capture state when timeout occurs
+            try {
+              const timeoutDiagnostics = await this.captureAuthDiagnostics(callId, 'setSession-timeout');
+              this.log(`🔄 [${callId}] 🔍 TIMEOUT DIAGNOSTICS: ${JSON.stringify(timeoutDiagnostics)}`);
+            } catch (diagError) {
+              this.log(`🔄 [${callId}] ⚠️ Failed to capture timeout diagnostics: ${stringifyError(diagError)}`);
+            }
+          } else {
+            this.log(`🔄 [${callId}] ❌ setSession ERROR after ${took}ms: ${stringifyError(setSessionError)}`);
+            this.log(`🔄 [${callId}] ❌ Error name: ${setSessionError?.name}`);
+            this.log(`🔄 [${callId}] ❌ Error stack: ${setSessionError?.stack}`);
           }
           // Fall through to refreshSession()
+          this.log(`🔄 [${callId}] 🔄 Falling through to Strategy 2 (refreshSession)`);
         }
+      } else {
+        this.log(`🔄 [${callId}] ⚠️ Skipping Strategy 1: No cached tokens (accessToken=${!!this.sessionState.accessToken} refreshToken=${!!this.sessionState.refreshToken})`);
       }
 
       // Strategy 2: Fall back to refreshSession()
-      this.log(`🔄 Attempting refreshSession() as fallback`);
+      this.log(`🔄 [${callId}] 🔄 Strategy 2: Attempting refreshSession() as fallback`);
+      
+      // DIAGNOSTIC: Capture environment state before auth call
+      try {
+        const diagnostics = await this.captureAuthDiagnostics(callId, 'refreshSession-before');
+        this.log(`🔄 [${callId}] 🔍 PRE-CALL DIAGNOSTICS: ${JSON.stringify(diagnostics)}`);
+      } catch (diagError) {
+        this.log(`🔄 [${callId}] ⚠️ Failed to capture pre-call diagnostics: ${stringifyError(diagError)}`);
+      }
+      
+      this.log(`🔄 [${callId}] 📞 Calling client.auth.refreshSession()...`);
+      
+      // Deep diagnostics before refreshSession call
+      this.log(`🔍 [${callId}] PRE-refreshSession state:`);
+      this.log(`🔍 [${callId}]   - client.auth exists: ${!!client.auth}`);
+      this.log(`🔍 [${callId}]   - typeof refreshSession: ${typeof client.auth.refreshSession}`);
+      
+      // Check if there are any pending auth operations
+      try {
+        const authState = (client.auth as any)._currentSession;
+        const authRefreshing = (client.auth as any)._refreshing;
+        this.log(`🔍 [${callId}]   - _currentSession exists: ${!!authState}`);
+        this.log(`🔍 [${callId}]   - _refreshing: ${authRefreshing}`);
+      } catch (e) {
+        this.log(`🔍 [${callId}]   - Cannot access internal auth state`);
+      }
+      
+      const refreshCallStart = Date.now();
       const refreshPromise = client.auth.refreshSession();
+      
+      // Log immediately after call
+      this.log(`🔍 [${callId}] refreshSession() called, promise created at ${Date.now() - refreshCallStart}ms`);
+      
+      this.log(`🔄 [${callId}] ⏱️ Setting up timeout race (${timeout}ms)...`);
+      
+      // Monitor event loop during wait
+      let refreshEventLoopChecks = 0;
+      const refreshEventLoopMonitor = setInterval(() => {
+        refreshEventLoopChecks++;
+        const checkTime = Date.now();
+        setTimeout(() => {
+          const delay = Date.now() - checkTime;
+          if (delay > 100) {
+            this.log(`🔍 [${callId}] ⚠️ Event loop blocked: ${delay}ms delay on check #${refreshEventLoopChecks}`);
+          }
+        }, 0);
+      }, 500);
+      
+      let refreshTimeoutId: ReturnType<typeof setTimeout> | null = null;
       const refreshTimeout = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('refreshSession timeout')), timeout);
+        refreshTimeoutId = setTimeout(() => {
+          clearInterval(refreshEventLoopMonitor);
+          this.log(`🔄 [${callId}] ⏰ refreshSession timeout fired after ${timeout}ms (event loop checks: ${refreshEventLoopChecks})`);
+          reject(new Error('refreshSession timeout'));
+        }, timeout);
       });
 
       let result: any;
       try {
+        this.log(`🔄 [${callId}] 🏁 Starting Promise.race for refreshSession...`);
         result = await Promise.race([refreshPromise, refreshTimeout]);
+        
+        // Cancel the timeout and monitoring since the race completed successfully
+        clearInterval(refreshEventLoopMonitor);
+        if (refreshTimeoutId) {
+          clearTimeout(refreshTimeoutId);
+          const elapsed = Date.now() - refreshCallStart;
+          this.log(`🔄 [${callId}] ✅ refreshSession timeout cancelled (race completed in ${elapsed}ms, ${refreshEventLoopChecks} event loop checks)`);
+        }
+        
+        this.log(`🔄 [${callId}] ✅ refreshSession Promise.race completed`);
       } catch (err: any) {
+        // Cancel the timeout and monitoring on error too
+        clearInterval(refreshEventLoopMonitor);
+        if (refreshTimeoutId) {
+          clearTimeout(refreshTimeoutId);
+        }
+        
+        const took = Date.now() - started;
         if (err?.message === 'refreshSession timeout') {
-          this.log(`🔄 refreshSessionUnified: ❌ TIMEOUT after ${timeout}ms`);
+          this.log(`🔄 [${callId}] ⏰ refreshSession TIMEOUT after ${took}ms (${timeout}ms limit)`);
+          
+          // DIAGNOSTIC: Capture state when timeout occurs
+          try {
+            const timeoutDiagnostics = await this.captureAuthDiagnostics(callId, 'refreshSession-timeout');
+            this.log(`🔄 [${callId}] 🔍 TIMEOUT DIAGNOSTICS: ${JSON.stringify(timeoutDiagnostics)}`);
+          } catch (diagError) {
+            this.log(`🔄 [${callId}] ⚠️ Failed to capture timeout diagnostics: ${stringifyError(diagError)}`);
+          }
+          
           this.sessionState.consecutiveFailures++;
+          this.log(`🔄 [${callId}] 📊 consecutiveFailures incremented to ${this.sessionState.consecutiveFailures}`);
           return false;
         }
+        this.log(`🔄 [${callId}] ❌ refreshSession Promise.race threw error after ${took}ms: ${stringifyError(err)}`);
+        this.log(`🔄 [${callId}] ❌ Error name: ${err?.name}`);
+        this.log(`🔄 [${callId}] ❌ Error stack: ${err?.stack}`);
         throw err;
       }
 
+      this.log(`🔄 [${callId}] 🔍 Checking refreshSession result...`);
       const success = !result?.error && result?.data?.session;
+      this.log(`🔄 [${callId}] 🔍 Result analysis: hasError=${!!result?.error} hasSession=${!!result?.data?.session} success=${success}`);
 
       if (success) {
+        this.log(`🔄 [${callId}] ✅ refreshSession returned valid session`);
         // Update session cache (includes realtime token update)
         this.updateSessionCache(result.data.session);
         this.sessionState.consecutiveFailures = 0;
+        this.log(`🔄 [${callId}] 📊 consecutiveFailures reset to 0`);
 
         const took = Date.now() - started;
-        this.log(`🔄 refreshSessionUnified: ✅ SUCCESS via refreshSession() in ${took}ms`);
+        this.log(`🔄 [${callId}] ✅ SUCCESS via refreshSession() in ${took}ms`);
       } else {
         this.sessionState.consecutiveFailures++;
-        this.log(`🔄 refreshSessionUnified: ❌ FAILED - ${result?.error?.message || 'unknown error'}`);
+        const errorMsg = result?.error?.message || 'unknown error';
+        const errorDetails = result?.error ? stringifyError(result.error) : 'no error object';
+        this.log(`🔄 [${callId}] ❌ FAILED - ${errorMsg}`);
+        this.log(`🔄 [${callId}] ❌ Error details: ${errorDetails}`);
+        this.log(`🔄 [${callId}] 📊 consecutiveFailures incremented to ${this.sessionState.consecutiveFailures}`);
       }
 
       return success;
     } catch (error) {
       const took = Date.now() - started;
-      this.log(`🔄 refreshSessionUnified error after ${took}ms: ${stringifyError(error)}`);
+      this.log(`🔄 [${callId}] ❌ OUTER CATCH: Unhandled error after ${took}ms: ${stringifyError(error)}`);
       this.sessionState.consecutiveFailures++;
+      this.log(`🔄 [${callId}] 📊 consecutiveFailures incremented to ${this.sessionState.consecutiveFailures}`);
       return false;
     }
     })();
 
     try {
-      return await this.refreshInFlight;
+      this.log(`🔄 [${callId}] ⏳ Awaiting refreshInFlight promise...`);
+      const finalResult = await this.refreshInFlight;
+      const took = Date.now() - started;
+      this.log(`🔄 [${callId}] ✅ refreshInFlight promise resolved in ${took}ms, result=${finalResult}`);
+      return finalResult;
+    } catch (finalError) {
+      const took = Date.now() - started;
+      this.log(`🔄 [${callId}] ❌ FINAL CATCH: refreshInFlight promise rejected after ${took}ms: ${stringifyError(finalError)}`);
+      throw finalError;
     } finally {
-      // Clear the in-flight promise after completion
+      // CRITICAL: Always clear the in-flight promise, even on error
+      this.log(`🔄 [${callId}] 🔓 FINALLY: Clearing refreshInFlight lock`);
       this.refreshInFlight = null;
+      const took = Date.now() - started;
+      this.log(`🔄 [${callId}] 🏁 COMPLETE: Total time ${took}ms, lock released`);
     }
   }
 
@@ -368,8 +719,51 @@ class SupabasePipeline {
         const pipelineLog = (msg: string, ...args: any[]) => {
           try { this.log(msg, ...args); } catch (_) {}
         };
+        
+        // Custom synchronous storage adapter with logging
+        const customStorageAdapter = {
+          getItem: (key: string) => {
+            const start = performance.now();
+            try {
+              const value = window.localStorage.getItem(key);
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ✅ getItem("${key}") -> ${value ? `${value.substring(0, 50)}...` : 'null'} (${duration.toFixed(2)}ms)`);
+              return value;
+            } catch (error) {
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ❌ getItem("${key}") failed after ${duration.toFixed(2)}ms: ${stringifyError(error)}`);
+              return null;
+            }
+          },
+          setItem: (key: string, value: string) => {
+            const start = performance.now();
+            try {
+              window.localStorage.setItem(key, value);
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ✅ setItem("${key}", ${value.substring(0, 50)}...) (${duration.toFixed(2)}ms)`);
+            } catch (error) {
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ❌ setItem("${key}") failed after ${duration.toFixed(2)}ms: ${stringifyError(error)}`);
+            }
+          },
+          removeItem: (key: string) => {
+            const start = performance.now();
+            try {
+              window.localStorage.removeItem(key);
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ✅ removeItem("${key}") (${duration.toFixed(2)}ms)`);
+            } catch (error) {
+              const duration = performance.now() - start;
+              pipelineLog(`[storage-adapter] ❌ removeItem("${key}") failed after ${duration.toFixed(2)}ms: ${stringifyError(error)}`);
+            }
+          },
+        };
+        
+        pipelineLog('[storage-adapter] 🔧 Custom synchronous storage adapter initialized for supabasePipeline.ts');
+        
         this.client = createClient(supabaseUrl, supabaseAnonKey, {
           auth: {
+            storage: customStorageAdapter,  // ✅ Use custom synchronous storage adapter
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: false,
@@ -476,7 +870,12 @@ class SupabasePipeline {
    * NON-BLOCKING: Returns client immediately, refreshes session in background
    */
   private async getClient(): Promise<any> {
-    this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise}`);
+    this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise} corrupted=${this.clientCorrupted}`);
+    
+    // NOTE: Client corruption check removed - it was triggered by false positive from getSession() hang
+    // The hang is a Supabase internal issue, not actual client corruption
+    // See LOG41_ANALYSIS.md for details
+    
     if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
 
     // NON-BLOCKING session refresh: Start in background, don't wait for it

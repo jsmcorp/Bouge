@@ -434,7 +434,19 @@ export class DatabaseManager {
     try {
       console.log('🔄 Checking if foreign key CASCADE migration is needed...');
 
-      // Check if reactions table has CASCADE by inspecting foreign_key_list
+      // CRITICAL FIX: Check group_members table specifically (not just reactions)
+      // This prevents re-running the migration and losing last_read_message_id data
+      const gmFkCheck = await this.db!.query('PRAGMA foreign_key_list(group_members);');
+      const gmHasCascade = (gmFkCheck.values || []).some((fk: any) => 
+        fk.on_delete === 'CASCADE'
+      );
+
+      if (gmHasCascade) {
+        console.log('✅ group_members already has CASCADE, skipping migration');
+        return;
+      }
+
+      // Also check reactions table as a secondary check
       const fkCheck = await this.db!.query('PRAGMA foreign_key_list(reactions);');
       const hasCascade = (fkCheck.values || []).some((fk: any) => 
         fk.on_delete === 'CASCADE'
