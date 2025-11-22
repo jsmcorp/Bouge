@@ -34,12 +34,15 @@ class ContactMatchingService {
     }
 
     try {
-      // Get current user
-      const client = await supabasePipeline.getDirectClient();
-      const { data: { user } } = await client.auth.getUser();
-      if (!user) {
+      // Get current user from cached session (no auth calls that can hang)
+      const session = await supabasePipeline.getCachedSession();
+      if (!session?.user) {
         throw new Error('User not authenticated');
       }
+      const userId = session.user.id;
+      
+      // Get client for queries
+      const client = await supabasePipeline.getDirectClient();
 
       console.log('📇 [MATCHING] Calling sync_contacts RPC function...');
       console.log(`📇 [MATCHING] Uploading ${contacts.length} contacts with names to Supabase...`);
@@ -50,7 +53,7 @@ class ContactMatchingService {
       // 2. Inserts new contacts with names and phone numbers
       // 3. Returns registered users who match
       const { data, error } = await client.rpc('sync_contacts', {
-        p_user_id: user.id,
+        p_user_id: userId,
         p_contacts: contacts
       });
 
@@ -84,7 +87,7 @@ class ContactMatchingService {
       const { count, error: countError } = await client
         .from('user_contacts')
         .select('*', { count: 'exact', head: true })
-        .eq('user_id', user.id);
+        .eq('user_id', userId);
 
       if (!countError) {
         console.log(`✅ [MATCHING] Verified: ${count} contacts stored in Supabase user_contacts table`);
@@ -105,14 +108,18 @@ class ContactMatchingService {
     console.log('📇 [MATCHING] Fetching registered contacts from server...');
 
     try {
-      const client = await supabasePipeline.getDirectClient();
-      const { data: { user } } = await client.auth.getUser();
-      if (!user) {
+      // Get current user from cached session (no auth calls that can hang)
+      const session = await supabasePipeline.getCachedSession();
+      if (!session?.user) {
         throw new Error('User not authenticated');
       }
+      const userId = session.user.id;
+      
+      // Get client for queries
+      const client = await supabasePipeline.getDirectClient();
 
       const { data, error } = await client.rpc('get_registered_contacts', {
-        p_user_id: user.id
+        p_user_id: userId
       });
 
       if (error) {
@@ -204,16 +211,20 @@ class ContactMatchingService {
     console.log('📇 [MATCHING] Clearing uploaded contacts...');
 
     try {
-      const client = await supabasePipeline.getDirectClient();
-      const { data: { user } } = await client.auth.getUser();
-      if (!user) {
+      // Get current user from cached session (no auth calls that can hang)
+      const session = await supabasePipeline.getCachedSession();
+      if (!session?.user) {
         throw new Error('User not authenticated');
       }
+      const userId = session.user.id;
+      
+      // Get client for queries
+      const client = await supabasePipeline.getDirectClient();
 
       const { error } = await client
         .from('user_contacts')
         .delete()
-        .eq('user_id', user.id);
+        .eq('user_id', userId);
 
       if (error) {
         console.error('📇 [MATCHING] Error clearing contacts:', error);

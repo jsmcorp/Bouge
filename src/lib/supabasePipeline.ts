@@ -231,11 +231,21 @@ class SupabasePipeline {
           // Check storage state only
           if (typeof window !== 'undefined' && window.localStorage) {
             const storageKeys = Object.keys(window.localStorage);
-            const supabaseKeys = storageKeys.filter(k => k.includes('supabase'));
+            // Match both "supabase" and "sb-" prefixed keys
+            const supabaseKeys = storageKeys.filter(k => k.includes('supabase') || k.startsWith('sb-'));
+            const authTokenKeys = supabaseKeys.filter(k => k.includes('auth-token'));
+            
             this.log(`🔍 [${callId}] localStorage accessible, ${supabaseKeys.length} supabase keys`);
+            if (authTokenKeys.length > 0) {
+              this.log(`🔍 [${callId}] Found ${authTokenKeys.length} auth-token keys: ${authTokenKeys.join(', ')}`);
+            }
+            
             diagnostics.storage = {
               accessible: true,
               supabaseKeyCount: supabaseKeys.length,
+              authTokenCount: authTokenKeys.length,
+              storageKeys: supabaseKeys,
+              hasAuthToken: authTokenKeys.length > 0,
             };
           }
         } catch (storageError) {
@@ -740,10 +750,31 @@ class SupabasePipeline {
           },
           setItem: (key: string, value: string) => {
             const start = performance.now();
+            
+            // Capture call stack to see WHO is calling setItem
+            const stack = new Error().stack?.split('\n').slice(2, 5).join(' <- ') || 'unknown';
+            
             try {
               window.localStorage.setItem(key, value);
               const duration = performance.now() - start;
-              pipelineLog(`[storage-adapter] ✅ setItem("${key}", ${value.substring(0, 50)}...) (${duration.toFixed(2)}ms)`);
+              
+              // CRITICAL: Prominent logging for auth-token writes
+              const isAuthToken = key.includes('auth-token');
+              if (isAuthToken) {
+                // If you NEVER see this log, persistence is not happening
+                pipelineLog(`🔑🔑🔑 AUTH TOKEN WRITE: setItem("${key}") (${duration.toFixed(2)}ms)`);
+                pipelineLog(`🔍 Called from: ${stack}`);
+                
+                // VERIFY: Read back immediately to confirm persistence
+                const readBack = window.localStorage.getItem(key);
+                if (readBack) {
+                  pipelineLog(`✅ VERIFIED: Key "${key}" exists in localStorage (${readBack.length} chars)`);
+                } else {
+                  pipelineLog(`❌ BUG: Key "${key}" NOT found after write!`);
+                }
+              } else {
+                pipelineLog(`[storage-adapter] ✅ setItem("${key}", ${value.substring(0, 50)}...) (${duration.toFixed(2)}ms)`);
+              }
             } catch (error) {
               const duration = performance.now() - start;
               pipelineLog(`[storage-adapter] ❌ setItem("${key}") failed after ${duration.toFixed(2)}ms: ${stringifyError(error)}`);
@@ -764,11 +795,15 @@ class SupabasePipeline {
         
         pipelineLog('[storage-adapter] 🔧 Custom synchronous storage adapter initialized for supabasePipeline.ts');
         
+        // Capture config values for logging
+        const authPersistSession = true;
+        const authAutoRefreshToken = false;  // ✅ DISABLED - we handle refresh manually
+        
         this.client = createClient(supabaseUrl, supabaseAnonKey, {
           auth: {
             storage: customStorageAdapter,  // ✅ Use custom synchronous storage adapter
-            persistSession: true,
-            autoRefreshToken: true,
+            persistSession: authPersistSession,
+            autoRefreshToken: authAutoRefreshToken,  // ✅ DISABLED - we handle refresh manually to avoid internal hangs
             detectSessionInUrl: false,
           },
           realtime: {
@@ -809,7 +844,33 @@ class SupabasePipeline {
             }
           }
         }) as any;
-        this.log('🔄 Supabase client created ONCE (persistSession=true, autoRefreshToken=true)');
+        // Log the ACTUAL config values passed to createClient
+        this.log(`[supabase-pipeline] 🔄 CLIENT CREATED authConfig={"storage":"[CustomStorageAdapter]","persistSession":${authPersistSession},"autoRefreshToken":${authAutoRefreshToken},"detectSessionInUrl":false}`);
+
+        // CRITICAL: Verify config was actually applied at runtime
+        try {
+          const runtimeConfig = (this.client.auth as any)._supabaseAuthClientOptions || {};
+          this.log(`🔍 RUNTIME CONFIG VERIFICATION:`);
+          this.log(`🔍   persistSession: ${runtimeConfig.persistSession}`);
+          this.log(`🔍   storage: ${runtimeConfig.storage ? 'present' : 'MISSING'}`);
+          this.log(`🔍   autoRefreshToken: ${runtimeConfig.autoRefreshToken}`);
+          
+          // Verify storage adapter is the same object
+          const storageMatch = runtimeConfig.storage === customStorageAdapter;
+          this.log(`🔍   storage adapter match: ${storageMatch}`);
+          
+          if (runtimeConfig.persistSession !== true) {
+            this.log(`❌ CRITICAL: persistSession is ${runtimeConfig.persistSession} at runtime (expected true)!`);
+          }
+          if (!runtimeConfig.storage) {
+            this.log(`❌ CRITICAL: storage adapter is missing at runtime!`);
+          }
+          if (!storageMatch && runtimeConfig.storage) {
+            this.log(`⚠️ WARNING: storage adapter object mismatch (different instance)!`);
+          }
+        } catch (configError) {
+          this.log(`⚠️ Could not verify runtime config:`, stringifyError(configError));
+        }
 
         // Bind auth listeners to the permanent client
         try {
@@ -820,14 +881,43 @@ class SupabasePipeline {
 
         // Attach internal auth listener to cache tokens
         try {
-          const sub = this.client.auth.onAuthStateChange((_event: AuthChangeEvent, session: any) => {
+          const sub = this.client.auth.onAuthStateChange((event: AuthChangeEvent, session: any) => {
+            const traceId = `auth-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            this.log(`🔑 [${traceId}] Auth state change: ${event}`);
+            
             try {
+              // For SIGNED_IN events, check if persistence happened
+              if (event === 'SIGNED_IN') {
+                this.log(`🔑 [${traceId}] SIGNED_IN event fired`);
+                this.log(`🔑 [${traceId}] 👀 Check logs above for "🔑🔑🔑 AUTH TOKEN WRITE"`);
+                
+                // Schedule a delayed check (don't block the listener)
+                setTimeout(async () => {
+                  try {
+                    const checkDiagnostics = await this.captureAuthDiagnostics(traceId, 'signed-in-delayed-check');
+                    this.log(`🔑 [${traceId}] SIGNED_IN delayed check: supabaseKeyCount=${checkDiagnostics.storage.supabaseKeyCount}`);
+                    
+                    if (checkDiagnostics.storage.supabaseKeyCount === 0) {
+                      this.log(`🔑 [${traceId}] ⚠️ WARNING: SIGNED_IN event but supabaseKeyCount still 0 after 100ms!`);
+                    } else {
+                      this.log(`🔑 [${traceId}] ✅ Session persisted! supabaseKeyCount=${checkDiagnostics.storage.supabaseKeyCount}`);
+                    }
+                  } catch (checkError) {
+                    this.log(`🔑 [${traceId}] ⚠️ Delayed check failed:`, stringifyError(checkError));
+                  }
+                }, 100);
+              }
+              
+              // Cache tokens immediately (don't wait for persistence)
+              // This is fine - we're just caching what's in memory
               const s = session || {};
               this.sessionState.userId = s?.user?.id || this.sessionState.userId || null;
               this.sessionState.accessToken = s?.access_token || this.sessionState.accessToken || null;
               this.sessionState.refreshToken = s?.refresh_token || this.sessionState.refreshToken || null;
-              this.log(`🔑 Token cached: user=${this.sessionState.userId?.slice(0, 8)} hasAccess=${!!this.sessionState.accessToken} hasRefresh=${!!this.sessionState.refreshToken}`);
-            } catch {}
+              this.log(`🔑 [${traceId}] Token cached: user=${this.sessionState.userId?.slice(0, 8)} hasAccess=${!!this.sessionState.accessToken} hasRefresh=${!!this.sessionState.refreshToken}`);
+            } catch (listenerError) {
+              this.log(`🔑 [${traceId}] ⚠️ Auth listener error:`, stringifyError(listenerError));
+            }
           });
           this.internalAuthUnsub = () => { try { sub.data.subscription.unsubscribe(); } catch (_) {} };
         } catch (e) {
@@ -871,7 +961,7 @@ class SupabasePipeline {
 
   /**
    * Get the current client instance, initializing if needed
-   * NON-BLOCKING: Returns client immediately, refreshes session in background
+   * NON-BLOCKING: Returns client immediately, refreshes session in background ONLY when needed
    */
   private async getClient(): Promise<any> {
     this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise} corrupted=${this.clientCorrupted}`);
@@ -897,31 +987,70 @@ class SupabasePipeline {
       return this.client!;
     }
 
-    // NON-BLOCKING session refresh: Start in background, don't wait for it
-    // This prevents 10-second delays when session needs refreshing after idle
-    // Only runs after app has been stable for 60+ seconds
-    try {
+    // ✅ MANUAL TOKEN REFRESH (since autoRefreshToken is disabled)
+    // Check token expiration and refresh if needed
+    if (this.sessionState.cached?.session?.expires_at) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = this.sessionState.cached.session.expires_at;
+      const timeUntilExpiry = expiresAt - nowSec;
+      
+      if (timeUntilExpiry > 300) {
+        // Token is valid for more than 5 minutes, no refresh needed
+        this.log(`🔑 getClient() -> token valid for ${timeUntilExpiry}s (${Math.round(timeUntilExpiry / 60)}min), skipping refresh`);
+        return this.client!;
+      } else if (timeUntilExpiry > 0) {
+        // Token expires soon (< 5 minutes), refresh in background
+        this.log(`🔑 getClient() -> token expires in ${timeUntilExpiry}s, triggering manual background refresh`);
+        
+        // Fire-and-forget: Manual refresh with timeout control
+        const now = Date.now();
+        if (now - this.sessionState.lastCorruptionCheck > 30000) {
+          this.sessionState.lastCorruptionCheck = now;
+          this.refreshSessionUnified({ timeout: 5000, background: true }).catch(err => {
+            this.log('🔄 Manual background refresh failed:', err);
+          });
+        }
+      } else {
+        // Token expired, refresh in background
+        this.log(`🔑 getClient() -> token expired ${Math.abs(timeUntilExpiry)}s ago, triggering manual background refresh`);
+        
+        // Fire-and-forget: Manual refresh with timeout control
+        const now = Date.now();
+        if (now - this.sessionState.lastCorruptionCheck > 30000) {
+          this.sessionState.lastCorruptionCheck = now;
+          this.refreshSessionUnified({ timeout: 5000, background: true }).catch(err => {
+            this.log('🔄 Manual background refresh failed:', err);
+          });
+        }
+      }
+    } else {
+      // No cached session info, check if we need to refresh
+      this.log(`🔑 getClient() -> no cached session info, checking if refresh needed`);
       const now = Date.now();
-      if (now - this.sessionState.lastCorruptionCheck > 30000) {
+      if (now - this.sessionState.lastCorruptionCheck > 60000) {
+        // Only refresh if it's been > 60 seconds since last check
         this.sessionState.lastCorruptionCheck = now;
-        this.log('🔄 getClient() -> triggering background session refresh (app stable >60s)');
-        // Fire-and-forget: Start session refresh in background
-        this.refreshSessionInBackground().catch(err => {
-          this.log('🔄 Background session refresh failed:', err);
+        this.log(`🔑 getClient() -> triggering manual refresh (no session cache)`);
+        this.refreshSessionUnified({ timeout: 5000, background: true }).catch(err => {
+          this.log('🔄 Manual background refresh failed:', err);
         });
       }
-    } catch {}
+    }
 
     // Return client immediately without waiting for session refresh
     return this.client!;
   }
 
   /**
-   * Non-blocking session refresh - runs in background
-   * PHASE 3: Now delegates to refreshSessionUnified
+   * Get client without any refresh checks - for read-only operations
+   * This is the fastest path and should be used when you know the token is valid
    */
-  private async refreshSessionInBackground(): Promise<void> {
-    await this.refreshSessionUnified({ timeout: 5000, background: true });
+  private async getClientFast(): Promise<any> {
+    if (!this.client || !this.isInitialized) {
+      this.log('🔑 getClientFast() -> initializing client');
+      await this.initialize();
+    }
+    return this.client!;
   }
 
 
@@ -1173,15 +1302,93 @@ class SupabasePipeline {
    * Verify OTP
    */
   public async verifyOtp(phone: string, token: string): Promise<AuthOperationResult> {
-    this.log('🔐 Verifying OTP for phone:', phone.substring(0, 6) + '...');
+    const traceId = `verify-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    this.log(`🔐 [${traceId}] Verifying OTP for phone: ${phone.substring(0, 6)}...`);
 
     try {
       const client = await this.getClient();
-      const result = await client.auth.verifyOtp({ phone, token, type: 'sms' });
-      this.log('🔐 OTP verification result:', result.error ? 'error' : 'success');
+      
+      // Verify we're using the correct client instance
+      this.log(`🔐 [${traceId}] Client instance check:`);
+      this.log(`🔐 [${traceId}]   Client exists: ${!!client}`);
+      this.log(`🔐 [${traceId}]   Client has auth: ${!!client?.auth}`);
+      
+      // Capture pre-verification diagnostics
+      const preDiagnostics = await this.captureAuthDiagnostics(traceId, 'pre-verify');
+      this.log(`🔐 [${traceId}] PRE-VERIFY: supabaseKeyCount=${preDiagnostics.storage.supabaseKeyCount}`);
+      
+      // Call Supabase verifyOtp (NO options that disable persistence)
+      this.log(`🔐 [${traceId}] Calling client.auth.verifyOtp()...`);
+      const result = await client.auth.verifyOtp({ 
+        phone, 
+        token, 
+        type: 'sms'
+        // ✅ NO persistSession: false
+        // ✅ NO options that would disable persistence
+      });
+      
+      this.log(`🔐 [${traceId}] OTP verification result: ${result.error ? 'error' : 'success'}`);
+      
+      if (result.data?.session) {
+        // Validate session structure
+        this.log(`🔐 [${traceId}] ✅ Session returned from verifyOtp`);
+        this.log(`🔐 [${traceId}] Session structure:`);
+        this.log(`🔐 [${traceId}]   has user: ${!!result.data.session.user}`);
+        this.log(`🔐 [${traceId}]   has access_token: ${!!result.data.session.access_token}`);
+        this.log(`🔐 [${traceId}]   has refresh_token: ${!!result.data.session.refresh_token}`);
+        this.log(`🔐 [${traceId}]   expires_at: ${result.data.session.expires_at}`);
+        
+        // CRITICAL: Check if we saw the 🔑🔑🔑 AUTH TOKEN WRITE log
+        this.log(`🔐 [${traceId}] ⏳ Waiting 200ms to see if storage.setItem() is called...`);
+        this.log(`🔐 [${traceId}] 👀 WATCH FOR: "🔑🔑🔑 AUTH TOKEN WRITE" in logs above or below`);
+        
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Capture post-verification diagnostics
+        const postDiagnostics = await this.captureAuthDiagnostics(traceId, 'post-verify-delayed');
+        this.log(`🔐 [${traceId}] POST-VERIFY-DELAYED: supabaseKeyCount=${postDiagnostics.storage.supabaseKeyCount}`);
+        
+        if (postDiagnostics.storage.supabaseKeyCount === 0) {
+          this.log(`🔐 [${traceId}] ❌ CRITICAL: supabaseKeyCount is still 0 after 200ms!`);
+          this.log(`🔐 [${traceId}] ❌ Did you see "🔑🔑🔑 AUTH TOKEN WRITE" in logs above?`);
+          this.log(`🔐 [${traceId}] ❌ If NO: Supabase is not calling storage.setItem() at all`);
+          this.log(`🔐 [${traceId}] ❌ If YES: This is a timing issue (setItem called but too late)`);
+          
+          // Attempt manual persistence to test if it works
+          this.log(`🔐 [${traceId}] 🔧 Testing manual persistence via setSession()...`);
+          try {
+            await client.auth.setSession({
+              access_token: result.data.session.access_token,
+              refresh_token: result.data.session.refresh_token
+            });
+            
+            this.log(`🔐 [${traceId}] ⏳ Waiting 100ms after manual setSession()...`);
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            const manualDiagnostics = await this.captureAuthDiagnostics(traceId, 'post-manual-setSession');
+            this.log(`🔐 [${traceId}] POST-MANUAL: supabaseKeyCount=${manualDiagnostics.storage.supabaseKeyCount}`);
+            
+            if (manualDiagnostics.storage.supabaseKeyCount > 0) {
+              this.log(`🔐 [${traceId}] ✅ Manual setSession() worked! This proves:`);
+              this.log(`🔐 [${traceId}] ✅   - Storage adapter is connected correctly`);
+              this.log(`🔐 [${traceId}] ✅   - persistSession works when explicitly called`);
+              this.log(`🔐 [${traceId}] ❌   - verifyOtp() does NOT trigger automatic persistence`);
+            } else {
+              this.log(`🔐 [${traceId}] ❌ Manual setSession() also failed!`);
+              this.log(`🔐 [${traceId}] ❌ This suggests a deeper issue with storage or config`);
+            }
+          } catch (manualError) {
+            this.log(`🔐 [${traceId}] ❌ Manual setSession() threw error:`, stringifyError(manualError));
+          }
+        } else {
+          this.log(`🔐 [${traceId}] ✅ SUCCESS! supabaseKeyCount=${postDiagnostics.storage.supabaseKeyCount}`);
+          this.log(`🔐 [${traceId}] ✅ Automatic persistence is working correctly`);
+        }
+      }
+      
       return result;
     } catch (error) {
-      this.log('🔐 OTP verification failed:', error);
+      this.log(`🔐 [${traceId}] OTP verification failed:`, error);
       return { error };
     }
   }
@@ -1570,7 +1777,7 @@ class SupabasePipeline {
    */
   public async fetchGroups(): Promise<{ data: any[] | null; error: any }> {
     return this.executeQuery(async () => {
-      const client = await this.getClient();
+      const client = await this.getClientFast();
       return client
         .from('groups')
         .select(`
@@ -1722,7 +1929,7 @@ class SupabasePipeline {
    */
   public async fetchMessages(groupId: string, limit: number = 50): Promise<{ data: any[] | null; error: any }> {
     return this.executeQuery(async () => {
-      const client = await this.getClient();
+      const client = await this.getClientFast();
       return client
         .from('messages')
         .select(`
@@ -1776,9 +1983,10 @@ class SupabasePipeline {
    * Fetch group members
    */
   public async fetchGroupMembers(groupId: string): Promise<{ data: any[] | null; error: any }> {
-    // ✅ FIX #1: Increase timeout from 5s to 15s for first-time init scenarios
+    // ✅ FIX: Use getClientFast() to skip unnecessary session refresh checks
+    // Group members is a read-only operation that doesn't need fresh token validation
     return this.executeQuery(async () => {
-      const client = await this.getClient();
+      const client = await this.getClientFast();
       return client
         .from('group_members')
         .select(`

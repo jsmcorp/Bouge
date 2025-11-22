@@ -67,15 +67,19 @@ class UnreadTrackerService {
    */
   public async getAllUnreadCounts(): Promise<Map<string, number>> {
     try {
-      const client = await supabasePipeline.getDirectClient();
-      const { data: { user } } = await client.auth.getUser();
+      // Get current user from cached session (no auth calls that can hang)
+      const session = await supabasePipeline.getCachedSession();
       
-      if (!user) {
+      if (!session?.user) {
         console.log('[unread] No user, returning empty counts');
         return new Map();
       }
+      const userId = session.user.id;
 
-      console.log('[unread] Fetching counts from Supabase for user:', user.id);
+      console.log('[unread] Fetching counts from Supabase for user:', userId);
+      
+      // Get client for queries
+      const client = await supabasePipeline.getDirectClient();
 
       // Note: get_all_unread_counts now uses auth.uid() internally, no params needed
       const { data, error } = await client.rpc('get_all_unread_counts');
