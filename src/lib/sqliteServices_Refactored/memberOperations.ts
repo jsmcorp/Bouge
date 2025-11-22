@@ -119,6 +119,32 @@ export class MemberOperations {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
 
+    // ✅ FIX: Check if BOTH parent rows exist to prevent FK constraint errors
+    // group_members has TWO foreign keys: group_id → groups(id) AND user_id → users(id)
+    
+    // Check #1: Group exists
+    const groupCheck = await db.query(
+      `SELECT id FROM groups WHERE id = ?`,
+      [groupId]
+    );
+    
+    if (!groupCheck.values || groupCheck.values.length === 0) {
+      console.warn(`[sqlite] ⚠️ Group ${groupId.slice(0, 8)} not in SQLite yet, skipping sync from Supabase (will retry later)`);
+      return; // Skip - group not saved yet
+    }
+
+    // Check #2: User exists (CRITICAL - this is usually the missing one!)
+    const userCheck = await db.query(
+      `SELECT id FROM users WHERE id = ?`,
+      [userId]
+    );
+    
+    if (!userCheck.values || userCheck.values.length === 0) {
+      console.warn(`[sqlite] ⚠️ User ${userId.slice(0, 8)} not in SQLite yet, skipping sync from Supabase (will retry later)`);
+      console.warn(`[sqlite] 💡 TIP: Current user should be saved during first-time init Step 0`);
+      return; // Skip - user not saved yet, prevents FK constraint error
+    }
+
     // First check if row exists
     const checkSql = `SELECT role, joined_at FROM group_members WHERE group_id = ? AND user_id = ?`;
     const existing = await db.query(checkSql, [groupId, userId]);
@@ -160,6 +186,32 @@ export class MemberOperations {
   ): Promise<void> {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
+
+    // ✅ FIX: Check if BOTH parent rows exist to prevent FK constraint errors
+    // group_members has TWO foreign keys: group_id → groups(id) AND user_id → users(id)
+    
+    // Check #1: Group exists
+    const groupCheck = await db.query(
+      `SELECT id FROM groups WHERE id = ?`,
+      [groupId]
+    );
+    
+    if (!groupCheck.values || groupCheck.values.length === 0) {
+      console.warn(`[sqlite] ⚠️ Group ${groupId.slice(0, 8)} not in SQLite yet, skipping group_members creation (will retry later)`);
+      return; // Skip - group not saved yet
+    }
+
+    // Check #2: User exists (CRITICAL - this is usually the missing one!)
+    const userCheck = await db.query(
+      `SELECT id FROM users WHERE id = ?`,
+      [userId]
+    );
+    
+    if (!userCheck.values || userCheck.values.length === 0) {
+      console.warn(`[sqlite] ⚠️ User ${userId.slice(0, 8)} not in SQLite yet, skipping group_members creation (will retry later)`);
+      console.warn(`[sqlite] 💡 TIP: Current user should be saved during first-time init Step 0`);
+      return; // Skip - user not saved yet, prevents FK constraint error
+    }
 
     // First check if row exists
     const checkSql = `SELECT role, joined_at FROM group_members WHERE group_id = ? AND user_id = ?`;

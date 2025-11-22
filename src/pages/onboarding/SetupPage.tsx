@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Check, Loader2, Users, Shield } from 'lucide-react';
 import { useContactsStore } from '../../store/contactsStore';
 import { useAuthStore } from '../../store/authStore';
+import { firstTimeInitOrchestrator } from '../../lib/firstTimeInitOrchestrator';
 
 
 
@@ -18,9 +19,10 @@ interface SetupStep {
 
 export const SetupPage: React.FC = () => {
   const navigate = useNavigate();
-  const { requestPermission, syncContacts, discoverInBackgroundV3, syncProgress } = useContactsStore();
+  const { requestPermission } = useContactsStore();
   const { user, isInitialized: authInitialized } = useAuthStore();
   const [setupComplete, setSetupComplete] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ message: string; current: number; total: number } | null>(null);
   const [steps, setSteps] = useState<SetupStep[]>([
     {
       id: 'contacts',
@@ -36,40 +38,30 @@ export const SetupPage: React.FC = () => {
       status: 'pending'
     },
     {
-      id: 'sync',
-      title: 'Sync Your Contacts',
-      description: 'Finding your friends on Bouge',
+      id: 'init',
+      title: 'Setting Up Your Account',
+      description: 'Loading your groups and messages',
       icon: <Loader2 className="w-8 h-8 animate-spin" />,
       action: async () => {
-        console.log('📇 [SETUP] Starting contact sync and discovery...');
-
-        try {
-          // STEP 1: Fetch contacts from device and save to SQLite (batched transaction)
-          console.log('📇 [SETUP] Fetching contacts from device...');
-          await syncContacts();
-
-          // Get contact count for validation
-          const { contacts } = useContactsStore.getState();
-          if (contacts.length === 0) {
-            console.warn('⚠️ [SETUP] No contacts found on device');
-            console.warn('⚠️ [SETUP] User may not have any contacts or permission was revoked');
-            // Continue anyway - user might genuinely have no contacts
-          } else {
-            console.log(`✅ [SETUP] Synced ${contacts.length} contacts from device to local SQLite`);
+        console.log('🚀 [SETUP] Starting first-time initialization...');
+        
+        const { user } = useAuthStore.getState();
+        if (!user) throw new Error('Not authenticated');
+        
+        // ✅ ORCHESTRATE first-time init using ONLY existing commands
+        await firstTimeInitOrchestrator.performFullInit(
+          user.id,
+          (progress) => {
+            // Update progress UI
+            setSyncProgress({
+              message: progress.step,
+              current: progress.current,
+              total: progress.total
+            });
           }
-
-          // STEP 2: Discover registered users from synced contacts (V3 with exponential backoff)
-          console.log('📇 [SETUP] Discovering registered users...');
-          await discoverInBackgroundV3();
-
-          // Get registered user count for validation
-          const { registeredUsers } = useContactsStore.getState();
-          console.log(`✅ [SETUP] Found ${registeredUsers.length} registered users`);
-
-        } catch (error) {
-          console.error('❌ [SETUP] Contact sync/discovery failed:', error);
-          // Don't throw - allow user to continue even if sync fails
-        }
+        );
+        
+        console.log('✅ [SETUP] First-time initialization complete!');
       },
       status: 'pending'
     },
@@ -79,9 +71,8 @@ export const SetupPage: React.FC = () => {
       description: 'Your account is ready to use',
       icon: <Check className="w-8 h-8" />,
       action: async () => {
-        // Mark setup as complete in preferences
-        localStorage.setItem('setup_complete', 'true');
-        localStorage.setItem('setup_completed_at', Date.now().toString());
+        // Already marked complete by orchestrator
+        console.log('🎉 [SETUP] Setup complete!');
       },
       status: 'pending'
     }
@@ -148,8 +139,8 @@ export const SetupPage: React.FC = () => {
 
         // For contacts permission error, allow user to continue to dashboard
         // They can sync contacts later from settings
-        if (steps[i].id === 'contacts' || steps[i].id === 'sync') {
-          console.log('⚠️ [SETUP] Contacts/sync failed, but allowing user to continue');
+        if (steps[i].id === 'contacts' || steps[i].id === 'init') {
+          console.log('⚠️ [SETUP] Contacts/init failed, but allowing user to continue');
           // Mark setup as complete anyway
           localStorage.setItem('setup_complete', 'true');
           localStorage.setItem('setup_completed_at', Date.now().toString());
@@ -233,8 +224,8 @@ export const SetupPage: React.FC = () => {
                     {step.description}
                   </p>
 
-                  {/* Progress bar for sync step */}
-                  {step.id === 'sync' && step.status === 'in_progress' && syncProgress && (
+                  {/* Progress bar for init step */}
+                  {step.id === 'init' && step.status === 'in_progress' && syncProgress && (
                     <div className="mt-3 space-y-2">
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-muted-foreground">

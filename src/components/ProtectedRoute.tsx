@@ -1,6 +1,9 @@
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
 import { LoadingScreen } from '@/components/LoadingScreen';
+import { useEffect, useState } from 'react';
+import { needsFirstTimeInit } from '@/lib/initializationDetector';
+import { Capacitor } from '@capacitor/core';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -10,9 +13,50 @@ interface ProtectedRouteProps {
 export function ProtectedRoute({ children, requireOnboarding = true }: ProtectedRouteProps) {
   const { user, isLoading, isInitialized } = useAuthStore();
   const location = useLocation();
+  const [checkingInit, setCheckingInit] = useState(false);
+  const [needsInit, setNeedsInit] = useState(false);
+
+  // ✅ INTEGRATION POINT 2: Check if first-time init is needed
+  // This acts as a secondary safety net for protected routes
+  useEffect(() => {
+    const checkInit = async () => {
+      // Only check on native platforms and when user is authenticated
+      if (!Capacitor.isNativePlatform() || !user || !isInitialized) {
+        return;
+      }
+
+      // Skip check if we're already on the setup page
+      if (location.pathname === '/setup') {
+        return;
+      }
+
+      // Check if first-time init is needed
+      setCheckingInit(true);
+      try {
+        const initNeeded = await needsFirstTimeInit();
+        setNeedsInit(initNeeded);
+        
+        if (initNeeded) {
+          console.log('🔄 [PROTECTED-ROUTE] First-time initialization needed, will redirect to /setup');
+          sessionStorage.setItem('needs_first_time_init', 'true');
+        } else {
+          sessionStorage.removeItem('needs_first_time_init');
+        }
+      } catch (error) {
+        console.error('❌ [PROTECTED-ROUTE] Error checking first-time init:', error);
+        // Safe default: assume init is needed
+        setNeedsInit(true);
+        sessionStorage.setItem('needs_first_time_init', 'true');
+      } finally {
+        setCheckingInit(false);
+      }
+    };
+
+    checkInit();
+  }, [user, isInitialized, location.pathname]);
 
   // Show loading while auth is initializing or still loading
-  if (!isInitialized || isLoading) {
+  if (!isInitialized || isLoading || checkingInit) {
     if (import.meta.env.DEV) console.log('⏳ ProtectedRoute: Auth still loading/initializing');
     return <LoadingScreen />;
   }
@@ -21,6 +65,13 @@ export function ProtectedRoute({ children, requireOnboarding = true }: Protected
   if (!user) {
     if (import.meta.env.DEV) console.log('🔐 ProtectedRoute: No user, redirecting to login from:', location.pathname);
     return <Navigate to="/auth/login" state={{ from: location }} replace />;
+  }
+
+  // ✅ INTEGRATION POINT 2B: Redirect to setup if first-time init is needed
+  // This prevents users from accessing protected routes before setup is complete
+  if (needsInit && location.pathname !== '/setup' && user.is_onboarded) {
+    if (import.meta.env.DEV) console.log('🔄 [PROTECTED-ROUTE] Redirecting to /setup for first-time initialization');
+    return <Navigate to="/setup" replace />;
   }
 
   // User exists - check onboarding requirements

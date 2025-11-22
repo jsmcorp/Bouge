@@ -356,6 +356,20 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     } catch (e) {
       console.warn('Failed to reset outbox state on app pause:', e);
     }
+
+    // CRITICAL: Schedule heartbeat stop after 10s of device lock
+    // This saves battery and reduces concurrent connections
+    setTimeout(() => {
+      console.log('[lifecycle] 10s since pause - stopping heartbeat to save resources');
+      try {
+        const state = get() as any;
+        if (typeof state.stopHeartbeatForLock === 'function') {
+          state.stopHeartbeatForLock();
+        }
+      } catch (e) {
+        console.warn('Failed to stop heartbeat on lock:', e);
+      }
+    }, 10000); // 10 seconds
   },
 
   // App background handler - similar to pause but may have different lifecycle timing
@@ -370,6 +384,25 @@ export const createStateActions = (set: any, get: any): StateActions => ({
     } catch (e) {
       console.warn('Failed to reset outbox state on app background:', e);
     }
+
+    // CRITICAL: Schedule realtime cleanup after 30s in background
+    // This saves concurrent connections and resources
+    setTimeout(() => {
+      console.log('[lifecycle] 30s in background - stopping heartbeat and cleaning up realtime');
+      try {
+        const state = get() as any;
+        // Stop heartbeat first
+        if (typeof state.stopHeartbeatForBackground === 'function') {
+          state.stopHeartbeatForBackground();
+        }
+        // Then cleanup realtime connection
+        if (typeof state.cleanupRealtimeForBackground === 'function') {
+          state.cleanupRealtimeForBackground();
+        }
+      } catch (e) {
+        console.warn('Failed to cleanup realtime on background:', e);
+      }
+    }, 30000); // 30 seconds
   },
 
   onNetworkOnline: () => {

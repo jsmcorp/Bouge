@@ -111,13 +111,20 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       // If we're online, fetch from Supabase
       console.log('🌐 Fetching groups from Supabase...');
 
-      // Use Supabase Auth for all users (including Truecaller)
-      console.log('🔑 Fetching groups with Supabase Auth');
-      const { data: { user } } = await supabasePipeline.getUser();
+      // ✅ FIX: Get client ONCE to avoid double initialization
+      // This prevents race conditions and storage lock conflicts
+      console.log('🔑 Getting Supabase client (single initialization)');
+      const client = await supabasePipeline.getDirectClient();
+      if (!client) throw new Error('Failed to get Supabase client');
+
+      // ✅ FIX: Use SAME client to get user (reuses existing session, no storage access)
+      console.log('🔑 Getting user from existing client session');
+      const { data: { user }, error: userError } = await client.auth.getUser();
+      if (userError) throw userError;
       if (!user) throw new Error('Not authenticated');
       const userId = user.id;
 
-      const client = await supabasePipeline.getDirectClient();
+      // Use the SAME client for queries (no additional initialization)
       const { data: memberGroups, error: memberError } = await client
         .from('group_members')
         .select('group_id')

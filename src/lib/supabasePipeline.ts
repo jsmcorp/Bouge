@@ -99,6 +99,9 @@ class SupabasePipeline {
     lastCorruptionCheck: 0,                     // Throttle corruption checks
   };
 
+  // Track when client was initialized to prevent aggressive refresh on startup
+  private initTimestamp: number = 0;
+
   // PHASE 2: CONSOLIDATED OUTBOX STATE - All outbox-related state in one object
   private outboxState = {
     isProcessing: false,                        // Processing lock
@@ -835,6 +838,7 @@ class SupabasePipeline {
       }
 
       this.isInitialized = true;
+      this.initTimestamp = Date.now(); // ✅ Track initialization time
       this.log('✅ Supabase client initialized successfully (PERMANENT INSTANCE)');
     })().finally(() => { this.initializePromise = null; });
 
@@ -876,14 +880,31 @@ class SupabasePipeline {
     // The hang is a Supabase internal issue, not actual client corruption
     // See LOG41_ANALYSIS.md for details
     
-    if (!this.client || !this.isInitialized) { this.log('🔑 getClient() -> calling initialize()'); await this.initialize(); }
+    if (!this.client || !this.isInitialized) {
+      this.log('🔑 getClient() -> calling initialize()');
+      await this.initialize();
+      // ✅ FIX: Return immediately after init, let autoRefreshToken handle first refresh
+      // This prevents double-refresh conflict during startup
+      this.log('✅ getClient() -> returning fresh client (autoRefreshToken will handle session)');
+      return this.client!;
+    }
+
+    // ✅ FIX: Skip aggressive background refresh during first 60 seconds after init
+    // This prevents conflict with Supabase's autoRefreshToken during startup
+    const timeSinceInit = Date.now() - this.initTimestamp;
+    if (timeSinceInit < 60000) {
+      this.log(`🔑 getClient() -> within 60s of init (${Math.round(timeSinceInit / 1000)}s), trusting autoRefreshToken`);
+      return this.client!;
+    }
 
     // NON-BLOCKING session refresh: Start in background, don't wait for it
     // This prevents 10-second delays when session needs refreshing after idle
+    // Only runs after app has been stable for 60+ seconds
     try {
       const now = Date.now();
       if (now - this.sessionState.lastCorruptionCheck > 30000) {
         this.sessionState.lastCorruptionCheck = now;
+        this.log('🔄 getClient() -> triggering background session refresh (app stable >60s)');
         // Fire-and-forget: Start session refresh in background
         this.refreshSessionInBackground().catch(err => {
           this.log('🔄 Background session refresh failed:', err);
@@ -1755,6 +1776,7 @@ class SupabasePipeline {
    * Fetch group members
    */
   public async fetchGroupMembers(groupId: string): Promise<{ data: any[] | null; error: any }> {
+    // ✅ FIX #1: Increase timeout from 5s to 15s for first-time init scenarios
     return this.executeQuery(async () => {
       const client = await this.getClient();
       return client
@@ -1764,7 +1786,7 @@ class SupabasePipeline {
           users!group_members_user_id_fkey(*)
         `)
         .eq('group_id', groupId);
-    }, 'fetch group members');
+    }, 'fetch group members', 15000);
   }
 
   /**
@@ -3045,6 +3067,13 @@ class SupabasePipeline {
    */
   public async onAppResume(): Promise<void> {
     this.log('📱 App resume detected - checking session state');
+
+    // ✅ FIX #5: Skip if we just initialized (within 60s)
+    const timeSinceInit = Date.now() - this.initTimestamp;
+    if (timeSinceInit < 60000) {
+      this.log('⏭️ App resume: skipping (within 60s of init, let init complete first)');
+      return;
+    }
 
     // Reset circuit breaker on app resume to allow fresh attempts
     if (this.circuitBreakerOpen || this.failureCount > 0) {

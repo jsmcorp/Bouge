@@ -5,6 +5,7 @@ import { useChatStore } from '@/store/chatStore';
 import { useContactsStore } from '@/store/contactsStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 import { sqliteService } from '@/lib/sqliteService';
+import { needsFirstTimeInit } from '@/lib/initializationDetector';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 
@@ -35,6 +36,9 @@ import ContactSelectionPage from '@/pages/ContactSelectionPage';
 // Components
 import { LoadingScreen } from '@/components/LoadingScreen';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
+
+// Track if setup redirect is pending to prevent loops
+let setupRedirectPending = false;
 
 // AppContent component with access to routing hooks
 function AppContent() {
@@ -139,6 +143,24 @@ function AppContent() {
           try {
             await sqliteService.initialize();
             console.log('✅ SQLite initialized successfully');
+            
+            // ✅ INTEGRATION POINT 1: Check if first-time init is needed
+            // This runs after SQLite is ready and before the app renders
+            try {
+              const needsInit = await needsFirstTimeInit();
+              if (needsInit) {
+                console.log('🔄 [APP] First-time initialization needed, will redirect to /setup');
+                // Store flag to trigger redirect after auth completes
+                sessionStorage.setItem('needs_first_time_init', 'true');
+              } else {
+                console.log('✅ [APP] First-time initialization not needed');
+                sessionStorage.removeItem('needs_first_time_init');
+              }
+            } catch (error) {
+              console.error('❌ [APP] Error checking first-time init status:', error);
+              // Safe default: assume init is needed
+              sessionStorage.setItem('needs_first_time_init', 'true');
+            }
             
             // Clean up old tombstones (48+ hours old)
             try {
@@ -436,9 +458,16 @@ function AppContent() {
                 to={
                   !user
                     ? "/welcome"
-                    : user.is_onboarded
-                      ? "/dashboard"
-                      : "/onboarding/name"
+                    : (() => {
+                        // ✅ INTEGRATION POINT 1B: Check if first-time init is needed
+                        const needsInit = sessionStorage.getItem('needs_first_time_init') === 'true';
+                        if (needsInit && user.is_onboarded && !setupRedirectPending) {
+                          console.log('🔄 [APP] Redirecting to /setup for first-time initialization');
+                          setupRedirectPending = true; // ✅ Prevent redirect loop
+                          return "/setup";
+                        }
+                        return user.is_onboarded ? "/dashboard" : "/onboarding/name";
+                      })()
                 }
                 replace
               />

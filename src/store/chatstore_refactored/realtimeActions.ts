@@ -47,6 +47,10 @@ export interface RealtimeActions {
   // New simplified methods
   forceReconnect: (groupId: string) => void;
   setupAuthListener: () => () => void; // Returns cleanup function
+  // Lifecycle methods for battery/connection optimization
+  stopHeartbeatForLock: () => void;
+  stopHeartbeatForBackground: () => void;
+  cleanupRealtimeForBackground: () => void;
 }
 
 export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
@@ -1214,6 +1218,12 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             updateLastEventTime(); // CRITICAL FIX (LOG46 Phase 3): Update heartbeat timestamp
             get().handlePresenceSync();
           })
+          // CRITICAL FIX: Listen for heartbeat responses to prevent false death detection
+          .on('broadcast', { event: 'heartbeat' }, () => {
+            if (localToken !== connectionToken) return;
+            log('💓 Heartbeat pong received');
+            updateLastEventTime(); // Update timestamp to prevent false "realtime appears DEAD" detection
+          })
           .subscribe(async (status: any) => {
             if (localToken !== connectionToken) {
               log(`Ignoring stale subscription callback: ${status}`);
@@ -1671,6 +1681,44 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           authStateListener = null;
         }
       };
+    },
+
+    // CRITICAL: Stop heartbeat after device lock (10s) to save battery
+    stopHeartbeatForLock: () => {
+      log('🔒 Device locked - stopping heartbeat to save battery');
+      stopHeartbeat();
+    },
+
+    // CRITICAL: Stop heartbeat after background (30s) to save resources
+    stopHeartbeatForBackground: () => {
+      log('📱 App backgrounded - stopping heartbeat to save resources');
+      stopHeartbeat();
+    },
+
+    // CRITICAL: Cleanup realtime connection after background (30s) to save concurrent connections
+    cleanupRealtimeForBackground: () => {
+      log('📱 App backgrounded for 30s - cleaning up realtime connection');
+      const { realtimeChannel } = get();
+      
+      if (realtimeChannel) {
+        try {
+          // Mark that we're intentionally disconnecting for background
+          set({ connectionStatus: 'disconnected' });
+          
+          // Remove the channel
+          supabasePipeline.getDirectClient().then(client => {
+            client.removeChannel(realtimeChannel);
+            log('✅ Realtime connection cleaned up for background');
+          }).catch(e => {
+            log(`⚠️ Error removing channel for background: ${e}`);
+          });
+          
+          // Clear the channel reference
+          set({ realtimeChannel: null });
+        } catch (e) {
+          log(`⚠️ Error cleaning up realtime for background: ${e}`);
+        }
+      }
     },
   };
 };
