@@ -178,6 +178,18 @@ export function ChatArea() {
                 if (isReady) {
                   await sqliteService.markMessagesAsViewed(messageIdsToMarkViewed);
                   console.log(`[viewed] ✅ Marked ${messageIdsToMarkViewed.length} messages as viewed in SQLite`);
+                  
+                  // ✅ FIX: Also update read status to Supabase
+                  // Find the last message that was marked as viewed
+                  const lastViewedMessage = currentMessages.find((m: any) => m.id === messageIdsToMarkViewed[messageIdsToMarkViewed.length - 1]);
+                  if (lastViewedMessage && activeGroup?.id) {
+                    const messageTimestamp = new Date(lastViewedMessage.created_at).getTime();
+                    console.log(`[viewed] 🔄 Updating read status to: ${lastViewedMessage.id.slice(0, 8)}`);
+                    
+                    // Import and call unreadTracker to sync to Supabase
+                    const { unreadTracker } = await import('@/lib/unreadTracker');
+                    await unreadTracker.markGroupAsRead(activeGroup.id, lastViewedMessage.id, messageTimestamp);
+                  }
                 }
               }
             } catch (error) {

@@ -5,6 +5,7 @@ import { Capacitor } from '@capacitor/core';
 import { Network } from '@capacitor/network';
 import { Group, Message } from './types';
 import { structureMessagesWithReplies } from './utils';
+import { sqliteMonitoring } from '@/lib/sqliteMonitoring';
 
 
 // Throttle duplicate fetches for the same group within a short window
@@ -148,23 +149,34 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       if (groupsError) throw groupsError;
       const groups = groupsData;
 
-      // If SQLite is available, sync groups to local storage first
+      // ✅ FIX: Await ALL SQLite saves before returning (prevents race conditions)
+      // This guarantees parent rows exist before child operations create group_members rows
       if (isSqliteReady) {
         try {
-          for (const group of groups || []) {
-            await sqliteService.saveGroup({
-              id: group.id,
-              name: group.name,
-              description: group.description || null,
-              invite_code: group.invite_code || 'offline',
-              created_by: group.created_by || '',
-              created_at: new Date(group.created_at).getTime(),
-              last_sync_timestamp: Date.now(),
-              avatar_url: group.avatar_url || null,
-              is_archived: 0
-            });
-          }
-          console.log(`🔄 Synced ${groups?.length || 0} groups to local storage`);
+          const saveStartTime = Date.now();
+          
+          // ✅ Use Promise.all to wait for ALL saves to complete in parallel
+          await Promise.all(
+            (groups || []).map((group: any) => 
+              sqliteService.saveGroup({
+                id: group.id,
+                name: group.name,
+                description: group.description || null,
+                invite_code: group.invite_code || 'offline',
+                created_by: group.created_by || '',
+                created_at: new Date(group.created_at).getTime(),
+                last_sync_timestamp: Date.now(),
+                avatar_url: group.avatar_url || null,
+                is_archived: 0
+              })
+            )
+          );
+          
+          const saveTime = Date.now() - saveStartTime;
+          console.log(`✅ Saved ${groups?.length || 0} groups to SQLite (waited ${saveTime}ms)`);
+          
+          // Track performance
+          sqliteMonitoring.trackGroupSave(groups?.length || 0, saveTime);
 
           // Always refresh the UI with the updated data from local storage
           const updatedLocalGroups = await sqliteService.getGroups();
@@ -251,8 +263,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           if (session?.user) {
             const hasLocalMember = await sqliteService.getLocalLastReadAt(groupId, session.user.id);
             
+            console.log(`[unread] 🔍 Checking for existing group_members row: group=${groupId.slice(0, 8)}, user=${session.user.id.slice(0, 8)}`);
+            console.log(`[unread] 🔍 Result: ${hasLocalMember === null ? 'NOT FOUND (will create)' : `FOUND (last_read_at=${hasLocalMember})`}`);
+            
             if (hasLocalMember === null) {
               console.log('[unread] 📥 FIRST TIME: No local group_members row, creating locally...');
+              
+              // Track "FIRST TIME" occurrence
+              sqliteMonitoring.trackFirstTimeLog(groupId, session.user.id);
               
               // Create local group_members row with initial state (never read = 0)
               // This allows separator calculation to work immediately

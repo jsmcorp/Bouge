@@ -1,5 +1,6 @@
 import { DatabaseManager } from './database';
 import { LocalGroupMember, LocalUserPseudonym } from './types';
+import { sqliteMonitoring } from '../sqliteMonitoring';
 
 export class MemberOperations {
   constructor(private dbManager: DatabaseManager) {}
@@ -122,41 +123,65 @@ export class MemberOperations {
     // ✅ FIX: Check if BOTH parent rows exist to prevent FK constraint errors
     // group_members has TWO foreign keys: group_id → groups(id) AND user_id → users(id)
     
-    // Check #1: Group exists
-    const groupCheck = await db.query(
-      `SELECT id FROM groups WHERE id = ?`,
-      [groupId]
-    );
+    // Optimized: Single query to check both parent rows
+    const parentCheck = await db.query(`
+      SELECT 
+        (SELECT COUNT(*) FROM groups WHERE id = ?) as group_exists,
+        (SELECT COUNT(*) FROM users WHERE id = ?) as user_exists
+    `, [groupId, userId]);
     
-    if (!groupCheck.values || groupCheck.values.length === 0) {
+    const groupExists = parentCheck.values?.[0]?.group_exists > 0;
+    const userExists = parentCheck.values?.[0]?.user_exists > 0;
+    
+    if (!groupExists) {
       console.warn(`[sqlite] ⚠️ Group ${groupId.slice(0, 8)} not in SQLite yet, skipping sync from Supabase (will retry later)`);
+      // Track as potential FK error (prevented)
+      sqliteMonitoring.trackFKError({
+        operation: 'syncReadStatusFromSupabase',
+        groupId,
+        userId,
+        errorCode: 787 // FK constraint error code (prevented)
+      });
       return; // Skip - group not saved yet
     }
-
-    // Check #2: User exists (CRITICAL - this is usually the missing one!)
-    const userCheck = await db.query(
-      `SELECT id FROM users WHERE id = ?`,
-      [userId]
-    );
     
-    if (!userCheck.values || userCheck.values.length === 0) {
+    if (!userExists) {
       console.warn(`[sqlite] ⚠️ User ${userId.slice(0, 8)} not in SQLite yet, skipping sync from Supabase (will retry later)`);
       console.warn(`[sqlite] 💡 TIP: Current user should be saved during first-time init Step 0`);
+      // Track as potential FK error (prevented)
+      sqliteMonitoring.trackFKError({
+        operation: 'syncReadStatusFromSupabase',
+        groupId,
+        userId,
+        errorCode: 787 // FK constraint error code (prevented)
+      });
       return; // Skip - user not saved yet, prevents FK constraint error
     }
 
-    // First check if row exists
-    const checkSql = `SELECT role, joined_at FROM group_members WHERE group_id = ? AND user_id = ?`;
+    // ✅ FIX: Check if row exists AND get current timestamp to prevent stale data overwrites
+    const checkSql = `SELECT role, joined_at, last_read_at, last_read_message_id FROM group_members WHERE group_id = ? AND user_id = ?`;
     const existing = await db.query(checkSql, [groupId, userId]);
     
     if (existing.values && existing.values.length > 0) {
-      // Row exists, just update the read status
-      await db.run(
-        `UPDATE group_members 
-         SET last_read_at = ?, last_read_message_id = ?
-         WHERE group_id = ? AND user_id = ?;`,
-        [lastReadAt, lastReadMessageId, groupId, userId]
-      );
+      // Row exists - check if Supabase data is newer than local
+      const localLastReadAt = existing.values[0].last_read_at || 0;
+      const supabaseLastReadAt = lastReadAt || 0;
+      
+      console.log(`[sqlite] 🔍 Timestamp comparison: local=${localLastReadAt}, supabase=${supabaseLastReadAt}`);
+      
+      // ✅ Only update if Supabase data is NEWER than local
+      if (supabaseLastReadAt > localLastReadAt) {
+        await db.run(
+          `UPDATE group_members 
+           SET last_read_at = ?, last_read_message_id = ?
+           WHERE group_id = ? AND user_id = ?;`,
+          [lastReadAt, lastReadMessageId, groupId, userId]
+        );
+        console.log('[sqlite] ✅ Updated existing group_members row from Supabase (newer data)');
+      } else {
+        console.log('[sqlite] ⏭️ Skipping Supabase sync - local data is newer or equal');
+        console.log(`[sqlite] 💡 Local: ${new Date(localLastReadAt).toISOString()}, Supabase: ${new Date(supabaseLastReadAt).toISOString()}`);
+      }
     } else {
       // Row doesn't exist, create it with default values
       await db.run(
@@ -164,7 +189,7 @@ export class MemberOperations {
          VALUES (?, ?, 'participant', ?, ?, ?);`,
         [groupId, userId, Date.now(), lastReadAt, lastReadMessageId]
       );
-      console.log('[sqlite] ℹ️ Created new group_members row during sync from Supabase');
+      console.log('[sqlite] ✅ Created new group_members row during sync from Supabase');
     }
     
     console.log('[sqlite] ✅ Synced read status from Supabase:', {
@@ -190,26 +215,38 @@ export class MemberOperations {
     // ✅ FIX: Check if BOTH parent rows exist to prevent FK constraint errors
     // group_members has TWO foreign keys: group_id → groups(id) AND user_id → users(id)
     
-    // Check #1: Group exists
-    const groupCheck = await db.query(
-      `SELECT id FROM groups WHERE id = ?`,
-      [groupId]
-    );
+    // Optimized: Single query to check both parent rows
+    const parentCheck = await db.query(`
+      SELECT 
+        (SELECT COUNT(*) FROM groups WHERE id = ?) as group_exists,
+        (SELECT COUNT(*) FROM users WHERE id = ?) as user_exists
+    `, [groupId, userId]);
     
-    if (!groupCheck.values || groupCheck.values.length === 0) {
+    const groupExists = parentCheck.values?.[0]?.group_exists > 0;
+    const userExists = parentCheck.values?.[0]?.user_exists > 0;
+    
+    if (!groupExists) {
       console.warn(`[sqlite] ⚠️ Group ${groupId.slice(0, 8)} not in SQLite yet, skipping group_members creation (will retry later)`);
+      // Track as potential FK error (prevented)
+      sqliteMonitoring.trackFKError({
+        operation: 'updateLocalLastReadAt',
+        groupId,
+        userId,
+        errorCode: 787 // FK constraint error code (prevented)
+      });
       return; // Skip - group not saved yet
     }
-
-    // Check #2: User exists (CRITICAL - this is usually the missing one!)
-    const userCheck = await db.query(
-      `SELECT id FROM users WHERE id = ?`,
-      [userId]
-    );
     
-    if (!userCheck.values || userCheck.values.length === 0) {
+    if (!userExists) {
       console.warn(`[sqlite] ⚠️ User ${userId.slice(0, 8)} not in SQLite yet, skipping group_members creation (will retry later)`);
       console.warn(`[sqlite] 💡 TIP: Current user should be saved during first-time init Step 0`);
+      // Track as potential FK error (prevented)
+      sqliteMonitoring.trackFKError({
+        operation: 'updateLocalLastReadAt',
+        groupId,
+        userId,
+        errorCode: 787 // FK constraint error code (prevented)
+      });
       return; // Skip - user not saved yet, prevents FK constraint error
     }
 
@@ -225,6 +262,25 @@ export class MemberOperations {
          WHERE group_id = ? AND user_id = ?;`,
         [lastReadAt, lastReadMessageId, groupId, userId]
       );
+      console.log('[sqlite] ✅ Updated existing group_members row');
+      
+      // VERIFY: Check if update was successful
+      const verify = await db.query(
+        `SELECT last_read_at, last_read_message_id FROM group_members WHERE group_id = ? AND user_id = ?`,
+        [groupId, userId]
+      );
+      
+      if (verify.values && verify.values.length > 0) {
+        const savedReadAt = verify.values[0].last_read_at;
+        const savedMessageId = verify.values[0].last_read_message_id;
+        console.log('[sqlite] ✅ VERIFIED: Update successful:', {
+          last_read_at: savedReadAt,
+          last_read_message_id: savedMessageId,
+          matches: savedReadAt === lastReadAt && savedMessageId === lastReadMessageId
+        });
+      } else {
+        console.error('[sqlite] ❌ VERIFICATION FAILED: Row disappeared after UPDATE!');
+      }
     } else {
       // Row doesn't exist, create it with default values
       await db.run(
@@ -232,7 +288,23 @@ export class MemberOperations {
          VALUES (?, ?, 'participant', ?, ?, ?);`,
         [groupId, userId, Date.now(), lastReadAt, lastReadMessageId]
       );
-      console.log('[sqlite] ℹ️ Created new group_members row for read status');
+      console.log('[sqlite] ✅ Created new group_members row for read status');
+      
+      // VERIFY: Immediately check if row was actually saved
+      const verify = await db.query(
+        `SELECT * FROM group_members WHERE group_id = ? AND user_id = ?`,
+        [groupId, userId]
+      );
+      
+      if (verify.values && verify.values.length > 0) {
+        console.log('[sqlite] ✅ VERIFIED: Row exists in database after INSERT:', {
+          last_read_at: verify.values[0].last_read_at,
+          last_read_message_id: verify.values[0].last_read_message_id
+        });
+      } else {
+        console.error('[sqlite] ❌ VERIFICATION FAILED: Row NOT found after INSERT!');
+        console.error('[sqlite] ❌ This indicates a persistence or transaction issue');
+      }
     }
     
     console.log('[sqlite] ✅ Updated local read status:', {

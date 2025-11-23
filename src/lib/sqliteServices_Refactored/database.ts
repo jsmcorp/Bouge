@@ -1,6 +1,7 @@
 import { CapacitorSQLite, SQLiteConnection, SQLiteDBConnection } from '@capacitor-community/sqlite';
 import { Capacitor } from '@capacitor/core';
 import { initEncryptionSecret } from '../sqliteSecret';
+import { sqliteMonitoring } from '../sqliteMonitoring';
 
 export class DatabaseManager {
   private sqlite: SQLiteConnection;
@@ -46,11 +47,56 @@ export class DatabaseManager {
       this.isInitialized = true;
       console.log('✅ Encrypted SQLite ready');
 
-      // ❌ REMOVED: Test inserts during boot (adds I/O overhead)
-      // Database is verified by schema creation success
+      // ✅ Run health check to verify database state
+      await this.performHealthCheck();
     } catch (err) {
       console.error('💥 SQLite init failed:', err);
       throw err;
+    }
+  }
+
+  private async performHealthCheck(): Promise<void> {
+    try {
+      console.log('🏥 [HEALTH-CHECK] Verifying database integrity...');
+      
+      // Check 1: Verify group_members table exists
+      const tableCheck = await this.db!.query(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='group_members'`
+      );
+      const tableExists = tableCheck.values && tableCheck.values.length > 0;
+      console.log(`🏥 [HEALTH-CHECK] group_members table exists: ${tableExists ? '✅' : '❌'}`);
+      
+      // Check 2: Verify CASCADE foreign keys
+      const fkCheck = await this.db!.query('PRAGMA foreign_key_list(group_members);');
+      const hasCascade = (fkCheck.values || []).some((fk: any) => 
+        fk.on_delete === 'CASCADE'
+      );
+      console.log(`🏥 [HEALTH-CHECK] group_members has CASCADE: ${hasCascade ? '✅' : '❌'}`);
+      
+      if (!hasCascade) {
+        console.warn('⚠️ [HEALTH-CHECK] WARNING: group_members does NOT have CASCADE foreign keys!');
+        console.warn('⚠️ [HEALTH-CHECK] This will cause data loss on every migration run');
+      }
+      
+      // Check 3: Count existing rows
+      const rowCheck = await this.db!.query(
+        `SELECT COUNT(*) as count FROM group_members`
+      );
+      const rowCount = rowCheck.values?.[0]?.count || 0;
+      console.log(`🏥 [HEALTH-CHECK] group_members row count: ${rowCount}`);
+      
+      // Check 4: Verify encryption
+      try {
+        const encryptCheck = await this.db!.query('PRAGMA cipher_version;');
+        const isEncrypted = encryptCheck.values && encryptCheck.values.length > 0;
+        console.log(`🏥 [HEALTH-CHECK] Database encrypted: ${isEncrypted ? '✅' : '⚠️'}`);
+      } catch {
+        console.log('🏥 [HEALTH-CHECK] Database encrypted: ⚠️ (cipher_version not available)');
+      }
+      
+      console.log('🏥 [HEALTH-CHECK] Health check complete');
+    } catch (error) {
+      console.error('❌ [HEALTH-CHECK] Health check failed:', error);
     }
   }
 
@@ -431,29 +477,51 @@ export class DatabaseManager {
   }
 
   private async migrateForeignKeysWithCascade(): Promise<void> {
+    const migrationStartTime = Date.now();
+    
     try {
-      console.log('🔄 Checking if foreign key CASCADE migration is needed...');
+      console.log('🔄 [MIGRATION] Checking if foreign key CASCADE migration is needed...');
 
       // CRITICAL FIX: Check group_members table specifically (not just reactions)
       // This prevents re-running the migration and losing last_read_message_id data
       const gmFkCheck = await this.db!.query('PRAGMA foreign_key_list(group_members);');
+      console.log('🔍 [MIGRATION] group_members FK check result:', {
+        rowCount: gmFkCheck.values?.length || 0,
+        foreignKeys: gmFkCheck.values
+      });
+      
       const gmHasCascade = (gmFkCheck.values || []).some((fk: any) => 
         fk.on_delete === 'CASCADE'
       );
 
+      console.log(`🔍 [MIGRATION] group_members has CASCADE? ${gmHasCascade}`);
+
       if (gmHasCascade) {
-        console.log('✅ group_members already has CASCADE, skipping migration');
+        console.log('✅ [MIGRATION] group_members already has CASCADE, skipping migration');
+        const duration = Date.now() - migrationStartTime;
+        sqliteMonitoring.trackMigration('skipped', duration);
         return;
       }
+      
+      console.log('⚠️ [MIGRATION] group_members does NOT have CASCADE, will run migration');
 
       // Also check reactions table as a secondary check
       const fkCheck = await this.db!.query('PRAGMA foreign_key_list(reactions);');
+      console.log('🔍 [MIGRATION] reactions FK check result:', {
+        rowCount: fkCheck.values?.length || 0,
+        foreignKeys: fkCheck.values
+      });
+      
       const hasCascade = (fkCheck.values || []).some((fk: any) => 
         fk.on_delete === 'CASCADE'
       );
 
+      console.log(`🔍 [MIGRATION] reactions has CASCADE? ${hasCascade}`);
+
       if (hasCascade) {
-        console.log('✅ Foreign keys already have CASCADE, skipping migration');
+        console.log('✅ [MIGRATION] Foreign keys already have CASCADE, skipping migration');
+        const duration = Date.now() - migrationStartTime;
+        sqliteMonitoring.trackMigration('skipped', duration);
         
         // Verify data integrity - check if reactions have valid message_ids
         try {
@@ -475,7 +543,7 @@ export class DatabaseManager {
         return;
       }
 
-      console.log('🔄 Migrating tables to add ON DELETE CASCADE...');
+      console.log('🔄 [MIGRATION] Starting CASCADE migration (this will recreate tables)...');
 
       // Disable foreign keys temporarily
       await this.db!.execute('PRAGMA foreign_keys = OFF;');
@@ -605,13 +673,21 @@ export class DatabaseManager {
       // Re-enable foreign keys
       await this.db!.execute('PRAGMA foreign_keys = ON;');
 
-      console.log('✅ Foreign key CASCADE migration completed');
+      const duration = Date.now() - migrationStartTime;
+      console.log(`✅ [MIGRATION] Foreign key CASCADE migration completed in ${duration}ms`);
+      console.log('✅ [MIGRATION] All tables recreated with CASCADE foreign keys');
+      sqliteMonitoring.trackMigration('success', duration);
     } catch (error) {
-      console.error('❌ Foreign key CASCADE migration failed:', error);
+      const duration = Date.now() - migrationStartTime;
+      console.error('❌ [MIGRATION] Foreign key CASCADE migration failed:', error);
+      sqliteMonitoring.trackMigration('failed', duration);
+      
       // Re-enable foreign keys even on error
       try {
         await this.db!.execute('PRAGMA foreign_keys = ON;');
       } catch {}
+      
+      // Don't throw - allow app to continue with degraded functionality
     }
   }
 
