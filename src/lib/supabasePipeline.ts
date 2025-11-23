@@ -370,6 +370,28 @@ class SupabasePipeline {
 
     this.log(`🔄 [${callId}] refreshSessionUnified(${mode}, timeout=${timeout}ms) 🚀 START (taking lock)`);
 
+    // ✅ SHORT-CIRCUIT: If we have a valid cached session, skip ALL refresh logic
+    if (this.sessionState.cached?.session) {
+      const session = this.sessionState.cached.session;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = session.expires_at || 0;
+      const timeUntilExpiry = expiresAt - nowSec;
+      
+      // If session valid for 5+ minutes, no refresh needed
+      if (timeUntilExpiry > 300) {
+        const took = Date.now() - started;
+        this.log(`🚀 [${callId}] Token valid for ${timeUntilExpiry}s (${Math.floor(timeUntilExpiry/60)}min), skipping ALL refresh logic`);
+        this.log(`🔄 [${callId}] ✅ SHORT-CIRCUIT SUCCESS in ${took}ms (no network calls)`);
+        return true;
+      } else if (timeUntilExpiry > 0) {
+        this.log(`⏰ [${callId}] Token expires soon (${timeUntilExpiry}s), proceeding with refresh`);
+      } else {
+        this.log(`⏰ [${callId}] Token expired ${Math.abs(timeUntilExpiry)}s ago, proceeding with refresh`);
+      }
+    } else {
+      this.log(`⚠️ [${callId}] No cached session, proceeding with refresh`);
+    }
+
     // NOTE: Client corruption check removed - it was triggered by false positive from getSession() hang
     // The hang is a Supabase internal issue, not actual client corruption
     // See LOG41_ANALYSIS.md for details
@@ -886,10 +908,20 @@ class SupabasePipeline {
             this.log(`🔑 [${traceId}] Auth state change: ${event}`);
             
             try {
-              // For SIGNED_IN events, check if persistence happened
-              if (event === 'SIGNED_IN') {
+              // ✅ CRITICAL: Cache the FULL session object with expires_at
+              if (event === 'SIGNED_IN' && session) {
                 this.log(`🔑 [${traceId}] SIGNED_IN event fired`);
                 this.log(`🔑 [${traceId}] 👀 Check logs above for "🔑🔑🔑 AUTH TOKEN WRITE"`);
+                
+                // Cache full session using updateSessionCache (includes expires_at)
+                this.updateSessionCache(session);
+                
+                // Log expiration time for visibility
+                if (session.expires_at) {
+                  const expiresAtDate = new Date(session.expires_at * 1000);
+                  const timeUntilExpiry = session.expires_at - Math.floor(Date.now() / 1000);
+                  this.log(`✅ Cached full session, expires at: ${expiresAtDate.toISOString()} (${Math.round(timeUntilExpiry / 60)} minutes)`);
+                }
                 
                 // Schedule a delayed check (don't block the listener)
                 setTimeout(async () => {
@@ -906,15 +938,14 @@ class SupabasePipeline {
                     this.log(`🔑 [${traceId}] ⚠️ Delayed check failed:`, stringifyError(checkError));
                   }
                 }, 100);
+              } else if (session) {
+                // For other events (TOKEN_REFRESHED, etc.), also cache the session
+                this.updateSessionCache(session);
+                this.log(`🔑 [${traceId}] Session cached for event: ${event}`);
+              } else {
+                // No session (SIGNED_OUT, etc.)
+                this.log(`🔑 [${traceId}] No session to cache for event: ${event}`);
               }
-              
-              // Cache tokens immediately (don't wait for persistence)
-              // This is fine - we're just caching what's in memory
-              const s = session || {};
-              this.sessionState.userId = s?.user?.id || this.sessionState.userId || null;
-              this.sessionState.accessToken = s?.access_token || this.sessionState.accessToken || null;
-              this.sessionState.refreshToken = s?.refresh_token || this.sessionState.refreshToken || null;
-              this.log(`🔑 [${traceId}] Token cached: user=${this.sessionState.userId?.slice(0, 8)} hasAccess=${!!this.sessionState.accessToken} hasRefresh=${!!this.sessionState.refreshToken}`);
             } catch (listenerError) {
               this.log(`🔑 [${traceId}] ⚠️ Auth listener error:`, stringifyError(listenerError));
             }
@@ -961,10 +992,35 @@ class SupabasePipeline {
 
   /**
    * Get the current client instance, initializing if needed
-   * NON-BLOCKING: Returns client immediately, refreshes session in background ONLY when needed
+   * NON-BLOCKING: Returns client immediately, skips ALL auth API calls if session is valid
+   * ZERO /user CALLS = ZERO TIMEOUT RISK
    */
   private async getClient(): Promise<any> {
     this.log(`🔑 getClient() called - hasClient=${!!this.client} isInitialized=${this.isInitialized} initPromiseActive=${!!this.initializePromise} corrupted=${this.clientCorrupted}`);
+    
+    // ✅ SHORT-CIRCUIT: If we have a valid cached session, use it and skip ALL auth API calls
+    if (this.sessionState.cached?.session) {
+      const session = this.sessionState.cached.session;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = session.expires_at || 0;
+      const timeUntilExpiry = expiresAt - nowSec;
+      
+      // If session valid for 5+ minutes, skip all auth API calls
+      if (timeUntilExpiry > 300) {
+        this.log(`🚀 Using cached session (valid for ${timeUntilExpiry}s / ${Math.round(timeUntilExpiry / 60)}min), skipping /user call`);
+        
+        if (!this.client) {
+          this.log('🔑 getClient() -> initializing client with cached session');
+          await this.initialize();
+        }
+        
+        return this.client!;
+      } else if (timeUntilExpiry > 0) {
+        this.log(`⚠️ Session expires soon (${timeUntilExpiry}s), will refresh in background`);
+      } else {
+        this.log(`⚠️ Session expired ${Math.abs(timeUntilExpiry)}s ago, will refresh in background`);
+      }
+    }
     
     // NOTE: Client corruption check removed - it was triggered by false positive from getSession() hang
     // The hang is a Supabase internal issue, not actual client corruption
@@ -988,17 +1044,13 @@ class SupabasePipeline {
     }
 
     // ✅ MANUAL TOKEN REFRESH (since autoRefreshToken is disabled)
-    // Check token expiration and refresh if needed
+    // Only call auth APIs if session is missing or expired
     if (this.sessionState.cached?.session?.expires_at) {
       const nowSec = Math.floor(Date.now() / 1000);
       const expiresAt = this.sessionState.cached.session.expires_at;
       const timeUntilExpiry = expiresAt - nowSec;
       
-      if (timeUntilExpiry > 300) {
-        // Token is valid for more than 5 minutes, no refresh needed
-        this.log(`🔑 getClient() -> token valid for ${timeUntilExpiry}s (${Math.round(timeUntilExpiry / 60)}min), skipping refresh`);
-        return this.client!;
-      } else if (timeUntilExpiry > 0) {
+      if (timeUntilExpiry > 0 && timeUntilExpiry <= 300) {
         // Token expires soon (< 5 minutes), refresh in background
         this.log(`🔑 getClient() -> token expires in ${timeUntilExpiry}s, triggering manual background refresh`);
         
@@ -1010,7 +1062,7 @@ class SupabasePipeline {
             this.log('🔄 Manual background refresh failed:', err);
           });
         }
-      } else {
+      } else if (timeUntilExpiry <= 0) {
         // Token expired, refresh in background
         this.log(`🔑 getClient() -> token expired ${Math.abs(timeUntilExpiry)}s ago, triggering manual background refresh`);
         
