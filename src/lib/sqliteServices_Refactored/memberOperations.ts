@@ -278,6 +278,14 @@ export class MemberOperations {
           last_read_message_id: savedMessageId,
           matches: savedReadAt === lastReadAt && savedMessageId === lastReadMessageId
         });
+        
+        // Force WAL checkpoint to ensure data is written to disk
+        try {
+          await db.execute('PRAGMA wal_checkpoint(FULL);');
+          console.log('[sqlite] ✅ WAL checkpoint completed - data flushed to disk');
+        } catch (error) {
+          console.warn('[sqlite] ⚠️ WAL checkpoint failed:', error);
+        }
       } else {
         console.error('[sqlite] ❌ VERIFICATION FAILED: Row disappeared after UPDATE!');
       }
@@ -301,6 +309,14 @@ export class MemberOperations {
           last_read_at: verify.values[0].last_read_at,
           last_read_message_id: verify.values[0].last_read_message_id
         });
+        
+        // Force WAL checkpoint to ensure data is written to disk
+        try {
+          await db.execute('PRAGMA wal_checkpoint(FULL);');
+          console.log('[sqlite] ✅ WAL checkpoint completed - data flushed to disk');
+        } catch (error) {
+          console.warn('[sqlite] ⚠️ WAL checkpoint failed:', error);
+        }
       } else {
         console.error('[sqlite] ❌ VERIFICATION FAILED: Row NOT found after INSERT!');
         console.error('[sqlite] ❌ This indicates a persistence or transaction issue');

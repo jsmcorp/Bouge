@@ -85,6 +85,14 @@ export class DatabaseManager {
       const rowCount = rowCheck.values?.[0]?.count || 0;
       console.log(`🏥 [HEALTH-CHECK] group_members row count: ${rowCount}`);
       
+      // Check 3b: Show actual rows for debugging
+      if (rowCount > 0) {
+        const allRows = await this.db!.query(`SELECT group_id, user_id, last_read_at, last_read_message_id FROM group_members`);
+        console.log(`🏥 [HEALTH-CHECK] Existing rows:`, allRows.values);
+      } else {
+        console.warn(`🏥 [HEALTH-CHECK] ⚠️ No group_members rows found after restart!`);
+      }
+      
       // Check 4: Verify encryption
       try {
         const encryptCheck = await this.db!.query('PRAGMA cipher_version;');
