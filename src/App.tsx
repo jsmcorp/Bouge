@@ -27,6 +27,7 @@ import { SetupPage } from '@/pages/onboarding/SetupPage';
 // Main app pages
 import DashboardPage from '@/pages/DashboardPage';
 import GroupPage from '@/pages/GroupPage';
+import GroupTopicsPage from '@/pages/GroupTopicsPage'; // New Topics Page
 import ThreadViewPage from './pages/ThreadViewPage';
 import GroupDetailsViewPage from './pages/GroupDetailsViewPage';
 import SettingsPage from '@/pages/SettingsPage';
@@ -42,11 +43,11 @@ let setupRedirectPending = false;
 
 // AppContent component with access to routing hooks
 function AppContent() {
-  const { 
-    user, 
-    isLoading, 
+  const {
+    user,
+    isLoading,
     isInitialized,
-    initializeAuth 
+    initializeAuth
   } = useAuthStore();
   const {
     startOutboxProcessor,
@@ -64,8 +65,12 @@ function AppContent() {
       const handleBackButton = () => {
         const currentPath = window.location.pathname;
 
-        // If we're in a group chat, navigate to dashboard
-        if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details')) {
+        // If we're in the chat view, go back to topics page
+        if (currentPath.includes('/chat') && currentPath.includes('/groups/')) {
+          navigate(-1); // Should go back to topics page
+        }
+        // If we're in a group topics page (root group route), navigate to dashboard
+        else if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details') && !currentPath.includes('/chat')) {
           // Clear active group first
           useChatStore.getState().setActiveGroup(null);
           // Use window.history to ensure immediate navigation
@@ -111,7 +116,7 @@ function AppContent() {
 
       let backButtonHandle: any;
       let appStateHandle: any;
-      
+
       CapacitorApp.addListener('backButton', handleBackButton).then(handle => {
         backButtonHandle = handle;
       });
@@ -119,7 +124,7 @@ function AppContent() {
       CapacitorApp.addListener('appStateChange', handleAppStateChange).then(handle => {
         appStateHandle = handle;
       });
-      
+
       // Cleanup
       return () => {
         if (backButtonHandle) {
@@ -143,7 +148,7 @@ function AppContent() {
           try {
             await sqliteService.initialize();
             console.log('✅ SQLite initialized successfully');
-            
+
             // ✅ INTEGRATION POINT 1: Check if first-time init is needed
             // This runs after SQLite is ready and before the app renders
             try {
@@ -161,7 +166,7 @@ function AppContent() {
               // Safe default: assume init is needed
               sessionStorage.setItem('needs_first_time_init', 'true');
             }
-            
+
             // Clean up old tombstones (48+ hours old)
             try {
               const cleanedCount = await sqliteService.cleanupOldTombstones();
@@ -178,10 +183,10 @@ function AppContent() {
               if (!integrity.valid) {
                 console.warn('⚠️ Data integrity issues detected:', integrity.issues);
                 console.log('🔧 Attempting to repair by cleaning up orphaned data...');
-                
+
                 const cleaned = await sqliteService.cleanupAllOrphanedData();
                 const totalCleaned = cleaned.reactions + cleaned.polls + cleaned.confessions;
-                
+
                 if (totalCleaned > 0) {
                   console.log(`✅ Cleaned up ${totalCleaned} orphaned records (reactions: ${cleaned.reactions}, polls: ${cleaned.polls}, confessions: ${cleaned.confessions})`);
                 }
@@ -216,7 +221,7 @@ function AppContent() {
             console.log('📇 Calling initializeContacts()...');
             await initializeContacts();
             console.log('✅ Contacts store initialized successfully');
-            
+
             // If permission is granted but no contacts in SQLite, trigger initial sync
             const contactsState = useContactsStore.getState();
             if (contactsState.permissionGranted && contactsState.contacts.length === 0) {
@@ -247,14 +252,14 @@ function AppContent() {
 
         // Then initialize auth state
         await initializeAuth();
-        
+
         console.log('✅ Auth setup complete');
-        
+
         // Return cleanup function
         return cleanup;
       } catch (error) {
         console.error('💥 Auth setup failed:', error);
-        return () => {}; // Return empty cleanup function
+        return () => { }; // Return empty cleanup function
       }
     };
 
@@ -267,13 +272,13 @@ function AppContent() {
       stopOutboxProcessor();
     };
   }, []); // Empty dependency array - only run once
-  
+
   // Start outbox processor when user is authenticated
   useEffect(() => {
     if (user && isInitialized && !isLoading && Capacitor.isNativePlatform()) {
       console.log('🚀 Starting outbox processor...');
       startOutboxProcessor();
-      
+
       return () => {
         console.log('🛑 Stopping outbox processor...');
         if (typeof stopOutboxProcessor === 'function') {
@@ -285,10 +290,10 @@ function AppContent() {
 
   // Debug logging for render state
   useEffect(() => {
-    console.log('🎨 App render state:', { 
+    console.log('🎨 App render state:', {
       isLoading,
       isInitialized,
-      hasUser: !!user, 
+      hasUser: !!user,
       isOnboarded: user?.is_onboarded,
       userId: user?.id
     });
@@ -299,7 +304,7 @@ function AppContent() {
   useEffect(() => {
     // TODO: register FCM/APNs listeners and, on wake/tap, call:
     // const g = useChatStore.getState(); if (g.activeGroup?.id) g.forceMessageSync(g.activeGroup.id);
-    return () => {};
+    return () => { };
   }, []);
 
   // Show loading screen while auth is initializing
@@ -386,15 +391,27 @@ function AppContent() {
               </ProtectedRoute>
             }
           />
+
+          {/* Topics Page - New Entry Point for Groups */}
           <Route
             path="/groups/:groupId"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <GroupTopicsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Chat Interface - Moved to sub-route */}
+          <Route
+            path="/groups/:groupId/chat"
             element={
               <ProtectedRoute requireOnboarding={true}>
                 <GroupPage />
               </ProtectedRoute>
             }
           />
-          
+
           {/* Mobile-specific full-screen routes */}
           <Route
             path="/groups/:groupId/thread/:messageId"
@@ -459,15 +476,15 @@ function AppContent() {
                   !user
                     ? "/welcome"
                     : (() => {
-                        // ✅ INTEGRATION POINT 1B: Check if first-time init is needed
-                        const needsInit = sessionStorage.getItem('needs_first_time_init') === 'true';
-                        if (needsInit && user.is_onboarded && !setupRedirectPending) {
-                          console.log('🔄 [APP] Redirecting to /setup for first-time initialization');
-                          setupRedirectPending = true; // ✅ Prevent redirect loop
-                          return "/setup";
-                        }
-                        return user.is_onboarded ? "/dashboard" : "/onboarding/name";
-                      })()
+                      // ✅ INTEGRATION POINT 1B: Check if first-time init is needed
+                      const needsInit = sessionStorage.getItem('needs_first_time_init') === 'true';
+                      if (needsInit && user.is_onboarded && !setupRedirectPending) {
+                        console.log('🔄 [APP] Redirecting to /setup for first-time initialization');
+                        setupRedirectPending = true; // ✅ Prevent redirect loop
+                        return "/setup";
+                      }
+                      return user.is_onboarded ? "/dashboard" : "/onboarding/name";
+                    })()
                 }
                 replace
               />
