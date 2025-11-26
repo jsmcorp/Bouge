@@ -89,6 +89,20 @@ export class DatabaseManager {
       if (rowCount > 0) {
         const allRows = await this.db!.query(`SELECT group_id, user_id, last_read_at, last_read_message_id FROM group_members`);
         console.log(`🏥 [HEALTH-CHECK] Existing rows:`, allRows.values);
+        
+        // Show FULL IDs for comparison with query parameters
+        if (allRows.values && allRows.values.length > 0) {
+          allRows.values.forEach((row: any, idx: number) => {
+            console.log(`🏥 [HEALTH-CHECK] 📋 Row ${idx + 1} FULL IDs:`, {
+              group_id_full: row.group_id,
+              group_id_short: row.group_id?.slice(0, 8),
+              user_id_full: row.user_id,
+              user_id_short: row.user_id?.slice(0, 8),
+              last_read_at: row.last_read_at,
+              last_read_message_id_short: row.last_read_message_id?.slice(0, 8)
+            });
+          });
+        }
       } else {
         console.warn(`🏥 [HEALTH-CHECK] ⚠️ No group_members rows found after restart!`);
       }
@@ -178,6 +192,13 @@ export class DatabaseManager {
       /* 6️⃣ security pragma */
       await this.db.execute('PRAGMA cipher_memory_security = ON;');
       console.log('✅ Security pragma set');
+      
+      // 🔍 DIAGNOSTIC: Check WAL mode
+      const walCheck = await this.db.query('PRAGMA journal_mode;');
+      console.log('🔍 [DIAGNOSTIC] Journal mode:', walCheck.values?.[0]);
+      
+      const walFileCheck = await this.db.query('PRAGMA wal_autocheckpoint;');
+      console.log('🔍 [DIAGNOSTIC] WAL autocheckpoint:', walFileCheck.values?.[0]);
       
       /* 7️⃣ Create tables in the encrypted database */
       console.log('📊 Creating tables in encrypted database...');
@@ -725,6 +746,10 @@ export class DatabaseManager {
     if (!this.db) {
       throw new Error('Database connection not available');
     }
+    
+    // 🔍 DIAGNOSTIC: Log connection info
+    console.log(`[db-connection] 🔍 getConnection() called - dbName: ${this.dbName}, isOpen: ${this.db !== null}`);
+    
     return this.db;
   }
 

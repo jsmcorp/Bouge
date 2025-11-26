@@ -92,12 +92,49 @@ export class MemberOperations {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
 
+    // 🔍 DIAGNOSTIC: Log the FULL query parameters
+    console.log(`[sqlite-query] 🔍 getLocalLastReadAt called with:`, {
+      groupId_full: groupId,
+      groupId_short: groupId.slice(0, 8),
+      groupId_length: groupId.length,
+      userId_full: userId,
+      userId_short: userId.slice(0, 8),
+      userId_length: userId.length
+    });
+
     const sql = `
       SELECT last_read_at FROM group_members
       WHERE group_id = ? AND user_id = ?
     `;
 
     const result = await db.query(sql, [groupId, userId]);
+    
+    console.log(`[sqlite-query] 🔍 Query result:`, {
+      found: result.values && result.values.length > 0,
+      rowCount: result.values?.length || 0,
+      lastReadAt: result.values?.[0]?.last_read_at || null
+    });
+    
+    // 🚨 DIAGNOSTIC: If NOT FOUND, show ALL rows to debug parameter mismatch
+    if (!result.values || result.values.length === 0) {
+      console.warn(`[sqlite-query] ⚠️ NOT FOUND! Showing all rows for comparison:`);
+      const allRows = await db.query(`SELECT group_id, user_id, last_read_at FROM group_members`);
+      if (allRows.values && allRows.values.length > 0) {
+        allRows.values.forEach((row: any, idx: number) => {
+          const groupMatch = row.group_id === groupId;
+          const userMatch = row.user_id === userId;
+          console.log(`[sqlite-query] 📋 Row ${idx + 1}:`, {
+            group_id: row.group_id,
+            group_match: groupMatch ? '✅' : '❌',
+            user_id: row.user_id,
+            user_match: userMatch ? '✅' : '❌',
+            last_read_at: row.last_read_at
+          });
+        });
+      } else {
+        console.warn(`[sqlite-query] ⚠️ Table is EMPTY!`);
+      }
+    }
     
     if (result.values && result.values.length > 0) {
       const lastReadAt = result.values[0].last_read_at;
@@ -279,13 +316,12 @@ export class MemberOperations {
           matches: savedReadAt === lastReadAt && savedMessageId === lastReadMessageId
         });
         
-        // Force WAL checkpoint to ensure data is written to disk
-        try {
-          await db.execute('PRAGMA wal_checkpoint(FULL);');
-          console.log('[sqlite] ✅ WAL checkpoint completed - data flushed to disk');
-        } catch (error) {
-          console.warn('[sqlite] ⚠️ WAL checkpoint failed:', error);
-        }
+        // ✅ CHECKPOINT REMOVED: Immediate checkpoints cause lock contention (SQLITE_LOCKED)
+        // Data is safely stored in WAL buffer and will be checkpointed:
+        // 1. When app backgrounds (AppLifecycleManager)
+        // 2. After bulk operations complete
+        // 3. When WAL size exceeds threshold
+        // Verification queries read from WAL, so data is immediately visible
       } else {
         console.error('[sqlite] ❌ VERIFICATION FAILED: Row disappeared after UPDATE!');
       }
@@ -310,13 +346,12 @@ export class MemberOperations {
           last_read_message_id: verify.values[0].last_read_message_id
         });
         
-        // Force WAL checkpoint to ensure data is written to disk
-        try {
-          await db.execute('PRAGMA wal_checkpoint(FULL);');
-          console.log('[sqlite] ✅ WAL checkpoint completed - data flushed to disk');
-        } catch (error) {
-          console.warn('[sqlite] ⚠️ WAL checkpoint failed:', error);
-        }
+        // ✅ CHECKPOINT REMOVED: Immediate checkpoints cause lock contention (SQLITE_LOCKED)
+        // Data is safely stored in WAL buffer and will be checkpointed:
+        // 1. When app backgrounds (AppLifecycleManager)
+        // 2. After bulk operations complete
+        // 3. When WAL size exceeds threshold
+        // Verification queries read from WAL, so data is immediately visible
       } else {
         console.error('[sqlite] ❌ VERIFICATION FAILED: Row NOT found after INSERT!');
         console.error('[sqlite] ❌ This indicates a persistence or transaction issue');
