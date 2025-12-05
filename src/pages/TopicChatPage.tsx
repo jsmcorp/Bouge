@@ -136,7 +136,7 @@ export default function TopicChatPage() {
     }, [topicId, messages, markTopicAsRead]);
 
     const handleBack = () => {
-        navigate(`/groups/${groupId}`);
+        navigate(`/groups/${groupId}`, { replace: true });
     };
 
     const handleLikeClick = async () => {
@@ -194,10 +194,10 @@ export default function TopicChatPage() {
                                 <span className="text-xs font-bold text-slate-600">?</span>
                             </div>
                         ) : (
-                            <img 
-                                src={topic.author?.avatar_url || 'https://placehold.co/36x36'} 
-                                alt={topic.author?.display_name || 'User'} 
-                                className="w-9 h-9 rounded-full bg-slate-200 object-cover" 
+                            <img
+                                src={topic.author?.avatar_url || 'https://placehold.co/36x36'}
+                                alt={topic.author?.display_name || 'User'}
+                                className="w-9 h-9 rounded-full bg-slate-200 object-cover"
                             />
                         )}
                         <div className="flex flex-col">
@@ -230,7 +230,7 @@ export default function TopicChatPage() {
                 {topic.type === 'poll' && topic.poll && (
                     <div className="space-y-2 mb-3">
                         {topic.poll.options.map((option, idx) => {
-                            const percentage = topic.poll!.total_votes > 0 
+                            const percentage = topic.poll!.total_votes > 0
                                 ? Math.round((topic.poll!.vote_counts[idx] / topic.poll!.total_votes) * 100)
                                 : 0;
                             return (
@@ -254,9 +254,9 @@ export default function TopicChatPage() {
                 {/* Image Display */}
                 {topic.type === 'image' && topic.image_url && (
                     <div className="mb-3 rounded-lg overflow-hidden">
-                        <img 
-                            src={topic.image_url} 
-                            alt="Topic image" 
+                        <img
+                            src={topic.image_url}
+                            alt="Topic image"
                             className="w-full h-auto max-h-64 object-cover"
                         />
                     </div>
@@ -268,18 +268,16 @@ export default function TopicChatPage() {
                         onClick={handleLikeClick}
                         className="flex items-center gap-1 group"
                     >
-                        <ThumbsUp 
-                            className={`w-4 h-4 transition-colors ${
-                                topic.is_liked_by_user 
-                                    ? 'text-blue-500 fill-blue-500' 
+                        <ThumbsUp
+                            className={`w-4 h-4 transition-colors ${topic.is_liked_by_user
+                                    ? 'text-blue-500 fill-blue-500'
                                     : 'text-slate-400 group-hover:text-slate-600'
-                            }`} 
+                                }`}
                         />
-                        <span className={`text-xs font-medium ${
-                            topic.is_liked_by_user 
-                                ? 'text-blue-500' 
+                        <span className={`text-xs font-medium ${topic.is_liked_by_user
+                                ? 'text-blue-500'
                                 : 'text-slate-500 group-hover:text-slate-700'
-                        }`}>
+                            }`}>
                             {topic.likes_count}
                         </span>
                     </button>

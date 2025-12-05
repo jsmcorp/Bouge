@@ -536,6 +536,24 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
   function attachMessageToState(message: Message) {
     const state = get();
 
+    // CRITICAL FIX: Strict filtering to prevent topic leakage into Quick Chat
+    // This acts as a final safeguard even if upstream filters fail (e.g. missing topic_id in payload)
+    // If we are in Quick Chat (no activeTopicId), we MUST NOT accept topic messages
+    if (!state.activeTopicId) {
+      if (message.topic_id || message.category === 'topic') {
+        const log = (msg: string) => console.log(`[realtime-v2] ${msg}`);
+        log(`⛔ Strict Filter: Blocked topic message from Quick Chat state (id=${message.id}, topic=${message.topic_id})`);
+        return;
+      }
+    } else {
+      // If we are in a Topic Chat, we MUST NOT accept messages from other topics or Quick Chat
+      // However, we allow "general" messages if they somehow get here? No, strict separation.
+      if (message.topic_id !== state.activeTopicId) {
+        // Just return silently, it's for another view
+        return;
+      }
+    }
+
     if (message.parent_id) {
       const parentMessage = state.messages.find((m: Message) => m.id === message.parent_id);
 
@@ -579,11 +597,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
           });
         }
 
-        set({ messages: updatedMessages });
-        try {
-          messageCache.setCachedMessages(message.group_id, [...updatedMessages]);
-        } catch (err) {
-          console.error('❌ Message cache update failed:', err);
+        // CRITICAL FIX: Only update cache if NOT in topic chat (avoid poisoning Quick Chat cache with topic messages)
+        if (!state.activeTopicId) {
+          try {
+            messageCache.setCachedMessages(message.group_id, [...updatedMessages]);
+          } catch (err) {
+            console.error('❌ Message cache update failed:', err);
+          }
         }
 
         // Update active thread replies if open
@@ -638,11 +658,15 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       console.log(`📨 attachMessageToState: action=${action}, id=${message.id}, oldId=${oldMessageId}, before=${state.messages.length}, after=${messagesAfter.length}`);
 
       set({ messages: messagesAfter });
-      try {
-        messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
-        console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert (${messagesAfter.length} messages)`);
-      } catch (err) {
-        console.error('❌ Message cache update failed:', err);
+      
+      // CRITICAL FIX: Only update cache if NOT in topic chat (avoid poisoning Quick Chat cache with topic messages)
+      if (!state.activeTopicId) {
+        try {
+          messageCache.setCachedMessages(message.group_id, [...messagesAfter]);
+          console.log(`📦 MessageCache updated for group ${message.group_id} after realtime insert (${messagesAfter.length} messages)`);
+        } catch (err) {
+          console.error('❌ Message cache update failed:', err);
+        }
       }
 
       // If we replaced a message by dedupe, delete the old optimistic message from SQLite
@@ -950,9 +974,26 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             const currentState = get();
             const isForActiveGroup = currentState.activeGroup?.id === row.group_id;
 
-            if (isForActiveGroup) {
+            // TOPIC SEPARATION FIX: Filter topic-related messages for Quick Chat
+            // If user is viewing Quick Chat (no activeTopicId), exclude:
+            // - Topic posts (category='topic')
+            // - Topic replies (topic_id is set)
+            // If user is viewing a Topic Chat (activeTopicId is set), allow all messages for that topic
+            const isTopicMessage = row.category === 'topic' || row.topic_id != null;
+            const isViewingTopicChat = currentState.activeTopicId != null;
+            const isForActiveTopic = isViewingTopicChat && row.topic_id === currentState.activeTopicId;
+            
+            // Decide whether to attach to UI state:
+            // In Quick Chat: exclude topic messages
+            // In Topic Chat: only attach if message is for the active topic
+            const shouldAttachToState = isForActiveGroup && (
+              (!isViewingTopicChat && !isTopicMessage) || // Quick Chat: exclude topic messages
+              (isViewingTopicChat && isForActiveTopic)    // Topic Chat: only same topic messages
+            );
+
+            if (shouldAttachToState) {
               attachMessageToState(message);
-              log(`📨 Message attached to state: id=${message.id} (active group)`);
+              log(`📨 Message attached to state: id=${message.id} (active group, allowed by topic filter)`);
               
               // Mark message as read immediately since user is viewing the chat
               // This prevents it from counting as unread if user closes chat quickly
@@ -1000,7 +1041,13 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 }
               }, 50);
             } else {
-              log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
+              // Message not attached: either different group, topic message in Quick Chat, or wrong topic
+              const reason = !isForActiveGroup 
+                ? `different group: ${row.group_id}` 
+                : isTopicMessage && !isViewingTopicChat 
+                  ? `topic message filtered from Quick Chat (category=${row.category}, topic_id=${row.topic_id})`
+                  : `wrong topic (viewing ${currentState.activeTopicId}, message for ${row.topic_id})`;
+              log(`📨 Message NOT attached to state: id=${message.id} (${reason})`);
 
               // CRITICAL FIX (LOG54): Dispatch event for dashboard to refresh this group
               // This ensures messages received while on dashboard are visible when user navigates to the group

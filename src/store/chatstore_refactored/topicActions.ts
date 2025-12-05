@@ -1470,12 +1470,12 @@ export const createTopicActions = (set: any, get: any): TopicActions => ({
       const client = await supabasePipeline.getDirectClient();
       
       // Query messages where topic_id matches
+      // Note: Pseudonyms for ghost messages are fetched lazily by MessageBubble using pseudonymService
       const { data: messages, error } = await client
         .from('messages')
         .select(`
           *,
-          author:users!messages_user_id_fkey(display_name, avatar_url),
-          pseudonym:user_pseudonyms(pseudonym)
+          author:users!messages_user_id_fkey(display_name, avatar_url)
         `)
         .eq('topic_id', topicId)
         .order('created_at', { ascending: true });
@@ -1503,7 +1503,7 @@ export const createTopicActions = (set: any, get: any): TopicActions => ({
           display_name: msg.author?.display_name || 'Unknown',
           avatar_url: msg.author?.avatar_url
         },
-        pseudonym: msg.is_ghost ? msg.pseudonym?.pseudonym : undefined,
+        pseudonym: undefined, // Pseudonyms fetched lazily by MessageBubble via pseudonymService
         reactions: [],
         replies: [],
         reply_count: 0,

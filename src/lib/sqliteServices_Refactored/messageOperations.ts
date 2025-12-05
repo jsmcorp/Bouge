@@ -106,6 +106,23 @@ export class MessageOperations {
     return result.values || [];
   }
 
+  public async getRecentMessagesForQuickChat(groupId: string, limit = 10): Promise<LocalMessage[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `
+      SELECT * FROM messages 
+      WHERE group_id = ? 
+      AND (category != 'topic' OR category IS NULL)
+      AND topic_id IS NULL
+      ORDER BY created_at DESC
+      LIMIT ?
+    `;
+
+    const result = await db.query(sql, [groupId, limit]);
+    return (result.values || []).reverse();
+  }
+
   /**
    * Task 7.3: Get messages by topic_id
    * Filter messages where topic_id matches

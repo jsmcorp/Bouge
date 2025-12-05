@@ -159,7 +159,7 @@ export default function GroupTopicsPage() {
         try {
             // Increment view count
             await incrementTopicView(topicId);
-            
+
             // Navigate to topic chat
             navigate(`/groups/${groupId}/topics/${topicId}`);
         } catch (error) {
@@ -181,7 +181,7 @@ export default function GroupTopicsPage() {
     const handleBack = () => {
         // Clear active group
         setActiveGroup(null);
-        navigate('/dashboard');
+        navigate('/dashboard', { replace: true });
     };
 
     const handleCreateTopic = () => {
@@ -215,7 +215,7 @@ export default function GroupTopicsPage() {
             </div>
 
             {/* Topics Feed */}
-            <div 
+            <div
                 ref={scrollContainerRef}
                 className="flex-1 overflow-y-auto pb-32 pt-2 px-0 space-y-0.5 [&::-webkit-scrollbar]:hidden"
             >
@@ -256,10 +256,10 @@ export default function GroupTopicsPage() {
                                         <span className="text-xs font-bold text-slate-600">?</span>
                                     </div>
                                 ) : (
-                                    <img 
-                                        src={topic.author?.avatar_url || 'https://placehold.co/36x36'} 
-                                        alt={topic.author?.display_name || 'User'} 
-                                        className="w-9 h-9 rounded-full bg-slate-200 object-cover" 
+                                    <img
+                                        src={topic.author?.avatar_url || 'https://placehold.co/36x36'}
+                                        alt={topic.author?.display_name || 'User'}
+                                        className="w-9 h-9 rounded-full bg-slate-200 object-cover"
                                     />
                                 )}
                                 <div className="flex flex-col">
@@ -297,7 +297,7 @@ export default function GroupTopicsPage() {
                         {topic.type === 'poll' && topic.poll && (
                             <div className="space-y-2 mb-3">
                                 {topic.poll.options.map((option, idx) => {
-                                    const percentage = topic.poll!.total_votes > 0 
+                                    const percentage = topic.poll!.total_votes > 0
                                         ? Math.round((topic.poll!.vote_counts[idx] / topic.poll!.total_votes) * 100)
                                         : 0;
                                     return (
@@ -321,9 +321,9 @@ export default function GroupTopicsPage() {
                         {/* Image Display */}
                         {topic.type === 'image' && topic.image_url && (
                             <div className="mb-3 rounded-lg overflow-hidden">
-                                <img 
-                                    src={topic.image_url} 
-                                    alt="Topic image" 
+                                <img
+                                    src={topic.image_url}
+                                    alt="Topic image"
                                     className="w-full h-auto max-h-64 object-cover"
                                 />
                             </div>
@@ -336,18 +336,16 @@ export default function GroupTopicsPage() {
                                     onClick={(e) => handleLikeClick(e, topic.id)}
                                     className="flex items-center gap-1 group"
                                 >
-                                    <ThumbsUp 
-                                        className={`w-4 h-4 transition-colors ${
-                                            topic.is_liked_by_user 
-                                                ? 'text-blue-500 fill-blue-500' 
+                                    <ThumbsUp
+                                        className={`w-4 h-4 transition-colors ${topic.is_liked_by_user
+                                                ? 'text-blue-500 fill-blue-500'
                                                 : 'text-slate-400 group-hover:text-slate-600'
-                                        }`} 
+                                            }`}
                                     />
-                                    <span className={`text-xs font-medium ${
-                                        topic.is_liked_by_user 
-                                            ? 'text-blue-500' 
+                                    <span className={`text-xs font-medium ${topic.is_liked_by_user
+                                            ? 'text-blue-500'
                                             : 'text-slate-500 group-hover:text-slate-700'
-                                    }`}>
+                                        }`}>
                                         {topic.likes_count}
                                     </span>
                                 </button>

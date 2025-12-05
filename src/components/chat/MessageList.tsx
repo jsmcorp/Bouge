@@ -21,15 +21,16 @@ import {
 } from '@/components/ui/alert-dialog';
 
 export function MessageList() {
-  const { 
-    messages, 
-    typingUsers, 
-    activeGroup, 
-    loadOlderMessages, 
-    isLoadingOlder, 
-    hasMoreOlder, 
-    firstUnreadMessageId, 
-    unreadCount, 
+  const {
+    messages,
+    typingUsers,
+    activeGroup,
+    activeTopicId, // Used to detect Topic Chat mode
+    loadOlderMessages,
+    isLoadingOlder,
+    hasMoreOlder,
+    firstUnreadMessageId,
+    unreadCount,
     replyingTo,
     selectionMode,
     selectedMessageIds,
@@ -65,7 +66,15 @@ export function MessageList() {
   const firstMessageRef = useRef<HTMLDivElement>(null);
 
   // Use Intersection Observer to detect when first message is visible (simpler and more reliable)
+  // TOPIC CHAT FIX: Skip loading older messages when viewing a Topic Chat (activeTopicId is set)
+  // In Topic Chat, we only show replies to that specific topic, not Quick Chat history
   useEffect(() => {
+    // Skip loading older messages in Topic Chat mode
+    if (activeTopicId) {
+      console.log('📋 MessageList: Skipping loadOlderMessages setup - in Topic Chat mode');
+      return;
+    }
+
     if (!firstMessageRef.current || !hasMoreOlder || isLoadingOlder || !activeGroup) {
       return;
     }
@@ -73,19 +82,19 @@ export function MessageList() {
     const observer = new IntersectionObserver(
       async (entries) => {
         const firstEntry = entries[0];
-        
+
         // When first message becomes visible and we're not already loading
         if (firstEntry.isIntersecting && !loadingOlderRef.current && hasMoreOlder && !isLoadingOlder) {
           loadingOlderRef.current = true;
           isLazyLoadingRef.current = true;
-          
+
           const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
           const prevHeight = viewport?.scrollHeight || 0;
           const prevTop = viewport?.scrollTop || 0;
-          
+
           try {
             const loaded = await loadOlderMessages(activeGroup.id, 30);
-            
+
             if (loaded > 0 && viewport) {
               // Preserve scroll position
               requestAnimationFrame(() => {
@@ -118,13 +127,13 @@ export function MessageList() {
     return () => {
       observer.disconnect();
     };
-  }, [activeGroup?.id, hasMoreOlder, isLoadingOlder, loadOlderMessages, messages.length]);
+  }, [activeGroup?.id, activeTopicId, hasMoreOlder, isLoadingOlder, loadOlderMessages, messages.length]);
 
   // Auto-scroll to first unread message on initial load
   useEffect(() => {
     if (firstUnreadMessageId && !hasScrolledToUnread && messages.length > 0) {
       console.log(`📍 Auto-scrolling to first unread message: ${firstUnreadMessageId}`);
-      
+
       // Wait for DOM to render, then scroll
       setTimeout(() => {
         if (unreadSeparatorRef.current) {
@@ -146,7 +155,7 @@ export function MessageList() {
   // Reset scroll flag when changing groups
   useEffect(() => {
     setHasScrolledToUnread(false);
-    
+
     // ✅ FIX: If there's no unread message, scroll to bottom immediately
     if (!firstUnreadMessageId && messages.length > 0) {
       const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
@@ -296,7 +305,7 @@ export function MessageList() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete messages?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will delete {selectedMessageIds.size} message{selectedMessageIds.size > 1 ? 's' : ''} from your device. 
+              This will delete {selectedMessageIds.size} message{selectedMessageIds.size > 1 ? 's' : ''} from your device.
               You won't be able to see {selectedMessageIds.size > 1 ? 'them' : 'it'} again.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -313,57 +322,57 @@ export function MessageList() {
         className="h-full overflow-x-hidden smooth-scroll-messages"
         ref={scrollAreaRef}
       >
-      <div className="p-2 sm:p-3 md:p-4 space-y-1 overflow-x-hidden messages-container">
-        {/* Loading indicator for older messages - WhatsApp style */}
-        {isLoadingOlder && hasMoreOlder && (
-          <div className="flex items-center justify-center py-2">
-            <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
-            <span className="ml-2 text-xs text-muted-foreground">Loading older messages...</span>
-          </div>
-        )}
-
-        {messages.map((message, index) => {
-          // Check if this is the first unread message
-          const isFirstUnread = message.id === firstUnreadMessageId;
-
-          // Determine if we should show sender name (WhatsApp-style grouping)
-          // Show name if: first message OR different sender OR ghost mode changed
-          const prevMessage = index > 0 ? messages[index - 1] : null;
-          const showSenderName = !prevMessage ||
-            prevMessage.user_id !== message.user_id ||
-            prevMessage.is_ghost !== message.is_ghost;
-
-          // Attach ref to first message for lazy loading detection
-          const isFirstMessage = index === 0;
-
-          return (
-            <div key={message.id} ref={isFirstMessage ? firstMessageRef : null}>
-              {/* Show unread separator before first unread message */}
-              {isFirstUnread && (
-                <div ref={unreadSeparatorRef}>
-                  <UnreadMessageSeparator />
-                </div>
-              )}
-              <MessageBubble
-                message={message}
-                showSenderName={showSenderName}
-                isNewSender={showSenderName}
-              />
+        <div className="p-2 sm:p-3 md:p-4 space-y-1 overflow-x-hidden messages-container">
+          {/* Loading indicator for older messages - WhatsApp style */}
+          {isLoadingOlder && hasMoreOlder && (
+            <div className="flex items-center justify-center py-2">
+              <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
+              <span className="ml-2 text-xs text-muted-foreground">Loading older messages...</span>
             </div>
-          );
-        })}
+          )}
 
-        {/* Typing Indicator (hide self) */}
-        {typingUsers.filter(u => u.user_id !== user?.id).length > 0 && (
-          <div>
-            <TypingIndicator typingUsers={typingUsers.filter(u => u.user_id !== user?.id)} />
-          </div>
-        )}
+          {messages.map((message, index) => {
+            // Check if this is the first unread message
+            const isFirstUnread = message.id === firstUnreadMessageId;
 
-        {/* Invisible element to scroll to */}
-        <div ref={messagesEndRef} className="h-1" />
-      </div>
-    </ScrollArea>
+            // Determine if we should show sender name (WhatsApp-style grouping)
+            // Show name if: first message OR different sender OR ghost mode changed
+            const prevMessage = index > 0 ? messages[index - 1] : null;
+            const showSenderName = !prevMessage ||
+              prevMessage.user_id !== message.user_id ||
+              prevMessage.is_ghost !== message.is_ghost;
+
+            // Attach ref to first message for lazy loading detection
+            const isFirstMessage = index === 0;
+
+            return (
+              <div key={message.id} ref={isFirstMessage ? firstMessageRef : null}>
+                {/* Show unread separator before first unread message */}
+                {isFirstUnread && (
+                  <div ref={unreadSeparatorRef}>
+                    <UnreadMessageSeparator />
+                  </div>
+                )}
+                <MessageBubble
+                  message={message}
+                  showSenderName={showSenderName}
+                  isNewSender={showSenderName}
+                />
+              </div>
+            );
+          })}
+
+          {/* Typing Indicator (hide self) */}
+          {typingUsers.filter(u => u.user_id !== user?.id).length > 0 && (
+            <div>
+              <TypingIndicator typingUsers={typingUsers.filter(u => u.user_id !== user?.id)} />
+            </div>
+          )}
+
+          {/* Invisible element to scroll to */}
+          <div ref={messagesEndRef} className="h-1" />
+        </div>
+      </ScrollArea>
     </>
   );
 }

@@ -118,6 +118,10 @@ class SQLiteService {
     return this.messageOps.getRecentMessages(groupId, limit);
   }
 
+  public async getRecentMessagesForQuickChat(groupId: string, limit = 10): Promise<LocalMessage[]> {
+    return this.messageOps.getRecentMessagesForQuickChat(groupId, limit);
+  }
+
   public async getLastMessageForGroup(groupId: string): Promise<LocalMessage | null> {
     return this.messageOps.getLastMessageForGroup(groupId);
   }

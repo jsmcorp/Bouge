@@ -227,6 +227,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
       const stillCurrent = () => {
         const st = get();
+        // CRITICAL FIX: skip Quick Chat update if user is viewing a specific topic
+        if (st.activeTopicId) return false;
         return st.activeGroup?.id === groupId && st.fetchToken === localToken;
       };
       const setSafely = (partial: any) => {
@@ -512,7 +514,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
 
         try {
           // Load 50 recent messages for instant UI (increased for better history)
-          const localMessages = await sqliteService.getRecentMessages(groupId, 50);
+          // CRITICAL FIX: Use filtered method to exclude topic messages from Quick Chat
+          const localMessages = await sqliteService.getRecentMessagesForQuickChat(groupId, 50);
           console.log(`📱 SQLite query completed in ${Date.now() - sqliteStartTime}ms, got ${localMessages?.length || 0} messages`);
 
           if (localMessages && localMessages.length > 0) {
@@ -838,7 +841,14 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             setTimeout(async () => {
               try {
                 console.log('🔄 Loading remaining messages in background...');
-                const allLocalMessages = await sqliteService.getRecentMessages(groupId, 50);
+                // CRITICAL FIX: Use filtered method for Quick Chat to avoid loading topic messages
+                // If activeTopicId is set, we technically shouldn't be here (TopicChatPage manages its own msgs),
+                // but if we are, we use the standard method (or we could skip).
+                // Assuming this is Quick Chat context:
+                const currentState = get();
+                const allLocalMessages = !currentState.activeTopicId
+                  ? await sqliteService.getRecentMessagesForQuickChat(groupId, 50)
+                  : await sqliteService.getRecentMessages(groupId, 50);
 
                 if (allLocalMessages && allLocalMessages.length > localMessages.length) {
                   // Process all messages the same way
@@ -1043,6 +1053,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 users!messages_user_id_fkey(display_name, avatar_url, created_at)
               `)
               .eq('group_id', groupId)
+              .neq('category', 'topic') // Exclude topic posts
+              .is('topic_id', null) // Exclude topic replies
               .order('created_at', { ascending: false })
               .limit(50);
 
@@ -1072,8 +1084,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             if (filteredData && filteredData.length > 0) {
               const currentState = get();
 
-              // Only update if we're still viewing the same group
-              if (currentState.activeGroup?.id === groupId) {
+              // Only update if we're still viewing the same group AND NOT in a topic chat
+              if (currentState.activeGroup?.id === groupId && !currentState.activeTopicId) {
                 const existingIds = new Set(currentState.messages.map((m: Message) => m.id));
                 
                 // Create signature map with timestamp tolerance (±5 seconds)
@@ -1168,6 +1180,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           users!messages_user_id_fkey(display_name, avatar_url, created_at)
         `)
         .eq('group_id', groupId)
+        .neq('category', 'topic') // Exclude topic posts
+        .is('topic_id', null) // Exclude topic replies
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -1484,6 +1498,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	          .from('messages')
   	          .select(`*, users!messages_user_id_fkey(display_name, avatar_url, created_at)`)
   	          .eq('group_id', groupId)
+                  .neq('category', 'topic') // Exclude topic posts
+                  .is('topic_id', null) // Exclude topic replies
   	          .lt('created_at', oldestIso)
   	          .order('created_at', { ascending: false })
   	          .limit(limit);

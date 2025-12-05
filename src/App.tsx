@@ -65,13 +65,29 @@ function AppContent() {
     if (Capacitor.isNativePlatform()) {
       const handleBackButton = () => {
         const currentPath = window.location.pathname;
+        console.log('🔙 [App] Handling back button. Current path:', currentPath);
 
-        // If we're in the chat view, go back to topics page
-        if (currentPath.includes('/chat') && currentPath.includes('/groups/')) {
-          navigate(-1); // Should go back to topics page
+        // Regex patterns for accurate matching (allow optional trailing slash)
+        const groupRootMatch = currentPath.match(/^\/groups\/([^/]+)\/?$/);
+        const quickChatMatch = currentPath.match(/^\/groups\/([^/]+)\/chat\/?$/);
+        const topicChatMatch = currentPath.match(/^\/groups\/([^/]+)\/topics\/[^/]+\/?$/);
+
+        console.log('🔍 [App] Path matches:', {
+          isRoot: !!groupRootMatch,
+          isQuickChat: !!quickChatMatch,
+          isTopicChat: !!topicChatMatch
+        });
+
+        // If we're in Topic Chat or Quick Chat, go back to Group Topics Page
+        if (topicChatMatch || quickChatMatch) {
+          const groupId = topicChatMatch ? topicChatMatch[1] : quickChatMatch![1];
+          console.log('🔙 [App] Navigating from Chat -> Topics:', groupId);
+          // Use replace to ensure we don't get stuck in a history loop
+          navigate(`/groups/${groupId}`, { replace: true });
         }
         // If we're in a group topics page (root group route), navigate to dashboard
-        else if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details') && !currentPath.includes('/chat')) {
+        else if (groupRootMatch) {
+          console.log('🔙 [App] Navigating from Topics -> Dashboard');
           // Clear active group first
           useChatStore.getState().setActiveGroup(null);
           // Use window.history to ensure immediate navigation
@@ -90,10 +106,12 @@ function AppContent() {
         }
         // For other pages (not dashboard), navigate back in history
         else if (currentPath !== '/dashboard') {
+          console.log('🔙 [App] Standard history back');
           navigate(-1);
         }
         // If we're at dashboard, let the app exit
         else {
+          console.log('🔙 [App] Exiting app');
           CapacitorApp.exitApp();
         }
       };

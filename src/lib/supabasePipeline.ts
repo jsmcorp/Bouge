@@ -22,6 +22,7 @@ export interface Message {
   parent_id: string | null;
   image_url: string | null;
   dedupe_key?: string | null;
+  topic_id?: string | null;
 }
 
 export interface OutboxMessage {
@@ -2519,6 +2520,8 @@ class SupabasePipeline {
             category: message.category,
             parent_id: message.parent_id,
             image_url: message.image_url,
+            // CRITICAL FIX: Include topic_id so messages don't leak to Quick Chat
+            topic_id: message.topic_id ?? null,
             dedupe_key: message.dedupe_key,
           }, { onConflict: 'dedupe_key' })
           .select(`
@@ -2653,6 +2656,8 @@ class SupabasePipeline {
       category: message.category,
       parent_id: message.parent_id,
       image_url: message.image_url,
+      // CRITICAL FIX: Include topic_id so messages don't leak to Quick Chat
+      topic_id: message.topic_id ?? null,
       dedupe_key: message.dedupe_key,
     } as any;
 
@@ -2780,6 +2785,8 @@ class SupabasePipeline {
           category: message.category,
           parent_id: message.parent_id,
           image_url: message.image_url,
+          // CRITICAL FIX: Persist topic_id in outbox so it survives offline mode
+          topic_id: message.topic_id ?? null,
           dedupe_key: message.dedupe_key || undefined,
           requires_pseudonym: message.is_ghost ? true : undefined,
         }),
@@ -2972,6 +2979,8 @@ class SupabasePipeline {
             category: messageData.category ?? null,
             parent_id: resolvedParentId,
             image_url: messageData.image_url ?? null,
+            // CRITICAL FIX: Restore topic_id from outbox content
+            topic_id: messageData.topic_id ?? null,
             dedupe_key: dk,
           };
 

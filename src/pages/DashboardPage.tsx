@@ -40,7 +40,15 @@ export default function DashboardPage() {
   }, [searchParams, groups, setActiveGroup, setSearchParams]);
 
   // On mobile, show full-screen sidebar when no group is selected
-  if (isMobile && !activeGroup) {
+  // On mobile, show full-screen sidebar when no group is selected
+  // ✅ FIX: On mobile, /dashboard should ALWAYS be the group list. 
+  // Chat is handled by /groups/:groupId/chat
+  if (isMobile) {
+    // Ensure active group is cleared when on dashboard mobile
+    if (activeGroup) {
+      setTimeout(() => setActiveGroup(null), 0);
+    }
+
     return (
       <div className="h-screen w-screen bg-background overflow-hidden">
         <Sidebar />
@@ -52,7 +60,7 @@ export default function DashboardPage() {
     <div className="h-screen w-screen bg-background flex overflow-hidden">
       {/* Show sidebar on desktop, or when no active group on mobile */}
       {(!isMobile || !activeGroup) && <Sidebar />}
-      
+
       {/* Main content area */}
       <div className={`flex-1 flex flex-col ${isMobile && activeGroup ? 'w-full' : ''}`}>
         {activeGroup ? (

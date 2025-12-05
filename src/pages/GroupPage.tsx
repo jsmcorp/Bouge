@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useChatStore } from '@/store/chatStore';
 import { useIsMobile } from '@/hooks/useMediaQuery';
@@ -7,6 +7,7 @@ import { ChatArea } from '@/components/dashboard/ChatArea';
 
 export default function GroupPage() {
   const { groupId } = useParams();
+  const navigate = useNavigate();
   const { groups, activeGroup, setActiveGroup } = useChatStore();
   const isMobile = useIsMobile();
 
@@ -28,7 +29,7 @@ export default function GroupPage() {
       {/* Hide sidebar on mobile for full-screen chat */}
       {!isMobile && <Sidebar />}
       <div className={`flex-1 flex flex-col ${isMobile ? 'w-full' : ''}`}>
-        <ChatArea />
+        <ChatArea onBack={() => navigate(`/groups/${groupId}`, { replace: true })} />
       </div>
     </div>
   );

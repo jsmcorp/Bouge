@@ -23,7 +23,11 @@ import { WhatsAppEmojiPanel } from '@/components/chat/WhatsAppEmojiPanel';
 import { NonMemberBanner } from '@/components/chat/NonMemberBanner';
 import { unreadTracker } from '@/lib/unreadTracker';
 
-export function ChatArea() {
+interface ChatAreaProps {
+  onBack?: () => void;
+}
+
+export function ChatArea({ onBack }: ChatAreaProps) {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
@@ -58,35 +62,35 @@ export function ChatArea() {
     const unsubscribe = useChatStore.subscribe((state) => {
       messagesRef.current = state.messages;
     });
-    
+
     // Initialize with current messages
     messagesRef.current = useChatStore.getState().messages;
-    
+
     return unsubscribe;
   }, []);
 
   // The emoji selection is handled by the WhatsAppEmojiPanel component
-  const handleEmojiSelect = () => {};
+  const handleEmojiSelect = () => { };
 
   // LOCAL-FIRST: Load messages when opening chat
   useEffect(() => {
     if (activeGroup?.id) {
       console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
       const startTime = performance.now();
-      
+
       // INSTANT: Update sidebar unread count to 0 immediately (WhatsApp style)
       // This clears the badge in the sidebar instantly
       if (typeof (window as any).__updateUnreadCount === 'function') {
         (window as any).__updateUnreadCount(activeGroup.id, 0);
         console.log('[unread] 📊 Cleared unread count in sidebar instantly');
       }
-      
+
       // Load messages - separator will be calculated from LOCAL last_read_at
       fetchMessages(activeGroup.id).then(() => {
         const endTime = performance.now();
         console.log(`💬 ChatArea: Messages loaded in ${(endTime - startTime).toFixed(2)}ms`);
       });
-      
+
       // ✅ FIX: Removed the setTimeout that was marking cache messages as read
       // The realtime effect below will handle marking NEW messages as read
       // We don't need to mark cache messages on open - they're already in the correct state
@@ -102,7 +106,7 @@ export function ChatArea() {
 
     // Helper to get the last real (non-temp) message ID
     const getLastRealMessageId = (messages: any[]) => {
-      const lastReal = [...messages].reverse().find(msg => 
+      const lastReal = [...messages].reverse().find(msg =>
         msg.id && !msg.id.startsWith('temp-')
       );
       return lastReal?.id || null;
@@ -135,10 +139,10 @@ export function ChatArea() {
           // We had a previous message, so this is a NEW message arriving
           console.log('[unread] 📨 REALTIME: New message detected!');
           console.log(`[unread] 📨 Previous: ${previousLastMessageId.slice(0, 8)}, Current: ${currentLastMessageId.slice(0, 8)}`);
-          
+
           // Find the actual new message
           const latestRealMessage = currentMessages.find(msg => msg.id === currentLastMessageId);
-          
+
           if (latestRealMessage) {
             console.log('[unread] ⚡ REALTIME: Marking as read instantly');
             // Mark as read immediately
@@ -154,7 +158,7 @@ export function ChatArea() {
           console.log('[unread] 🎬 REALTIME: Initial load from cache, NOT marking as read');
           console.log(`[unread] 🎬 Cache last message: ${currentLastMessageId.slice(0, 8)}`);
         }
-        
+
         // Update ref to current message ID
         lastProcessedMessageIdRef.current = currentLastMessageId;
       }
@@ -164,10 +168,10 @@ export function ChatArea() {
       if (currentCount > lastMessageCount) {
         const newMessages = currentMessages.slice(lastMessageCount);
         const messageIdsToMarkViewed = newMessages.map(msg => msg.id);
-        
+
         if (messageIdsToMarkViewed.length > 0) {
           console.log(`[viewed] 👁️ Marking ${messageIdsToMarkViewed.length} new messages as viewed (including temp IDs)`);
-          
+
           // Mark as viewed in SQLite (non-blocking)
           (async () => {
             try {
@@ -178,14 +182,14 @@ export function ChatArea() {
                 if (isReady) {
                   await sqliteService.markMessagesAsViewed(messageIdsToMarkViewed);
                   console.log(`[viewed] ✅ Marked ${messageIdsToMarkViewed.length} messages as viewed in SQLite`);
-                  
+
                   // ✅ FIX: Also update read status to Supabase
                   // Find the last message that was marked as viewed
                   const lastViewedMessage = currentMessages.find((m: any) => m.id === messageIdsToMarkViewed[messageIdsToMarkViewed.length - 1]);
                   if (lastViewedMessage && activeGroup?.id) {
                     const messageTimestamp = new Date(lastViewedMessage.created_at).getTime();
                     console.log(`[viewed] 🔄 Updating read status to: ${lastViewedMessage.id.slice(0, 8)}`);
-                    
+
                     // Import and call unreadTracker to sync to Supabase
                     const { unreadTracker } = await import('@/lib/unreadTracker');
                     await unreadTracker.markGroupAsRead(activeGroup.id, lastViewedMessage.id, messageTimestamp);
@@ -219,10 +223,10 @@ export function ChatArea() {
       const currentMessages = messagesRef.current;
       if (currentMessages.length > 0) {
         // Find the last non-temp message (in case we just sent a message that's still optimistic)
-        const lastRealMessage = [...currentMessages].reverse().find(msg => 
+        const lastRealMessage = [...currentMessages].reverse().find(msg =>
           msg.id && !msg.id.startsWith('temp-')
         );
-        
+
         if (lastRealMessage) {
           console.log('[unread] 📝 WhatsApp-style: Marking as read on CLOSE (last real message from ref)');
           console.log(`[unread] 📝 Last message ID: ${lastRealMessage.id.slice(0, 8)}`);
@@ -235,14 +239,14 @@ export function ChatArea() {
           console.log('[unread] ⚠️ No real messages to mark as read on close (all optimistic)');
         }
       }
-      
+
       cleanupRealtimeSubscription();
     };
   }, [activeGroup?.id, cleanupRealtimeSubscription]);
 
   const handleSyncMessages = async () => {
     if (!activeGroup?.id) return;
-    
+
     setIsSyncing(true);
     try {
       // Use the new forceMessageSync function for a more comprehensive sync
@@ -297,20 +301,23 @@ export function ChatArea() {
 
   const handleBackClick = () => {
     if (isMobile) {
-      // Clear active group first
-      useChatStore.getState().setActiveGroup(null);
-      // Use window.history to ensure immediate navigation
-      window.history.replaceState(null, '', '/dashboard');
-      navigate('/dashboard', { replace: true });
+      if (onBack) {
+        onBack();
+      } else {
+        // Clear active group first
+        useChatStore.getState().setActiveGroup(null);
+        // Use window.history to ensure immediate navigation
+        window.history.replaceState(null, '', '/dashboard');
+        navigate('/dashboard', { replace: true });
+      }
     }
   };
 
   return (
     <div className="h-full flex">
       {/* Main Chat Area */}
-      <div className={`flex flex-col transition-all duration-300 ${
-        !isMobile && (activeThread || showGroupDetailsPanel) ? 'flex-1' : 'w-full'
-      }`}>
+      <div className={`flex flex-col transition-all duration-300 ${!isMobile && (activeThread || showGroupDetailsPanel) ? 'flex-1' : 'w-full'
+        }`}>
         {/* Header - Fixed at top */}
         <div className="flex-shrink-0 flex items-center justify-between p-2 sm:p-3 md:p-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg">
           <div className="flex items-center">
@@ -325,8 +332,8 @@ export function ChatArea() {
                 <ArrowLeft className="w-4 h-4" />
               </Button>
             )}
-            
-            <div 
+
+            <div
               className="flex items-center space-x-2 sm:space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-1 sm:p-2 transition-colors"
               onClick={handleGroupHeaderClick}
             >
@@ -345,19 +352,19 @@ export function ChatArea() {
               </div>
             </div>
           </div>
-          
+
           <div className="flex items-center space-x-1 sm:space-x-3">
             {/* Sync Button */}
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
               onClick={handleSyncMessages}
               disabled={isSyncing}
             >
               <RefreshCw className={`w-3 h-3 sm:w-4 sm:h-4 ${isSyncing ? 'animate-spin' : ''}`} />
             </Button>
-            
+
             {/* Connection Status Indicator */}
             <div className="hidden sm:flex items-center space-x-1">
               {connectionStatus === 'connected' ? (
@@ -365,26 +372,26 @@ export function ChatArea() {
               ) : (
                 <WifiOff className={`w-3 h-3 sm:w-4 sm:h-4 ${getConnectionStatusColor()}`} />
               )}
-              <Badge 
-                variant="secondary" 
+              <Badge
+                variant="secondary"
                 className={`text-xs ${getConnectionStatusColor()} border-border/50`}
               >
                 {getConnectionStatusText()}
               </Badge>
             </div>
-            
-            <Button 
-              variant="ghost" 
-              size="sm" 
+
+            <Button
+              variant="ghost"
+              size="sm"
               className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
             >
               <Users className="w-3 h-3 sm:w-4 sm:h-4" />
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
+                <Button
+                  variant="ghost"
+                  size="sm"
                   className="rounded-full hover:bg-muted/50 w-7 h-7 sm:w-8 sm:h-8 p-0 sm:p-1"
                 >
                   <MoreHorizontal className="w-3 h-3 sm:w-4 sm:h-4" />
@@ -410,9 +417,8 @@ export function ChatArea() {
         </div>
 
         {/* Messages - Scrollable area that fills remaining space */}
-        <div className={`flex-1 overflow-hidden transition-all duration-300 chat-background-gradient ${
-          isMobile && showEmojiPanel ? 'pb-[400px]' : ''
-        }`}>
+        <div className={`flex-1 overflow-hidden transition-all duration-300 chat-background-gradient ${isMobile && showEmojiPanel ? 'pb-[400px]' : ''
+          }`}>
           <MessageList />
         </div>
 
@@ -434,7 +440,7 @@ export function ChatArea() {
       {/* Right Panel - Thread or Group Details */}
       {!isMobile && activeThread && <ThreadPanel />}
       {!isMobile && showGroupDetailsPanel && <GroupDetailsPanel />}
-      
+
       {/* WhatsApp-style Emoji Panel for Mobile */}
       {isMobile && (
         <WhatsAppEmojiPanel
