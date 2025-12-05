@@ -65,7 +65,7 @@ async function deactivateTokens(tokens: string[]): Promise<void> {
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 function base64UrlEncode(input: Uint8Array): string {
-	let str = btoa(String.fromCharCode(...input));
+	const str = btoa(String.fromCharCode(...input));
 	return str.replace(/=+$/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 

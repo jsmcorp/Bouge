@@ -12,6 +12,7 @@ import { createMessageActions } from './messageActions';
 import { createOfflineActions } from './offlineActions';
 import { createJoinRequestActions } from './joinRequestActions';
 import { createMessageSelectionActions } from './messageSelectionActions';
+import { createTopicActions } from './topicActions';
 import { FEATURES } from '@/lib/supabase';
  
 
@@ -31,7 +32,8 @@ interface ChatActions extends
   ReturnType<typeof createMessageActions>,
   ReturnType<typeof createOfflineActions>,
   ReturnType<typeof createJoinRequestActions>,
-  ReturnType<typeof createMessageSelectionActions> {}
+  ReturnType<typeof createMessageSelectionActions>,
+  ReturnType<typeof createTopicActions> {}
 
 type ChatStore = ChatState & ChatActions;
 
@@ -49,6 +51,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
   const offlineActions = createOfflineActions(set, get);
   const joinRequestActions = createJoinRequestActions(set, get);
   const messageSelectionActions = createMessageSelectionActions(set, get);
+  const topicActions = createTopicActions(set, get);
 
   // Initialize auth listener if simplified realtime is enabled
   if (FEATURES.SIMPLIFIED_REALTIME && typeof realtimeActions.setupAuthListener === 'function') {
@@ -107,6 +110,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
     pendingRequestCounts: {},
     selectionMode: false,
     selectedMessageIds: new Set(),
+    // Topics
+    topics: [],
+    activeTopicId: null,
+    isLoadingTopics: false,
+    topicsPage: 0,
+    hasMoreTopics: true,
+    topicReadStatuses: {},
+    topicLikes: {},
 
     // Combine all actions
     ...stateActions,
@@ -121,5 +132,6 @@ export const useChatStore = create<ChatStore>((set, get) => {
     ...offlineActions,
     ...joinRequestActions,
     ...messageSelectionActions,
+    ...topicActions,
   };
 });

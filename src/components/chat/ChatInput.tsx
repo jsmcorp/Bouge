@@ -65,6 +65,7 @@ export function ChatInput({
     sendTypingStatus,
     connectionStatus,
     uploadingFile,
+    activeTopicId,
   } = useChatStore();
 
   const currentGhostMode = isInThread ? threadGhostMode : mainChatGhostMode;
@@ -201,7 +202,8 @@ export function ChatInput({
         category || null,
         replyingTo?.id || null,
         null,
-        selectedImage
+        selectedImage,
+        activeTopicId || null
       ).catch((error) => console.error('❌ sendMessage promise rejected:', error));
       
       console.log('✅ Message dispatched, clearing input');

@@ -14,6 +14,8 @@ import { SyncMetadataOperations } from './syncMetadataOperations';
 import { JoinRequestOperations, LocalJoinRequest } from './joinRequestOperations';
 import { TombstoneOperations } from './tombstoneOperations';
 import { RepairOperations } from './repairOperations';
+import { TopicOperations } from './topicOperations';
+import { TopicOutboxOperations } from './topicOutboxOperations';
 import {
   LocalMessage,
   LocalPoll,
@@ -28,7 +30,11 @@ import {
   StorageStats,
   LocalContact,
   ContactUserMapping,
-  RegisteredContact
+  RegisteredContact,
+  LocalTopic,
+  LocalTopicReadStatus,
+  LocalTopicViewQueue,
+  TopicOutboxOperation
 } from './types';
 
 class SQLiteService {
@@ -49,6 +55,8 @@ class SQLiteService {
   private joinRequestOps: JoinRequestOperations;
   private tombstoneOps: TombstoneOperations;
   private repairOps: RepairOperations;
+  private topicOps: TopicOperations;
+  private topicOutboxOps: TopicOutboxOperations;
 
   private constructor() {
     this.dbManager = new DatabaseManager();
@@ -67,6 +75,8 @@ class SQLiteService {
     this.joinRequestOps = new JoinRequestOperations(this.dbManager);
     this.tombstoneOps = new TombstoneOperations(this.dbManager);
     this.repairOps = new RepairOperations(this.dbManager);
+    this.topicOps = new TopicOperations(this.dbManager);
+    this.topicOutboxOps = new TopicOutboxOperations(this.dbManager);
   }
 
   public static getInstance(): SQLiteService {
@@ -141,12 +151,21 @@ class SQLiteService {
     message_type: string;
     category: string | null;
     parent_id: string | null;
+    topic_id?: string | null;
     image_url: string | null;
     created_at: string | number;
     updated_at?: string | number | null;
     deleted_at?: string | number | null;
   }>): Promise<number> {
     return this.messageOps.syncMessagesFromRemote(groupId, messages);
+  }
+
+  /**
+   * Get messages by topic_id (Task 7.3)
+   * Filter messages where topic_id matches
+   */
+  public async getMessagesByTopicId(topicId: string): Promise<LocalMessage[]> {
+    return this.messageOps.getMessagesByTopicId(topicId);
   }
 
   // ============================================
@@ -709,6 +728,247 @@ class SQLiteService {
     confessions: number;
   }> {
     return this.repairOps.cleanupAllOrphanedData();
+  }
+
+  // ============================================
+  // TOPIC OPERATIONS
+  // ============================================
+
+  /**
+   * Save a topic to cache
+   */
+  public async saveTopicToCache(topic: LocalTopic): Promise<void> {
+    return this.topicOps.saveTopicToCache(topic);
+  }
+
+  /**
+   * Get topics from cache with pagination
+   */
+  public async getTopicsFromCache(
+    groupId: string,
+    limit: number,
+    offset: number
+  ): Promise<LocalTopic[]> {
+    return this.topicOps.getTopicsFromCache(groupId, limit, offset);
+  }
+
+  /**
+   * Update topic metrics (views, likes, replies counts)
+   */
+  public async updateTopicMetrics(
+    topicId: string,
+    metrics: {
+      views_count?: number;
+      likes_count?: number;
+      replies_count?: number;
+    }
+  ): Promise<void> {
+    return this.topicOps.updateTopicMetrics(topicId, metrics);
+  }
+
+  /**
+   * Delete a topic from cache
+   */
+  public async deleteTopicFromCache(topicId: string): Promise<void> {
+    return this.topicOps.deleteTopicFromCache(topicId);
+  }
+
+  /**
+   * Save a topic like to cache
+   */
+  public async saveTopicLike(topicId: string, userId: string): Promise<void> {
+    return this.topicOps.saveTopicLike(topicId, userId);
+  }
+
+  /**
+   * Delete a topic like from cache
+   */
+  public async deleteTopicLike(topicId: string, userId: string): Promise<void> {
+    return this.topicOps.deleteTopicLike(topicId, userId);
+  }
+
+  /**
+   * Check if a topic is liked by a user
+   */
+  public async isTopicLikedByUser(topicId: string, userId: string): Promise<boolean> {
+    return this.topicOps.isTopicLikedByUser(topicId, userId);
+  }
+
+  /**
+   * Update topic read status (local-first)
+   */
+  public async updateTopicReadStatus(
+    topicId: string,
+    groupId: string,
+    userId: string,
+    lastReadMessageId: string | null,
+    lastReadAt: number
+  ): Promise<void> {
+    return this.topicOps.updateTopicReadStatus(
+      topicId,
+      groupId,
+      userId,
+      lastReadMessageId,
+      lastReadAt
+    );
+  }
+
+  /**
+   * Get topic read status for a user
+   */
+  public async getTopicReadStatus(
+    topicId: string,
+    userId: string
+  ): Promise<LocalTopicReadStatus | null> {
+    return this.topicOps.getTopicReadStatus(topicId, userId);
+  }
+
+  /**
+   * Get all topic read statuses for a user in a group
+   */
+  public async getAllTopicReadStatuses(
+    userId: string,
+    groupId: string
+  ): Promise<LocalTopicReadStatus[]> {
+    return this.topicOps.getAllTopicReadStatuses(userId, groupId);
+  }
+
+  /**
+   * Queue a topic view for sync
+   */
+  public async queueTopicView(topicId: string, userId: string): Promise<void> {
+    return this.topicOps.queueTopicView(topicId, userId);
+  }
+
+  /**
+   * Get unsynced views from queue
+   */
+  public async getUnsyncedViewsQueue(): Promise<LocalTopicViewQueue[]> {
+    return this.topicOps.getUnsyncedViewsQueue();
+  }
+
+  /**
+   * Mark views as synced
+   */
+  public async markViewsAsSynced(ids: number[]): Promise<void> {
+    return this.topicOps.markViewsAsSynced(ids);
+  }
+
+  /**
+   * Calculate unread count for a topic (local-first)
+   */
+  public async calculateTopicUnreadCount(
+    topicId: string,
+    userId: string
+  ): Promise<number> {
+    return this.topicOps.calculateTopicUnreadCount(topicId, userId);
+  }
+
+  // ============================================
+  // TOPIC OUTBOX OPERATIONS
+  // ============================================
+
+  /**
+   * Add a topic operation to the outbox queue
+   */
+  public async addTopicOperationToOutbox(
+    operation: Omit<TopicOutboxOperation, 'id'>
+  ): Promise<void> {
+    return this.topicOutboxOps.addToOutbox(operation);
+  }
+
+  /**
+   * Get pending topic operations from outbox
+   */
+  public async getPendingTopicOperations(): Promise<TopicOutboxOperation[]> {
+    return this.topicOutboxOps.getPendingOperations();
+  }
+
+  /**
+   * Remove a topic operation from outbox after successful sync
+   */
+  public async removeTopicOperationFromOutbox(id: number): Promise<void> {
+    return this.topicOutboxOps.removeFromOutbox(id);
+  }
+
+  /**
+   * Update retry count for failed topic operation
+   */
+  public async updateTopicOperationRetry(id: number, retryCount: number): Promise<void> {
+    return this.topicOutboxOps.updateRetry(id, retryCount);
+  }
+
+  /**
+   * Get count of pending topic operations
+   */
+  public async getPendingTopicOperationsCount(): Promise<number> {
+    return this.topicOutboxOps.getPendingCount();
+  }
+
+  /**
+   * Clear all operations for a specific topic
+   */
+  public async clearTopicOperations(topicId: string): Promise<void> {
+    return this.topicOutboxOps.clearTopicOperations(topicId);
+  }
+
+  /**
+   * Get topic operations by type
+   */
+  public async getTopicOperationsByType(
+    operationType: 'create_topic' | 'toggle_like' | 'increment_view' | 'update_read_status'
+  ): Promise<TopicOutboxOperation[]> {
+    return this.topicOutboxOps.getOperationsByType(operationType);
+  }
+
+  /**
+   * Remove expired topics from cache (Task 9.3)
+   */
+  public async cleanupExpiredTopics(): Promise<number> {
+    return this.topicOps.cleanupExpiredTopics();
+  }
+
+  /**
+   * Get all expired topic IDs (Task 9.3)
+   */
+  public async getExpiredTopicIds(): Promise<string[]> {
+    return this.topicOps.getExpiredTopicIds();
+  }
+
+  /**
+   * Delete a topic and all associated data with cascade deletion (Task 10.2)
+   * Deletes:
+   * - Topic from topics_cache
+   * - Associated likes from topic_likes_cache
+   * - Associated messages with topic_id
+   * - Read status from topic_read_status
+   * - Queued views from topic_views_queue
+   * 
+   * Requirements: 6.4, 6.6
+   */
+  public async cascadeDeleteTopic(topicId: string): Promise<void> {
+    return this.topicOps.cascadeDeleteTopic(topicId);
+  }
+
+  /**
+   * Delete multiple topics and all associated data (batch cascade deletion) (Task 10.2)
+   * More efficient than calling cascadeDeleteTopic multiple times
+   * 
+   * Requirements: 6.4, 6.6
+   */
+  public async cascadeDeleteTopics(topicIds: string[]): Promise<number> {
+    return this.topicOps.cascadeDeleteTopics(topicIds);
+  }
+
+  /**
+   * Clean up expired topics with cascade deletion (Task 10.2)
+   * This is the main method that should be called periodically to remove expired topics
+   * It combines expiration checking with cascade deletion
+   * 
+   * Requirements: 6.1, 6.4, 6.6
+   */
+  public async cleanupExpiredTopicsWithCascade(): Promise<number> {
+    return this.topicOps.cleanupExpiredTopicsWithCascade();
   }
 }
 

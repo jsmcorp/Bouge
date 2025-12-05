@@ -2303,7 +2303,7 @@ class SupabasePipeline {
           }
 
           // Legacy ghost items may miss requires_pseudonym; perform pseudonym upsert for any ghost
-          else if (!!messageData?.is_ghost) {
+          else if (messageData?.is_ghost) {
             this.log(`[#${outboxItem.id}] ghost message without requires_pseudonym flag – attempting pseudonym upsert`);
             const doPseudonym = async () => {
               const mod = await import('./pseudonymService');

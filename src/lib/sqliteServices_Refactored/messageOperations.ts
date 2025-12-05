@@ -10,8 +10,8 @@ export class MessageOperations {
 
     await db.run(
       `INSERT OR REPLACE INTO messages
-       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at, is_viewed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, topic_id, image_url, created_at, updated_at, deleted_at, is_viewed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         message.id,
         message.group_id,
@@ -21,6 +21,7 @@ export class MessageOperations {
         message.message_type,
         message.category,
         message.parent_id,
+        message.topic_id,
         message.image_url,
         message.created_at,
         message.updated_at || null,
@@ -105,6 +106,24 @@ export class MessageOperations {
     return result.values || [];
   }
 
+  /**
+   * Task 7.3: Get messages by topic_id
+   * Filter messages where topic_id matches
+   */
+  public async getMessagesByTopicId(topicId: string): Promise<LocalMessage[]> {
+    await this.dbManager.checkDatabaseReady();
+    const db = this.dbManager.getConnection();
+
+    const sql = `
+      SELECT * FROM messages
+      WHERE topic_id = ?
+      ORDER BY created_at ASC
+    `;
+
+    const result = await db.query(sql, [topicId]);
+    return result.values || [];
+  }
+
   public async getLatestMessageTimestamp(groupId: string): Promise<number> {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
@@ -180,6 +199,7 @@ export class MessageOperations {
     message_type: string;
     category: string | null;
     parent_id: string | null;
+    topic_id?: string | null;
     image_url: string | null;
     created_at: string | number;
     updated_at?: string | number | null;
@@ -221,6 +241,7 @@ export class MessageOperations {
           message_type: messageType,
           category: message.category || null,
           parent_id: message.parent_id || null,
+          topic_id: message.topic_id || null,
           image_url: message.image_url || null,
           created_at: typeof message.created_at === 'string'
             ? new Date(message.created_at).getTime()

@@ -7,6 +7,7 @@ export class DatabaseManager {
   private sqlite: SQLiteConnection;
   private db: SQLiteDBConnection | null = null;
   private isInitialized = false;
+  private isInitializing = false;
   private readonly dbName = 'confessr_db';
   private readonly dbVersion = 1;
 
@@ -15,7 +16,24 @@ export class DatabaseManager {
   }
 
   public async initialize(): Promise<void> {
-    if (this.isInitialized) return;
+    if (this.isInitialized) {
+      console.log('✅ Database already initialized, skipping...');
+      return;
+    }
+    
+    if (this.isInitializing) {
+      console.log('⏳ Database initialization already in progress, waiting...');
+      // Wait for the ongoing initialization to complete
+      while (this.isInitializing) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (this.isInitialized) {
+        console.log('✅ Database initialized by concurrent call');
+        return;
+      }
+    }
+    
+    this.isInitializing = true;
 
     if (!Capacitor.isNativePlatform()) {
       console.warn('⚠️ SQLite runs only on native platforms');
@@ -51,7 +69,10 @@ export class DatabaseManager {
       await this.performHealthCheck();
     } catch (err) {
       console.error('💥 SQLite init failed:', err);
+      this.isInitializing = false;
       throw err;
+    } finally {
+      this.isInitializing = false;
     }
   }
 
@@ -176,18 +197,35 @@ export class DatabaseManager {
   private async openEncryptedDatabase(): Promise<void> {
     try {
       console.log('🔓 Opening encrypted database with secret mode...');
-      const conn = await this.sqlite.createConnection(
-        this.dbName,
-        true,  // encrypted
-        'secret',  // mode for accessing encrypted database
-        this.dbVersion,
-        false  // not readonly
-      );
       
-      // Open the encrypted database
-      await conn.open();
-      this.db = conn;
-      console.log('✅ Encrypted database opened successfully');
+      // Check if connection already exists
+      const existingConn = await this.sqlite.isConnection(this.dbName, false);
+      if (existingConn.result) {
+        console.log('♻️ Connection already exists, retrieving existing connection...');
+        this.db = await this.sqlite.retrieveConnection(this.dbName, false);
+        
+        // Verify the connection is open
+        const isOpen = await this.db.isDBOpen();
+        if (!isOpen.result) {
+          console.log('🔓 Connection exists but closed, reopening...');
+          await this.db.open();
+        }
+        console.log('✅ Using existing encrypted database connection');
+      } else {
+        console.log('🆕 Creating new encrypted database connection...');
+        const conn = await this.sqlite.createConnection(
+          this.dbName,
+          true,  // encrypted
+          'secret',  // mode for accessing encrypted database
+          this.dbVersion,
+          false  // not readonly
+        );
+        
+        // Open the encrypted database
+        await conn.open();
+        this.db = conn;
+        console.log('✅ Encrypted database opened successfully');
+      }
       
       /* 6️⃣ security pragma */
       await this.db.execute('PRAGMA cipher_memory_security = ON;');
@@ -424,6 +462,89 @@ export class DatabaseManager {
         ON contact_user_mapping(contact_phone);
       CREATE INDEX IF NOT EXISTS idx_contact_mapping_user
         ON contact_user_mapping(user_id);
+
+      /* ============================================ */
+      /* TOPICS FEATURE TABLES                       */
+      /* ============================================ */
+
+      /* Topics cache - stores topic metadata for offline access */
+      CREATE TABLE IF NOT EXISTS topics_cache (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('text', 'poll', 'confession', 'news', 'image')),
+        title TEXT,
+        content TEXT NOT NULL,
+        author_id TEXT,
+        author_name TEXT,
+        author_avatar TEXT,
+        pseudonym TEXT,
+        expires_at INTEGER, -- Unix timestamp, NULL means never expires
+        views_count INTEGER DEFAULT 0,
+        likes_count INTEGER DEFAULT 0,
+        replies_count INTEGER DEFAULT 0,
+        is_anonymous INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        synced_at INTEGER,
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+      );
+
+      /* Topic likes cache - stores user likes for offline access */
+      CREATE TABLE IF NOT EXISTS topic_likes_cache (
+        topic_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        synced INTEGER DEFAULT 0,
+        PRIMARY KEY (topic_id, user_id)
+      );
+
+      /* Topic read status - local-first read tracking */
+      CREATE TABLE IF NOT EXISTS topic_read_status (
+        topic_id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        last_read_message_id TEXT,
+        last_read_at INTEGER NOT NULL,
+        synced INTEGER DEFAULT 0
+      );
+
+      /* Topic views queue - queues view increments for sync */
+      CREATE TABLE IF NOT EXISTS topic_views_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        viewed_at INTEGER NOT NULL,
+        synced INTEGER DEFAULT 0
+      );
+
+      /* Topic outbox - queues topic operations for offline sync */
+      CREATE TABLE IF NOT EXISTS topic_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_type TEXT NOT NULL CHECK (operation_type IN ('create_topic', 'toggle_like', 'increment_view', 'update_read_status')),
+        topic_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        payload TEXT NOT NULL, -- JSON string with operation-specific data
+        retry_count INTEGER DEFAULT 0,
+        next_retry_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      /* Topics indexes for performance */
+      CREATE INDEX IF NOT EXISTS idx_topics_cache_group_created
+        ON topics_cache(group_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_topics_cache_expires
+        ON topics_cache(expires_at) WHERE expires_at IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_topic_likes_cache_topic
+        ON topic_likes_cache(topic_id);
+      CREATE INDEX IF NOT EXISTS idx_topic_likes_cache_user
+        ON topic_likes_cache(user_id);
+      CREATE INDEX IF NOT EXISTS idx_topic_read_status_user_group
+        ON topic_read_status(user_id, group_id);
+      CREATE INDEX IF NOT EXISTS idx_topic_views_queue_synced
+        ON topic_views_queue(synced) WHERE synced = 0;
+      CREATE INDEX IF NOT EXISTS idx_topic_outbox_retry
+        ON topic_outbox(next_retry_at) WHERE retry_count < 5;
     `;
 
     await this.db!.execute(sql);
@@ -476,6 +597,16 @@ export class DatabaseManager {
       await ensureColumn('messages', 'updated_at', 'INTEGER');
       await ensureColumn('messages', 'deleted_at', 'INTEGER');
       await ensureColumn('messages', 'is_viewed', 'INTEGER', 'DEFAULT 0');
+      await ensureColumn('messages', 'topic_id', 'TEXT');
+      
+      // Create index for topic_id after column is added
+      try {
+        await this.db!.execute('CREATE INDEX IF NOT EXISTS idx_msg_topic_id ON messages(topic_id, created_at DESC);');
+        console.log('✅ Created index idx_msg_topic_id');
+      } catch (error) {
+        // Index might already exist, that's okay
+        console.log('ℹ️ Index idx_msg_topic_id already exists or failed to create');
+      }
 
       // Groups
       await ensureColumn('groups', 'description', 'TEXT');

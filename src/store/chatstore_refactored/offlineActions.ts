@@ -77,7 +77,7 @@ export interface OfflineActions {
   markMessageAsDraft: (msg: {
     id: string; group_id: string; user_id: string; content: string; is_ghost: boolean;
     message_type: string; category: string | null; parent_id: string | null;
-    image_url: string | null; created_at: number;
+    image_url: string | null; created_at: number; topic_id?: string | null;
   }) => Promise<void>;
   enqueueOutbox: (msg: {
     id: string; group_id: string; user_id: string; content: string; is_ghost: boolean;
@@ -231,7 +231,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         category: msg.category || null,
         parent_id: msg.parent_id || null,
         image_url: msg.image_url || null,
-        created_at: msg.created_at
+        created_at: msg.created_at,
+        topic_id: msg.topic_id || null,
       });
     } catch (e) {
       console.error('❌ markMessageAsDraft failed:', e);

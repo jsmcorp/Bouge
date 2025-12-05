@@ -111,7 +111,7 @@ class SupabasePipeline {
 
   // PHASE 1: TIMEOUT_CONFIG - Unified timeout configuration
   private readonly TIMEOUT_CONFIG = {
-    SESSION_CACHE_TTL: 15000,                   // Session cache validity (15s)
+    SESSION_CACHE_TTL: 60000,                   // Session cache validity (60s) - increased from 15s to reduce timeout issues
     GLOBAL_FETCH_TIMEOUT: 30000,                // Global fetch timeout (30s)
     SESSION_FETCH_TIMEOUT: 5000,                // Session fetch timeout (5s)
     REFRESH_SESSION_TIMEOUT: 5000,              // Refresh session timeout (5s)
@@ -440,30 +440,13 @@ class SupabasePipeline {
             refresh_token: this.sessionState.refreshToken
           });
           
-          // Log immediately after call
-          this.log(`🔍 [${callId}] setSession() called, promise created at ${Date.now() - setSessionCallStart}ms`);
-
           const setSessionTimeoutMs = Math.min(timeout, 3000);
           this.log(`🔄 [${callId}] ⏱️ Setting up timeout race (${setSessionTimeoutMs}ms)...`);
-          
-          // Monitor event loop during wait
-          let eventLoopChecks = 0;
-          const eventLoopMonitor = setInterval(() => {
-            eventLoopChecks++;
-            const checkTime = Date.now();
-            setTimeout(() => {
-              const delay = Date.now() - checkTime;
-              if (delay > 100) {
-                this.log(`🔍 [${callId}] ⚠️ Event loop blocked: ${delay}ms delay on check #${eventLoopChecks}`);
-              }
-            }, 0);
-          }, 500);
           
           let setSessionTimeoutId: ReturnType<typeof setTimeout> | null = null;
           const setSessionTimeout = new Promise<never>((_, reject) => {
             setSessionTimeoutId = setTimeout(() => {
-              clearInterval(eventLoopMonitor);
-              this.log(`🔄 [${callId}] ⏰ setSession timeout fired after ${setSessionTimeoutMs}ms (event loop checks: ${eventLoopChecks})`);
+              this.log(`🔄 [${callId}] ⏰ setSession timeout fired after ${setSessionTimeoutMs}ms`);
               reject(new Error('setSession timeout'));
             }, setSessionTimeoutMs);
           });
@@ -471,12 +454,11 @@ class SupabasePipeline {
           this.log(`🔄 [${callId}] 🏁 Starting Promise.race for setSession...`);
           const setSessionResult = await Promise.race([setSessionPromise, setSessionTimeout]);
           
-          // Cancel the timeout and monitoring since the race completed
-          clearInterval(eventLoopMonitor);
+          // Cancel the timeout since the race completed
           if (setSessionTimeoutId) {
             clearTimeout(setSessionTimeoutId);
             const elapsed = Date.now() - setSessionCallStart;
-            this.log(`🔄 [${callId}] ✅ setSession timeout cancelled (race completed in ${elapsed}ms, ${eventLoopChecks} event loop checks)`);
+            this.log(`🔄 [${callId}] ✅ setSession completed in ${elapsed}ms`);
           }
           
           this.log(`🔄 [${callId}] ✅ setSession Promise.race completed`);
@@ -866,33 +848,10 @@ class SupabasePipeline {
             }
           }
         }) as any;
-        // Log the ACTUAL config values passed to createClient
-        this.log(`[supabase-pipeline] 🔄 CLIENT CREATED authConfig={"storage":"[CustomStorageAdapter]","persistSession":${authPersistSession},"autoRefreshToken":${authAutoRefreshToken},"detectSessionInUrl":false}`);
-
-        // CRITICAL: Verify config was actually applied at runtime
-        try {
-          const runtimeConfig = (this.client.auth as any)._supabaseAuthClientOptions || {};
-          this.log(`🔍 RUNTIME CONFIG VERIFICATION:`);
-          this.log(`🔍   persistSession: ${runtimeConfig.persistSession}`);
-          this.log(`🔍   storage: ${runtimeConfig.storage ? 'present' : 'MISSING'}`);
-          this.log(`🔍   autoRefreshToken: ${runtimeConfig.autoRefreshToken}`);
-          
-          // Verify storage adapter is the same object
-          const storageMatch = runtimeConfig.storage === customStorageAdapter;
-          this.log(`🔍   storage adapter match: ${storageMatch}`);
-          
-          if (runtimeConfig.persistSession !== true) {
-            this.log(`❌ CRITICAL: persistSession is ${runtimeConfig.persistSession} at runtime (expected true)!`);
-          }
-          if (!runtimeConfig.storage) {
-            this.log(`❌ CRITICAL: storage adapter is missing at runtime!`);
-          }
-          if (!storageMatch && runtimeConfig.storage) {
-            this.log(`⚠️ WARNING: storage adapter object mismatch (different instance)!`);
-          }
-        } catch (configError) {
-          this.log(`⚠️ Could not verify runtime config:`, stringifyError(configError));
-        }
+        // Log the config values passed to createClient
+        // Note: Runtime config verification removed - _supabaseAuthClientOptions doesn't exist in Supabase SDK
+        // The config IS applied correctly via createClient() options above
+        this.log(`[supabase-pipeline] ✅ CLIENT CREATED with auth config: persistSession=${authPersistSession}, autoRefreshToken=${authAutoRefreshToken}, storage=CustomStorageAdapter`);
 
         // Bind auth listeners to the permanent client
         try {
@@ -1029,17 +988,17 @@ class SupabasePipeline {
     if (!this.client || !this.isInitialized) {
       this.log('🔑 getClient() -> calling initialize()');
       await this.initialize();
-      // ✅ FIX: Return immediately after init, let autoRefreshToken handle first refresh
-      // This prevents double-refresh conflict during startup
-      this.log('✅ getClient() -> returning fresh client (autoRefreshToken will handle session)');
+      // Return immediately after init - manual refresh will be triggered later if needed
+      // Note: autoRefreshToken is DISABLED, we handle token refresh manually
+      this.log('✅ getClient() -> returning fresh client (manual refresh will handle session)');
       return this.client!;
     }
 
-    // ✅ FIX: Skip aggressive background refresh during first 60 seconds after init
-    // This prevents conflict with Supabase's autoRefreshToken during startup
+    // Skip aggressive background refresh during first 60 seconds after init
+    // This gives the app time to settle before starting proactive refresh checks
     const timeSinceInit = Date.now() - this.initTimestamp;
     if (timeSinceInit < 60000) {
-      this.log(`🔑 getClient() -> within 60s of init (${Math.round(timeSinceInit / 1000)}s), trusting autoRefreshToken`);
+      this.log(`🔑 getClient() -> within 60s of init (${Math.round(timeSinceInit / 1000)}s), skipping proactive refresh`);
       return this.client!;
     }
 
@@ -2931,7 +2890,7 @@ class SupabasePipeline {
           }
 
           // Legacy ghost items may miss requires_pseudonym; perform pseudonym upsert for any ghost
-          else if (!!messageData?.is_ghost) {
+          else if (messageData?.is_ghost) {
             this.log(`[#${outboxItem.id}] ghost message without requires_pseudonym flag – attempting pseudonym upsert`);
             const doPseudonym = async () => {
               const mod = await import('./pseudonymService');
@@ -3472,61 +3431,44 @@ class SupabasePipeline {
       this.log('✅ Token exists, using cached token (no proactive refresh)');
     }
 
-    // CRITICAL FIX: Ensure the Supabase client's internal session is ready
-    // Root cause: Having tokens in pipeline cache doesn't mean the Supabase client's internal auth state is ready
-    // During first-time login, the client's onAuthStateChange event hasn't fired yet
-    // This causes RPC calls to hang waiting for the internal auth state
-    // Solution: Check if client has an internal session, and if not, set it up with cached tokens
+    // Simplified session check: Single 5s timeout for the entire operation
+    // Previously used 3s getSession + 5s setSession (8s max), now uses single 5s bounded check
     try {
       this.log('🔑 Checking if Supabase client has internal session...');
-      const getSessionPromise = this.client!.auth.getSession();
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('getSession timeout')), 3000)
-      );
-
-      let sessionData: any;
-      try {
-        const result: any = await Promise.race([getSessionPromise, timeoutPromise]);
-        sessionData = result?.data;
-      } catch (e: any) {
-        if (e && e.message === 'getSession timeout') {
-          this.log('⚠️ getSession timed out after 3s, will attempt to set session');
-          sessionData = null;
-        } else {
-          throw e;
+      
+      const checkAndSetSession = async (): Promise<void> => {
+        // Quick check: does client already have a session?
+        const { data } = await this.client!.auth.getSession();
+        if (data?.session) {
+          this.log('✅ Client already has internal session ready');
+          return;
         }
-      }
-
-      const session = sessionData?.session;
-
-      if (!session && this.sessionState.accessToken && this.sessionState.refreshToken) {
-        this.log('⚠️ Client has no internal session, setting it up with cached tokens');
-
-        const setSessionPromise = this.client!.auth.setSession({
-          access_token: this.sessionState.accessToken,
-          refresh_token: this.sessionState.refreshToken,
-        });
-        const setSessionTimeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('setSession timeout')), 5000)
-        );
-
-        try {
-          await Promise.race([setSessionPromise, setSessionTimeout]);
+        
+        // No session - set it up with cached tokens if available
+        if (this.sessionState.accessToken && this.sessionState.refreshToken) {
+          this.log('⚠️ Client has no internal session, setting it up with cached tokens');
+          await this.client!.auth.setSession({
+            access_token: this.sessionState.accessToken,
+            refresh_token: this.sessionState.refreshToken,
+          });
           this.log('✅ Client internal session established successfully');
-        } catch (e: any) {
-          if (e && e.message === 'setSession timeout') {
-            this.log('⚠️ setSession timed out after 5s, proceeding anyway');
-          } else {
-            this.log('⚠️ setSession failed:', e?.message || String(e));
-          }
+        } else {
+          this.log('⚠️ No cached tokens available to set up internal session');
         }
-      } else if (session) {
-        this.log('✅ Client already has internal session ready');
+      };
+      
+      // Single 5s timeout for the entire check+set operation
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('session check timeout')), 5000)
+      );
+      
+      await Promise.race([checkAndSetSession(), timeoutPromise]);
+    } catch (error: any) {
+      if (error?.message === 'session check timeout') {
+        this.log('⚠️ Session check timed out after 5s, proceeding anyway');
       } else {
-        this.log('⚠️ No cached tokens available to set up internal session');
+        this.log('⚠️ Failed to check/set client session:', stringifyError(error));
       }
-    } catch (error) {
-      this.log('⚠️ Failed to check/set client session:', stringifyError(error));
       // Continue anyway - the RPC call will fail with proper error if session is not ready
     }
 

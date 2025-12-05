@@ -66,6 +66,7 @@ export interface Message {
   message_type: string;
   category: string | null;
   parent_id: string | null;
+  topic_id: string | null; // Reference to topic if this message is part of a topic chat
   image_url: string | null;
   created_at: string;
   author?: {
@@ -95,6 +96,57 @@ export interface TypingUser {
   display_name: string;
   avatar_url: string | null;
   is_ghost: boolean;
+}
+
+export interface Topic {
+  id: string;
+  group_id: string;
+  message_id: string;
+  type: 'text' | 'poll' | 'confession' | 'news' | 'image';
+  title?: string;
+  content: string;
+  author?: {
+    id: string;
+    display_name: string;
+    avatar_url: string | null;
+  };
+  pseudonym?: string;
+  expires_at: number | null; // Unix timestamp, null = never expires
+  views_count: number;
+  likes_count: number;
+  replies_count: number;
+  unread_count: number;
+  is_anonymous: boolean;
+  is_liked_by_user: boolean;
+  created_at: number;
+  poll?: Poll;
+  image_url?: string;
+}
+
+export interface TopicLike {
+  topic_id: string;
+  user_id: string;
+  created_at: number;
+}
+
+export interface TopicReadStatus {
+  topic_id: string;
+  group_id: string;
+  user_id: string;
+  last_read_message_id: string | null;
+  last_read_at: number;
+  synced: boolean;
+}
+
+export interface CreateTopicInput {
+  group_id: string;
+  type: 'text' | 'poll' | 'confession' | 'news' | 'image';
+  title?: string;
+  content: string;
+  expires_in: '24h' | '7d' | 'never';
+  is_anonymous?: boolean;
+  poll_options?: string[];
+  image_file?: File;
 }
 
 export interface ChatState {
@@ -152,4 +204,12 @@ export interface ChatState {
   // Message selection
   selectionMode: boolean;
   selectedMessageIds: Set<string>;
+  // Topics
+  topics: Topic[];
+  activeTopicId: string | null;
+  isLoadingTopics: boolean;
+  topicsPage: number;
+  hasMoreTopics: boolean;
+  topicReadStatuses: Record<string, TopicReadStatus>;
+  topicLikes: Record<string, boolean>; // Map of topicId -> isLikedByCurrentUser
 }

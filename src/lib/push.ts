@@ -340,6 +340,7 @@ async function handleNotificationReceived(data: any): Promise<void> {
 						parent_id: data.parent_id || null,
 						image_url: data.image_url || null,
 						created_at: new Date(data.created_at).getTime(),
+						topic_id: data.topic_id || null,
 					});
 					
 					const storeDuration = Math.round(performance.now() - startTime);

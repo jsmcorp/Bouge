@@ -177,6 +177,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         reactions: [],
         delivery_status: 'sending',
         dedupe_key: dedupeKey,
+        topic_id: null,
       };
 
       // Add optimistic message to UI
@@ -544,7 +545,8 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               category: successData.category || null,
               parent_id: successData.parent_id || null,
               image_url: successData.image_url || null,
-              created_at: new Date(successData.created_at).getTime()
+              created_at: new Date(successData.created_at).getTime(),
+              topic_id: successData.topic_id || null,
             });
 
             // Save user info

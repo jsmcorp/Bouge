@@ -9,5 +9,9 @@ export type {
   Message,
   Reaction,
   TypingUser,
+  Topic,
+  TopicLike,
+  TopicReadStatus,
+  CreateTopicInput,
   ChatState
 } from './chatstore_refactored';

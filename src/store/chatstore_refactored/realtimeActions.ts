@@ -24,6 +24,7 @@ interface DbMessageRow {
   image_url: string | null;
   created_at: string;
   dedupe_key?: string | null;
+  topic_id?: string | null;
 }
 
 interface DbPollRow {
@@ -307,6 +308,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 parent_id: msg.parent_id || null,
                 image_url: msg.image_url || null,
                 created_at: new Date(msg.created_at).getTime(),
+                topic_id: msg.topic_id || null,
               });
               log(`✅ Saved missed message to SQLite: ${msg.id}`);
             }
@@ -526,6 +528,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
       replies: [],
       delivery_status: 'delivered',
       dedupe_key: row.dedupe_key ?? null,
+      topic_id: row.topic_id || null,
       // Do NOT attach poll here to avoid double-fetch; poll handler will attach
     } as Message;
   }
@@ -1048,6 +1051,7 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                       parent_id: row.parent_id || null,
                       image_url: row.image_url || null,
                       created_at: new Date(row.created_at).getTime(),
+                      topic_id: row.topic_id || null,
                     });
                     log(`📨 Message persisted to SQLite: id=${row.id}`);
                     try { await sqliteService.updateLastSyncTimestamp(row.group_id, Date.now()); } catch {}

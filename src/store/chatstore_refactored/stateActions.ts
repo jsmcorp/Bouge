@@ -50,6 +50,8 @@ export interface StateActions {
   selectAllMessages: () => void;
   // Unread tracking
   clearUnreadSeparator: () => void;
+  // Topic management
+  setActiveTopicId: (topicId: string | null) => void;
 }
 
 export const createStateActions = (set: any, get: any): StateActions => ({
@@ -482,5 +484,11 @@ export const createStateActions = (set: any, get: any): StateActions => ({
       firstUnreadMessageId: null,
       unreadCount: 0 
     });
+  },
+
+  // Set active topic ID for topic chat
+  setActiveTopicId: (topicId) => {
+    console.log('[topics] Setting active topic ID:', topicId);
+    set({ activeTopicId: topicId });
   },
 });

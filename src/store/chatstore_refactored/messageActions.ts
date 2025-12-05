@@ -9,12 +9,12 @@ import { Message } from './types';
 // Device unlock tracking is now handled by deviceLockDetection and reconnectionManager
 
 export interface MessageActions {
-  sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null) => Promise<void>;
+  sendMessage: (groupId: string, content: string, isGhost: boolean, messageType?: string, category?: string | null, parentId?: string | null, pollId?: string | null, imageFile?: File | null, topicId?: string | null) => Promise<void>;
 }
 
 export const createMessageActions = (set: any, get: any): MessageActions => ({
-  sendMessage: async (groupId: string, content: string, isGhost: boolean, messageType = 'text', category: string | null = null, parentId: string | null = null, _pollId: string | null = null, imageFile: File | null = null) => {
-    console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType });
+  sendMessage: async (groupId: string, content: string, isGhost: boolean, messageType = 'text', category: string | null = null, parentId: string | null = null, _pollId: string | null = null, imageFile: File | null = null, topicId: string | null = null) => {
+    console.log('📤 sendMessage called:', { groupId, content, isGhost, messageType, topicId });
     
     let messageId: string = 'unknown';
     
@@ -132,6 +132,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         message_type: messageType,
         category,
         parent_id: parentId,
+        topic_id: topicId,
         image_url: imageUrl,
         created_at: new Date().toISOString(),
         author: isGhost ? undefined : { display_name: 'You', avatar_url: null },
@@ -178,6 +179,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
           message_type: messageType,
           category: category || null,
           parent_id: parentId || null,
+          topic_id: topicId || null,
           image_url: imageUrl || null,
           created_at: Date.now()
         });
@@ -199,6 +201,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
               message_type: messageType,
               category: category || null,
               parent_id: parentId || null,
+              topic_id: topicId || null,
               image_url: imageUrl || null,
               dedupe_key: dedupeKey,
               requires_pseudonym: isGhost ? true : undefined,
@@ -225,6 +228,7 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         message_type: messageType,
         category,
         parent_id: parentId,
+        topic_id: topicId,
         image_url: imageUrl,
         dedupe_key: dedupeKey,
       };
@@ -276,6 +280,34 @@ export const createMessageActions = (set: any, get: any): MessageActions => ({
         // Clear reply state if not in thread
         if (!get().activeThread) {
           set({ replyingTo: null });
+        }
+
+        // Task 7.1: Increment replies_count for topic if this message is part of a topic chat
+        if (topicId) {
+          try {
+            const topics = get().topics;
+            const updatedTopics = topics.map((t: any) => {
+              if (t.id === topicId) {
+                return { ...t, replies_count: t.replies_count + 1 };
+              }
+              return t;
+            });
+            set({ topics: updatedTopics });
+
+            // Update SQLite cache if available
+            const isNative = Capacitor.isNativePlatform();
+            const isSqliteReady = isNative && await sqliteService.isReady();
+            if (isSqliteReady) {
+              const topic = topics.find((t: any) => t.id === topicId);
+              if (topic) {
+                await sqliteService.updateTopicMetrics(topicId, {
+                  replies_count: topic.replies_count + 1
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Error incrementing topic replies_count:', error);
+          }
         }
 
       } catch (error: any) {

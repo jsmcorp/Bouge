@@ -7,6 +7,7 @@ export interface LocalMessage {
   message_type: string;
   category: string | null;
   parent_id: string | null;
+  topic_id: string | null; // Reference to topic if this message is part of a topic chat
   image_url: string | null;
   created_at: number; // Unix timestamp
   updated_at?: number;
@@ -64,6 +65,22 @@ export interface OutboxMessage {
   parent_id?: string | null;
   image_url?: string | null;
   is_ghost?: number;
+}
+
+/**
+ * TopicOutboxOperation - Represents a queued topic operation for offline sync
+ * Supports: topic creation, likes, views, read status updates
+ */
+export interface TopicOutboxOperation {
+  id?: number; // Auto-increment primary key
+  operation_type: 'create_topic' | 'toggle_like' | 'increment_view' | 'update_read_status';
+  topic_id: string;
+  user_id: string;
+  group_id: string;
+  payload: string; // JSON string containing operation-specific data
+  retry_count: number;
+  next_retry_at: number;
+  created_at: number;
 }
 
 export interface SyncState {
@@ -155,4 +172,65 @@ export interface RegisteredContact {
   user_display_name: string;
   user_avatar_url: string | null;
   is_registered: true; // Always true for this type
+}
+
+// ============================================
+// TOPICS FEATURE TYPES
+// ============================================
+
+/**
+ * LocalTopic - Represents a topic cached in SQLite
+ * Topics are special messages that have their own feed and chat rooms
+ */
+export interface LocalTopic {
+  id: string; // Topic ID (same as message ID)
+  group_id: string;
+  message_id: string;
+  type: 'text' | 'poll' | 'confession' | 'news' | 'image';
+  title: string | null;
+  content: string;
+  author_id: string | null; // Null if anonymous
+  author_name: string | null;
+  author_avatar: string | null;
+  pseudonym: string | null; // For anonymous topics
+  expires_at: number | null; // Unix timestamp, null = never expires
+  views_count: number;
+  likes_count: number;
+  replies_count: number;
+  is_anonymous: number; // SQLite uses INTEGER for boolean
+  created_at: number;
+  synced_at: number | null;
+}
+
+/**
+ * LocalTopicLike - Represents a user's like on a topic
+ */
+export interface LocalTopicLike {
+  topic_id: string;
+  user_id: string;
+  created_at: number;
+  synced: number; // SQLite uses INTEGER for boolean
+}
+
+/**
+ * LocalTopicReadStatus - Local-first read tracking for topics
+ */
+export interface LocalTopicReadStatus {
+  topic_id: string;
+  group_id: string;
+  user_id: string;
+  last_read_message_id: string | null;
+  last_read_at: number;
+  synced: number; // SQLite uses INTEGER for boolean
+}
+
+/**
+ * LocalTopicViewQueue - Queues view increments for sync
+ */
+export interface LocalTopicViewQueue {
+  id?: number; // Auto-increment primary key
+  topic_id: string;
+  user_id: string;
+  viewed_at: number;
+  synced: number; // SQLite uses INTEGER for boolean
 }

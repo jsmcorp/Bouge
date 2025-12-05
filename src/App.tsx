@@ -28,6 +28,7 @@ import { SetupPage } from '@/pages/onboarding/SetupPage';
 import DashboardPage from '@/pages/DashboardPage';
 import GroupPage from '@/pages/GroupPage';
 import GroupTopicsPage from '@/pages/GroupTopicsPage'; // New Topics Page
+import TopicChatPage from '@/pages/TopicChatPage'; // Topic Chat Page
 import ThreadViewPage from './pages/ThreadViewPage';
 import GroupDetailsViewPage from './pages/GroupDetailsViewPage';
 import SettingsPage from '@/pages/SettingsPage';
@@ -398,6 +399,16 @@ function AppContent() {
             element={
               <ProtectedRoute requireOnboarding={true}>
                 <GroupTopicsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Topic Chat Page - Individual Topic Discussion */}
+          <Route
+            path="/groups/:groupId/topics/:topicId"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <TopicChatPage />
               </ProtectedRoute>
             }
           />

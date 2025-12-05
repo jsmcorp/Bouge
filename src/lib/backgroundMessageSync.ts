@@ -287,6 +287,7 @@ class BackgroundMessageSyncService {
                   replies: [],
                   delivery_status: 'delivered' as const,
                   reactions: [],
+                  topic_id: msg.topic_id || null,
                 }));
                 
                 // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
@@ -396,6 +397,7 @@ class BackgroundMessageSyncService {
               replies: [],
               delivery_status: 'delivered' as const,
               reactions: [],
+              topic_id: msg.topic_id || null,
             }));
             
             // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
@@ -595,6 +597,7 @@ class BackgroundMessageSyncService {
                 replies: [],
                 delivery_status: 'delivered' as const,
                 reactions: [],
+                topic_id: msg.topic_id || null,
               }));
               
               // Sort messages by created_at ascending (oldest first) to match normal fetch behavior
@@ -691,6 +694,7 @@ class BackgroundMessageSyncService {
       parent_id: message.parent_id || null,
       image_url: message.image_url || null,
       created_at: new Date(message.created_at).getTime(),
+      topic_id: message.topic_id || null,
     });
   }
 

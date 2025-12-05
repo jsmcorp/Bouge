@@ -9,6 +9,8 @@ import { useChatStore } from '@/store/chatstore_refactored';
 // Import WhatsApp-style connection system
 import { whatsappConnection } from '@/lib/whatsappStyleConnection';
 import { mobileLogger } from '@/lib/mobileLogger';
+// Import topic debug utilities (Task 14.3)
+import '@/lib/topicDebug';
 // Import connectivity tester for debugging
 // Dev-only connectivity tester to avoid extra startup cost in production
 // Moved to dynamic import inside the async IIFE below

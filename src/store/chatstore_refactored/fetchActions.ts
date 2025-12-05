@@ -543,7 +543,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
             // which can timeout for 10s and block message display!
             // We'll get user votes in background after messages are displayed
             // Typing as nullable with id to allow optional chaining (user?.id)
-            let user: { id?: string } | null = null;
+            const user: { id?: string } | null = null;
 
             // Fetch reactions for all messages
             const messageIds = localMessages.map(msg => msg.id);
@@ -656,7 +656,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                 replies: [],
                 delivery_status: 'delivered' as const,
                 reactions: messageReactions,
-                poll: pollData
+                poll: pollData,
+                topic_id: msg.topic_id || null,
               };
             });
 
@@ -946,7 +947,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
                       replies: [],
                       delivery_status: 'delivered' as const,
                       reactions: [],
-                      poll: pollData
+                      poll: pollData,
+                      topic_id: msg.topic_id || null,
                     };
                   });
 
@@ -1463,6 +1465,7 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
   	              replies: [],
   	              delivery_status: 'delivered',
   	              reactions: [],
+  	              topic_id: msg.topic_id || null,
   	            };
   	          });
   	          combined = combined.concat(mapped);
