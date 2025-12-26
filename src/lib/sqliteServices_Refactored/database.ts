@@ -226,7 +226,8 @@ export class DatabaseManager {
         local_id INTEGER UNIQUE,
         updated_at INTEGER,
         deleted_at INTEGER,
-        is_viewed INTEGER DEFAULT 0
+        is_viewed INTEGER DEFAULT 0,
+        topic_id TEXT
       );
 
       CREATE TABLE IF NOT EXISTS groups (
@@ -476,6 +477,7 @@ export class DatabaseManager {
       await ensureColumn('messages', 'updated_at', 'INTEGER');
       await ensureColumn('messages', 'deleted_at', 'INTEGER');
       await ensureColumn('messages', 'is_viewed', 'INTEGER', 'DEFAULT 0');
+      await ensureColumn('messages', 'topic_id', 'TEXT');
 
       // Groups
       await ensureColumn('groups', 'description', 'TEXT');

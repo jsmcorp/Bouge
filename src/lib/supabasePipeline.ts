@@ -718,26 +718,47 @@ class SupabasePipeline {
    * Initialize Supabase client ONCE - never recreate, only initialize if missing
    */
   public async initialize(force: boolean = false): Promise<void> {
-    this.log(`🔄 initialize() called - force=${force} isInitialized=${this.isInitialized} hasClient=${!!this.client} initPromiseActive=${!!this.initializePromise}`);
+    const callId = `init-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    this.log(`🔄 [${callId}] initialize() called - force=${force} isInitialized=${this.isInitialized} hasClient=${!!this.client} initPromiseActive=${!!this.initializePromise}`);
 
     // PHASE 1 FIX: Allow recreation when circuit breaker opens (failureCount >= 1)
     // This enables fast recovery from hung connections
     if (this.client && this.isInitialized && !force && this.failureCount < this.config.maxFailures) {
-      this.log('🔄 initialize() early return (client exists and initialized, no failures)');
+      this.log(`🔄 [${callId}] initialize() early return (client exists and initialized, no failures)`);
       return;
     }
 
     if (this.failureCount >= this.config.maxFailures) {
-      this.log(`🔄 initialize() allowing recreation due to ${this.failureCount} failures (circuit breaker open)`);
+      this.log(`🔄 [${callId}] initialize() allowing recreation due to ${this.failureCount} failures (circuit breaker open)`);
     }
 
     if (this.initializePromise) {
-      this.log('🔄 initialize() waiting for existing initializePromise');
-      await this.initializePromise;
-      return;
+      this.log(`🔄 [${callId}] initialize() waiting for existing initializePromise (max 10s)...`);
+      
+      // CRITICAL FIX: Add timeout to prevent hanging forever on a stuck initializePromise
+      try {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('initializePromise wait timeout after 10s'));
+          }, 10000);
+        });
+        
+        await Promise.race([this.initializePromise, timeoutPromise]);
+        this.log(`🔄 [${callId}] initialize() existing promise completed`);
+        return;
+      } catch (error: any) {
+        if (error?.message?.includes('timeout')) {
+          this.log(`🔄 [${callId}] ⚠️ initializePromise timed out, clearing and proceeding with fresh init`);
+          // Clear the hung promise to allow fresh initialization
+          this.initializePromise = null;
+          // Fall through to create new initialization
+        } else {
+          throw error;
+        }
+      }
     }
 
-    this.log('🔄 Initializing Supabase client...');
+    this.log(`🔄 [${callId}] Initializing Supabase client...`);
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
     const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
     // PHASE 2: Removed cached env vars (derive from import.meta.env directly)
@@ -834,19 +855,32 @@ class SupabasePipeline {
           },
           global: {
             fetch: async (input: any, init?: any) => {
+              const fetchId = `fetch-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+              const fetchStart = Date.now();
+              let url = '';
+              let method = 'GET';
+              
               try {
-                const url = typeof input === 'string' ? input : (input?.url || '');
-                const method = init?.method || 'GET';
-                pipelineLog(`[38;5;159m[fetch][0m ${method} ${url}`);
+                url = typeof input === 'string' ? input : (input?.url || '');
+                method = init?.method || 'GET';
+                // Extract just the path for cleaner logs
+                const urlPath = url.includes('/rest/v1/') ? url.split('/rest/v1/')[1]?.split('?')[0] : url.split('/').pop();
+                pipelineLog(`🌐 [${fetchId}] FETCH START: ${method} ${urlPath || url.substring(0, 80)}`);
               } catch {}
 
               // PHASE 1 FIX: Attach AbortSignal to actually cancel hung requests
               const callerSignal = init?.signal;
               const controller = new AbortController();
               const timeoutId = setTimeout(() => {
-                pipelineLog(`⏱️ Global fetch timeout (30s) - aborting request to ${typeof input === 'string' ? input : input?.url}`);
+                pipelineLog(`⏱️ [${fetchId}] Global fetch timeout (30s) - aborting request`);
                 controller.abort();
               }, 30000);
+              
+              // Progress logger for long requests
+              const progressInterval = setInterval(() => {
+                const elapsed = Date.now() - fetchStart;
+                pipelineLog(`⏳ [${fetchId}] Fetch still pending after ${elapsed}ms...`);
+              }, 3000);
 
               try {
                 // Combine caller's signal with timeout signal
@@ -854,14 +888,21 @@ class SupabasePipeline {
                   ? (AbortSignal as any).any?.([callerSignal, controller.signal]) || callerSignal
                   : controller.signal;
 
+                pipelineLog(`🌐 [${fetchId}] Calling window.fetch()...`);
                 const response = await (window.fetch as any)(input, {
                   ...init,
                   signal: combinedSignal  // ✅ CRITICAL: Actually attach signal to fetch!
                 });
                 clearTimeout(timeoutId);
+                clearInterval(progressInterval);
+                const elapsed = Date.now() - fetchStart;
+                pipelineLog(`🌐 [${fetchId}] ✅ FETCH DONE: ${response.status} in ${elapsed}ms`);
                 return response;
-              } catch (error) {
+              } catch (error: any) {
                 clearTimeout(timeoutId);
+                clearInterval(progressInterval);
+                const elapsed = Date.now() - fetchStart;
+                pipelineLog(`🌐 [${fetchId}] ❌ FETCH ERROR after ${elapsed}ms: ${error?.message || error}`);
                 throw error;
               }
             }
@@ -2035,21 +2076,15 @@ class SupabasePipeline {
 
   /**
    * Fetch messages for a specific topic
+   * Uses direct REST to bypass Supabase client internal state issues after iOS idle
    */
   public async fetchTopicMessages(topicId: string, limit: number = 50): Promise<{ data: any[] | null; error: any }> {
-    return this.executeQuery(async () => {
-      const client = await this.getClientFast();
-      return client
-        .from('messages')
-        .select(`
-          *,
-          reactions(*),
-          users!messages_user_id_fkey(display_name, avatar_url, created_at)
-        `)
-        .eq('topic_id', topicId)
-        .order('created_at', { ascending: true })
-        .limit(limit);
-    }, 'fetch topic messages');
+    return this.queryDirect<any[]>('messages', {
+      select: '*,reactions(*),users!messages_user_id_fkey(display_name,avatar_url,created_at)',
+      filters: { topic_id: topicId },
+      order: 'created_at.asc',
+      limit
+    });
   }
 
   /**
@@ -2357,6 +2392,149 @@ class SupabasePipeline {
         return { data: null, error: new Error(`rpcDirect ${functionName} timeout after ${timeoutMs}ms`) };
       }
       this.log(`💥 rpcDirect exception for ${functionName}: ${stringifyError(e)}`);
+      return { data: null, error: e };
+    }
+  }
+
+  /**
+   * Direct REST SELECT query that bypasses the Supabase JS client's PostgREST wrapper.
+   * Use this when the SDK client hangs (e.g., after iOS idle/background).
+   * 
+   * @param table - Table name (e.g., 'topics', 'messages')
+   * @param options - Query options
+   * @param options.select - Columns to select (default: '*')
+   * @param options.filters - Object of column=value filters (uses eq by default)
+   * @param options.order - Order by column (e.g., 'created_at.desc')
+   * @param options.limit - Limit number of results
+   * @param options.single - If true, returns single object instead of array
+   * @param timeoutMs - Timeout in milliseconds (default: 10000)
+   * 
+   * @example
+   * // Simple query
+   * const { data, error } = await supabasePipeline.queryDirect('topics', {
+   *   filters: { group_id: 'xxx' },
+   *   order: 'created_at.desc'
+   * });
+   * 
+   * @example
+   * // With nested select (joins)
+   * const { data, error } = await supabasePipeline.queryDirect('topics', {
+   *   select: '*,messages!messages_topic_id_fkey(id,content,users(display_name))',
+   *   filters: { group_id: 'xxx' }
+   * });
+   */
+  public async queryDirect<T = any>(
+    table: string,
+    options: {
+      select?: string;
+      filters?: Record<string, any>;
+      order?: string;
+      limit?: number;
+      single?: boolean;
+    } = {},
+    timeoutMs: number = 10000
+  ): Promise<{ data: T | null; error: any }> {
+    const queryId = `query-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const startTime = Date.now();
+    
+    try {
+      this.log(`🔍 [${queryId}] queryDirect START: ${table}`);
+      
+      if (!this.isInitialized) {
+        this.log(`🔍 [${queryId}] Initializing client...`);
+        await this.initialize();
+      }
+
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+      const token = this.sessionState.accessToken;
+      if (!token) {
+        this.log(`⚠️ [${queryId}] queryDirect aborted: no access token`);
+        return { data: null, error: new Error('No access token available for queryDirect') };
+      }
+
+      // Build URL with query parameters
+      const params = new URLSearchParams();
+      
+      // Select columns
+      if (options.select) {
+        params.append('select', options.select);
+      }
+      
+      // Add filters (PostgREST format: column=eq.value)
+      if (options.filters) {
+        for (const [key, value] of Object.entries(options.filters)) {
+          if (value !== undefined && value !== null) {
+            params.append(key, `eq.${value}`);
+          }
+        }
+      }
+      
+      // Order
+      if (options.order) {
+        params.append('order', options.order);
+      }
+      
+      // Limit
+      if (options.limit) {
+        params.append('limit', String(options.limit));
+      }
+
+      const url = `${supabaseUrl}/rest/v1/${table}?${params.toString()}`;
+      
+      const controller = new AbortController();
+      const abortId = setTimeout(() => {
+        this.log(`⏱️ [${queryId}] queryDirect timeout after ${timeoutMs}ms`);
+        controller.abort();
+      }, timeoutMs);
+
+      const headers: Record<string, string> = {
+        'Accept': 'application/json',
+        'apikey': supabaseAnonKey,
+        'Authorization': `Bearer ${token}`,
+      };
+      
+      // For single row, add header
+      if (options.single) {
+        headers['Accept'] = 'application/vnd.pgrst.object+json';
+      }
+
+      this.log(`🔍 [${queryId}] GET ${table} (filters: ${JSON.stringify(options.filters || {})})`);
+      
+      const res = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(abortId);
+
+      const elapsed = Date.now() - startTime;
+
+      if (!res.ok) {
+        let text = '';
+        try { text = await res.text(); } catch (_) {}
+        const message = text || res.statusText || `HTTP ${res.status}`;
+        this.log(`❌ [${queryId}] queryDirect error ${res.status} after ${elapsed}ms: ${message.substring(0, 200)}`);
+        return { data: null, error: new Error(message) };
+      }
+
+      let json: any = null;
+      try { json = await res.json(); } catch (_) { json = null; }
+      
+      const resultCount = Array.isArray(json) ? json.length : (json ? 1 : 0);
+      this.log(`✅ [${queryId}] queryDirect SUCCESS: ${resultCount} rows in ${elapsed}ms`);
+      
+      return { data: json as T, error: null };
+    } catch (e: any) {
+      const elapsed = Date.now() - startTime;
+      
+      if (e?.name === 'AbortError') {
+        this.log(`⏱️ [${queryId}] queryDirect TIMEOUT after ${elapsed}ms`);
+        return { data: null, error: new Error(`queryDirect ${table} timeout after ${timeoutMs}ms`) };
+      }
+      
+      this.log(`💥 [${queryId}] queryDirect EXCEPTION after ${elapsed}ms: ${stringifyError(e)}`);
       return { data: null, error: e };
     }
   }
@@ -3440,12 +3618,53 @@ class SupabasePipeline {
   /**
    * Get direct access to client for non-messaging operations
    * Use sparingly - prefer pipeline methods when possible
+   * 
+   * CRITICAL FIX: This method should NEVER hang. If client exists, return immediately.
+   * Only call initialize() if client is truly missing.
    */
   public async getDirectClient(): Promise<any> {
-    // Lightweight path: ensure initialized, skip corruption checks and any auth recovery probes
-    if (!this.client || !this.isInitialized) {
-      await this.initialize();
+    const callId = `gdc-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const startTime = Date.now();
+    
+    this.log(`🔌 [${callId}] getDirectClient() called - client=${!!this.client} isInit=${this.isInitialized} initPromise=${!!this.initializePromise}`);
+    
+    // FAST PATH: If client exists, return immediately without any checks
+    // This is the critical fix - we should never block on session operations here
+    if (this.client) {
+      const elapsed = Date.now() - startTime;
+      this.log(`🔌 [${callId}] ✅ FAST PATH: Returning existing client in ${elapsed}ms`);
+      return this.client;
     }
+    
+    // SLOW PATH: Client doesn't exist, need to initialize
+    this.log(`🔌 [${callId}] ⚠️ SLOW PATH: No client, calling initialize()...`);
+    
+    try {
+      // Add timeout protection to prevent hanging forever
+      const initPromise = this.initialize();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`getDirectClient initialize timeout after 10s`));
+        }, 10000);
+      });
+      
+      await Promise.race([initPromise, timeoutPromise]);
+      
+      const elapsed = Date.now() - startTime;
+      this.log(`🔌 [${callId}] ✅ SLOW PATH: Initialize completed in ${elapsed}ms`);
+    } catch (error: any) {
+      const elapsed = Date.now() - startTime;
+      this.log(`🔌 [${callId}] ❌ SLOW PATH: Initialize failed after ${elapsed}ms: ${error?.message || error}`);
+      
+      // If we have a client despite the error, return it
+      if (this.client) {
+        this.log(`🔌 [${callId}] ⚠️ Returning client despite init error`);
+        return this.client;
+      }
+      
+      throw error;
+    }
+    
     return this.client!;
   }
 
@@ -3587,8 +3806,16 @@ class SupabasePipeline {
    */
   private async bindAuthListenersToClient(): Promise<void> {
     if (!this.authListeners.length) return;
+    
+    // CRITICAL FIX: Use this.client directly instead of getClient()
+    // getClient() can trigger session operations which can hang during initialization
+    if (!this.client) {
+      this.log('⚠️ bindAuthListenersToClient: no client available, skipping');
+      return;
+    }
+    
     try {
-      const client = await this.getClient();
+      const client = this.client;
       // Unsubscribe any previous bindings (best-effort)
       for (const l of this.authListeners) { try { l.unsubscribe?.(); } catch (_) {} }
       // Rebind and store new unsub functions

@@ -76,6 +76,7 @@ export function ChatArea({ topicId }: ChatAreaProps) {
   }, [activeGroup?.id, user?.id, groupMembers]);
 
   // Fetch topic data when topicId is provided
+  // Uses direct REST to bypass Supabase client internal state issues after iOS idle
   useEffect(() => {
     if (!topicId) {
       setTopicData(null);
@@ -84,32 +85,30 @@ export function ChatArea({ topicId }: ChatAreaProps) {
 
     const fetchTopic = async () => {
       try {
-        const client = await supabasePipeline.getDirectClient();
-        const { data, error } = await client
-          .from('topics')
-          .select(`
-            *,
-            messages!messages_topic_id_fkey(
-              content,
-              user_id,
-              users!messages_user_id_fkey(display_name, avatar_url)
-            )
-          `)
-          .eq('id', topicId)
-          .single();
+        const { data, error } = await supabasePipeline.queryDirect<any[]>('topics', {
+          select: '*,messages!messages_topic_id_fkey(content,user_id,users!messages_user_id_fkey(display_name,avatar_url))',
+          filters: { id: topicId }
+        });
 
         if (error) {
           console.error('[ChatArea] Error fetching topic:', error);
           return;
         }
 
-        const firstMessage = data.messages?.[0];
+        // queryDirect returns array, get first item
+        const topicRow = Array.isArray(data) ? data[0] : data;
+        if (!topicRow) {
+          console.error('[ChatArea] Topic not found:', topicId);
+          return;
+        }
+
+        const firstMessage = topicRow.messages?.[0];
         setTopicData({
-          id: data.id,
-          title: data.title,
-          type: data.type,
-          is_anonymous: data.is_anonymous,
-          created_at: data.created_at,
+          id: topicRow.id,
+          title: topicRow.title,
+          type: topicRow.type,
+          is_anonymous: topicRow.is_anonymous,
+          created_at: topicRow.created_at,
           originalMessage: firstMessage ? {
             content: firstMessage.content,
             user_id: firstMessage.user_id,

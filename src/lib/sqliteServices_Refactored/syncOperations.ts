@@ -67,8 +67,8 @@ export class SyncOperations {
     try {
       for (const row of rows) {
         await db.run(
-          `INSERT OR REPLACE INTO messages (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          `INSERT OR REPLACE INTO messages (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, topic_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
           [
             row.id,
             row.group_id,
@@ -80,6 +80,7 @@ export class SyncOperations {
             row.parent_id,
             row.image_url,
             new Date(row.created_at ?? new Date().toISOString()).getTime(),
+            (row as any).topic_id || null,
           ]
         );
         merged++;

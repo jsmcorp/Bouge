@@ -10,8 +10,8 @@ export class MessageOperations {
 
     await db.run(
       `INSERT OR REPLACE INTO messages
-       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at, is_viewed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+       (id, group_id, user_id, content, is_ghost, message_type, category, parent_id, image_url, created_at, updated_at, deleted_at, is_viewed, topic_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         message.id,
         message.group_id,
@@ -25,7 +25,8 @@ export class MessageOperations {
         message.created_at,
         message.updated_at || null,
         message.deleted_at || null,
-        message.is_viewed || 0
+        message.is_viewed || 0,
+        message.topic_id || null
       ]
     );
   }

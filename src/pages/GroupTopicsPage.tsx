@@ -51,43 +51,30 @@ export default function GroupTopicsPage() {
     }, [groupId, groups, activeGroup, setActiveGroup]);
 
     // Fetch topics from Supabase for the current group
+    // Uses direct REST to bypass Supabase client internal state issues after iOS idle
     const fetchTopics = useCallback(async () => {
         if (!groupId) return;
 
         try {
             setIsLoading(true);
-            console.log('[GroupTopicsPage] Fetching topics for group:', groupId);
+            const startTime = Date.now();
+            console.log(`[GroupTopicsPage] 🚀 START fetchTopics for group:`, groupId);
 
-            const client = await supabasePipeline.getDirectClient();
-            
-            // Fetch topics with the first message for each topic
-            const { data: topicsData, error: topicsError } = await client
-                .from('topics')
-                .select(`
-                    *,
-                    messages!messages_topic_id_fkey(
-                        id,
-                        content,
-                        user_id,
-                        created_at,
-                        message_type,
-                        users!messages_user_id_fkey(
-                            display_name,
-                            avatar_url
-                        ),
-                        polls(*)
-                    )
-                `)
-                .eq('group_id', groupId)
-                .order('created_at', { ascending: false });
+            // Use direct REST query - bypasses Supabase client internal state that can hang after iOS idle
+            const { data: topicsData, error: topicsError } = await supabasePipeline.queryDirect<any[]>('topics', {
+                select: '*,messages!messages_topic_id_fkey(id,content,user_id,created_at,message_type,users!messages_user_id_fkey(display_name,avatar_url),polls(*))',
+                filters: { group_id: groupId },
+                order: 'created_at.desc'
+            });
 
             if (topicsError) {
-                console.error('[GroupTopicsPage] Error fetching topics:', topicsError);
+                console.error('[GroupTopicsPage] ❌ Query error:', topicsError);
                 setTopics([]);
+                setIsLoading(false);
                 return;
             }
 
-            console.log('[GroupTopicsPage] Fetched topics:', topicsData?.length || 0);
+            console.log(`[GroupTopicsPage] ✅ Fetched ${topicsData?.length || 0} topics in ${Date.now() - startTime}ms total`);
 
             // Transform the data to match our UI needs
             const transformedTopics: Topic[] = (topicsData || []).map((topic: any) => {
@@ -117,8 +104,8 @@ export default function GroupTopicsPage() {
             });
 
             setTopics(transformedTopics);
-        } catch (error) {
-            console.error('[GroupTopicsPage] Error fetching topics:', error);
+        } catch (error: any) {
+            console.error('[GroupTopicsPage] ❌ EXCEPTION in fetchTopics:', error?.message || error);
             setTopics([]);
         } finally {
             setIsLoading(false);

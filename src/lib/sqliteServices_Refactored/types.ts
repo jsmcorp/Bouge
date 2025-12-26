@@ -13,6 +13,7 @@ export interface LocalMessage {
   deleted_at?: number;
   local_id?: number; // Auto-increment unique ID
   is_viewed?: number; // SQLite uses INTEGER for boolean - tracks if user has viewed this message
+  topic_id?: string | null; // Topic ID for topic-based messages
 }
 
 export interface LocalPoll {
