@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Capacitor } from '@capacitor/core';
@@ -38,31 +38,70 @@ export function Sidebar() {
   const [showJoinGroup, setShowJoinGroup] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
+  
+  // OPTIMIZATION: Prevent duplicate API calls with debouncing and request deduplication
+  const fetchInProgressRef = useRef(false);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const filteredGroups = groups.filter(group =>
     group.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // OPTIMIZED: Single debounced function to fetch unread counts
+  const fetchUnreadCountsDebounced = useCallback(() => {
+    // Clear any pending debounce timer
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    
+    // Debounce: wait 100ms before fetching to batch rapid calls
+    debounceTimerRef.current = setTimeout(async () => {
+      // Skip if already fetching (request deduplication)
+      if (fetchInProgressRef.current) {
+        console.log('[unread] Skipping fetch - already in progress');
+        return;
+      }
+      
+      if (groups.length === 0) return;
+      
+      fetchInProgressRef.current = true;
+      console.log('[unread] Fetching counts for', groups.length, 'groups');
+      
+      try {
+        const counts = await unreadTracker.getAllUnreadCounts();
+        console.log('[unread] Got counts:', Array.from(counts.entries()));
+        setUnreadCounts(counts);
+      } catch (error) {
+        console.error('[unread] Failed to fetch counts:', error);
+      } finally {
+        fetchInProgressRef.current = false;
+      }
+    }, 100);
+  }, [groups.length]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
+
   // CLEAN IMPLEMENTATION: Fetch unread counts when groups change
   useEffect(() => {
     if (groups.length > 0) {
-      console.log('[unread] Fetching counts for', groups.length, 'groups');
-      unreadTracker.getAllUnreadCounts().then(counts => {
-        console.log('[unread] Got counts:', Array.from(counts.entries()));
-        setUnreadCounts(counts);
-      });
+      fetchUnreadCountsDebounced();
     }
-  }, [groups]);
+  }, [groups, fetchUnreadCountsDebounced]);
 
   // CLEAN IMPLEMENTATION: Refresh when returning to dashboard
   useEffect(() => {
     if (!activeGroup && groups.length > 0) {
       console.log('[unread] Dashboard visible, refreshing counts');
-      unreadTracker.getAllUnreadCounts().then(counts => {
-        setUnreadCounts(counts);
-      });
+      fetchUnreadCountsDebounced();
     }
-  }, [activeGroup, groups.length]);
+  }, [activeGroup, groups.length, fetchUnreadCountsDebounced]);
 
   // CLEAN IMPLEMENTATION: Helper to update count (called from ChatArea)
   const updateUnreadCount = useCallback((groupId: string, count: number) => {
