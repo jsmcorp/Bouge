@@ -402,6 +402,26 @@ function AppContent() {
             }
           />
 
+          {/* Alias for topics page */}
+          <Route
+            path="/groups/:groupId/topics"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <GroupTopicsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Topic Chat - Discussion thread for a specific topic */}
+          <Route
+            path="/groups/:groupId/topics/:topicId"
+            element={
+              <ProtectedRoute requireOnboarding={true}>
+                <GroupPage />
+              </ProtectedRoute>
+            }
+          />
+
           {/* Chat Interface - Moved to sub-route */}
           <Route
             path="/groups/:groupId/chat"

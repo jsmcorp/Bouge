@@ -6,8 +6,8 @@ import { Sidebar } from '@/components/dashboard/Sidebar';
 import { ChatArea } from '@/components/dashboard/ChatArea';
 
 export default function GroupPage() {
-  const { groupId } = useParams();
-  const { groups, activeGroup, setActiveGroup } = useChatStore();
+  const { groupId, topicId } = useParams();
+  const { groups, activeGroup, setActiveGroup, setActiveTopicId } = useChatStore();
   const isMobile = useIsMobile();
 
   // Set active group based on URL parameter
@@ -21,6 +21,12 @@ export default function GroupPage() {
     }
   }, [groupId, groups, activeGroup, setActiveGroup]);
 
+  // Set active topic ID
+  useEffect(() => {
+    setActiveTopicId(topicId || null);
+    return () => setActiveTopicId(null);
+  }, [topicId, setActiveTopicId]);
+
 
 
   return (
@@ -28,7 +34,7 @@ export default function GroupPage() {
       {/* Hide sidebar on mobile for full-screen chat */}
       {!isMobile && <Sidebar />}
       <div className={`flex-1 flex flex-col ${isMobile ? 'w-full' : ''}`}>
-        <ChatArea />
+        <ChatArea topicId={topicId} />
       </div>
     </div>
   );

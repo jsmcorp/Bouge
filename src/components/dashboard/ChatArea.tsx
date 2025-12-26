@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
@@ -23,11 +22,34 @@ import { GroupDetailsPanel } from '@/components/dashboard/GroupDetailsPanel';
 import { WhatsAppEmojiPanel } from '@/components/chat/WhatsAppEmojiPanel';
 import { NonMemberBanner } from '@/components/chat/NonMemberBanner';
 import { unreadTracker } from '@/lib/unreadTracker';
+import { supabasePipeline } from '@/lib/supabasePipeline';
+import { cn } from '@/lib/utils';
 
-export function ChatArea() {
+interface ChatAreaProps {
+  topicId?: string;
+}
+
+interface TopicData {
+  id: string;
+  title: string | null;
+  type: string;
+  is_anonymous: boolean;
+  created_at: string;
+  originalMessage?: {
+    content: string;
+    user_id: string;
+    users?: {
+      display_name: string;
+      avatar_url: string | null;
+    };
+  };
+}
+
+export function ChatArea({ topicId }: ChatAreaProps) {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
   const [showEmojiPanel, setShowEmojiPanel] = useState(false);
+  const [topicData, setTopicData] = useState<TopicData | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const { user } = useAuthStore();
   const {
@@ -53,6 +75,55 @@ export function ChatArea() {
     return groupMembers.some(member => member.user_id === user.id);
   }, [activeGroup?.id, user?.id, groupMembers]);
 
+  // Fetch topic data when topicId is provided
+  useEffect(() => {
+    if (!topicId) {
+      setTopicData(null);
+      return;
+    }
+
+    const fetchTopic = async () => {
+      try {
+        const client = await supabasePipeline.getDirectClient();
+        const { data, error } = await client
+          .from('topics')
+          .select(`
+            *,
+            messages!messages_topic_id_fkey(
+              content,
+              user_id,
+              users!messages_user_id_fkey(display_name, avatar_url)
+            )
+          `)
+          .eq('id', topicId)
+          .single();
+
+        if (error) {
+          console.error('[ChatArea] Error fetching topic:', error);
+          return;
+        }
+
+        const firstMessage = data.messages?.[0];
+        setTopicData({
+          id: data.id,
+          title: data.title,
+          type: data.type,
+          is_anonymous: data.is_anonymous,
+          created_at: data.created_at,
+          originalMessage: firstMessage ? {
+            content: firstMessage.content,
+            user_id: firstMessage.user_id,
+            users: firstMessage.users
+          } : undefined
+        });
+      } catch (error) {
+        console.error('[ChatArea] Error fetching topic:', error);
+      }
+    };
+
+    fetchTopic();
+  }, [topicId]);
+
   // ✅ FIX: Keep messagesRef updated with latest messages to avoid stale closure
   useEffect(() => {
     // Subscribe to messages changes and keep ref updated
@@ -69,9 +140,39 @@ export function ChatArea() {
   // The emoji selection is handled by the WhatsAppEmojiPanel component
   const handleEmojiSelect = () => {};
 
-  // LOCAL-FIRST: Load messages when opening chat
+  // Fetch topic messages when topicId is provided
   useEffect(() => {
-    if (activeGroup?.id) {
+    if (!topicId || !activeGroup?.id) {
+      return;
+    }
+
+    const fetchTopicMessages = async () => {
+      try {
+        const { data, error } = await supabasePipeline.fetchTopicMessages(topicId, 100);
+        if (error) {
+          console.error('[ChatArea] Error fetching topic messages:', error);
+          return;
+        }
+        // Filter out the original topic message (where message.id === topicId)
+        // since it's already displayed in the pinned header
+        const replies = (data || []).filter((msg: any) => msg.id !== topicId);
+        // Sort by created_at ascending (oldest first) and set in store
+        const sorted = replies.sort((a: any, b: any) => 
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        );
+        // Set messages in store so MessageList can display them
+        useChatStore.setState({ messages: sorted });
+      } catch (error) {
+        console.error('[ChatArea] Error fetching topic messages:', error);
+      }
+    };
+
+    fetchTopicMessages();
+  }, [topicId, activeGroup?.id]);
+
+  // LOCAL-FIRST: Load messages when opening chat (only for non-topic view)
+  useEffect(() => {
+    if (activeGroup?.id && !topicId) {
       console.log(`💬 ChatArea: Opening chat for group ${activeGroup.id} (${activeGroup.name})`);
       const startTime = performance.now();
       
@@ -92,7 +193,7 @@ export function ChatArea() {
       // The realtime effect below will handle marking NEW messages as read
       // We don't need to mark cache messages on open - they're already in the correct state
     }
-  }, [activeGroup?.id, fetchMessages]);
+  }, [activeGroup?.id, topicId, fetchMessages]);
 
   // REALTIME: Mark new messages as read instantly when they arrive while viewing
   useEffect(() => {
@@ -289,6 +390,7 @@ export function ChatArea() {
   };
 
   const handleGroupHeaderClick = () => {
+    if (topicId) return; // Don't navigate to details from topic view
     if (isMobile && activeGroup) {
       navigate(`/groups/${activeGroup.id}/details`);
     } else {
@@ -298,11 +400,16 @@ export function ChatArea() {
 
   const handleBackClick = () => {
     if (isMobile) {
-      // Clear active group first
-      useChatStore.getState().setActiveGroup(null);
-      // Use window.history to ensure immediate navigation
-      window.history.replaceState(null, '', '/dashboard');
-      navigate('/dashboard', { replace: true });
+      if (topicId && activeGroup) {
+        // Go back to topics page
+        navigate(`/groups/${activeGroup.id}/topics`);
+      } else {
+        // Clear active group first
+        useChatStore.getState().setActiveGroup(null);
+        // Use window.history to ensure immediate navigation
+        window.history.replaceState(null, '', '/dashboard');
+        navigate('/dashboard', { replace: true });
+      }
     }
   };
 
@@ -333,17 +440,29 @@ export function ChatArea() {
             )}
             
             <div 
-              className="flex items-center space-x-2 sm:space-x-4 cursor-pointer hover:bg-muted/50 rounded-lg p-1 sm:p-2 transition-colors"
+              className={cn(
+                "flex items-center space-x-2 sm:space-x-4 rounded-lg p-1 sm:p-2 transition-colors",
+                !topicId && "cursor-pointer hover:bg-muted/50"
+              )}
               onClick={handleGroupHeaderClick}
             >
               <div className="flex items-center justify-center w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-green-500 to-green-600/80 rounded-lg shadow-md">
                 <Hash className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
               </div>
-              <div>
+              <div className="min-w-0 flex-1">
                 <h1 className="text-base sm:text-lg md:text-xl font-bold hover:text-primary transition-colors truncate">
-                  {activeGroup.name}
+                  {topicId && topicData ? (topicData.title || 'Topic') : activeGroup.name}
                 </h1>
-                {activeGroup.description && (
+                {topicId && topicData ? (
+                  <span className={cn(
+                    "inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                    topicData.type === 'poll' ? 'bg-orange-200 text-orange-900' :
+                    topicData.type === 'news' ? 'bg-purple-200 text-purple-900' :
+                    'bg-lime-200 text-lime-900'
+                  )}>
+                    {topicData.type === 'text' ? 'discussion' : topicData.type}
+                  </span>
+                ) : activeGroup.description && (
                   <p className="text-xs sm:text-sm text-muted-foreground truncate">
                     {activeGroup.description}
                   </p>
@@ -415,6 +534,29 @@ export function ChatArea() {
           </div>
         </div>
 
+        {/* Topic Original Post - Pinned header when viewing a topic */}
+        {topicId && topicData?.originalMessage && (
+          <div className="flex-shrink-0 bg-gradient-to-b from-slate-50 to-white border-b border-slate-200 p-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-semibold text-slate-900">
+                    {topicData.is_anonymous ? 'Anonymous' : (topicData.originalMessage.users?.display_name || 'Unknown')}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    {new Date(topicData.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+                {topicData.title && (
+                  <h3 className="font-bold text-slate-900 mb-1">{topicData.title}</h3>
+                )}
+                <p className="text-slate-700 text-sm whitespace-pre-wrap">{topicData.originalMessage.content}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Messages - Scrollable area that fills remaining space */}
         <div className={`flex-1 overflow-hidden transition-all duration-300 chat-background-gradient ${
           isMobile && showEmojiPanel ? 'pb-[400px]' : ''
@@ -432,6 +574,7 @@ export function ChatArea() {
             <ChatInput
               showEmojiPanel={showEmojiPanel}
               setShowEmojiPanel={setShowEmojiPanel}
+              topicId={topicId}
             />
           )}
         </div>

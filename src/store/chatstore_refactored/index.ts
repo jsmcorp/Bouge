@@ -64,6 +64,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     // Initial state
     groups: [],
     activeGroup: null,
+    activeTopicId: null,
     messages: [],
     polls: [],
     userVotes: {},

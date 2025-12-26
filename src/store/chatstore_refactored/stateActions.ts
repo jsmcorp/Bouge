@@ -6,6 +6,7 @@ import { FEATURES } from '@/lib/supabase';
 export interface StateActions {
   setGroups: (groups: Group[]) => void;
   setActiveGroup: (group: Group | null) => void;
+  setActiveTopicId: (topicId: string | null) => void;
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
   appendMessageWithDedupe: (message: Message) => void;
@@ -54,6 +55,8 @@ export interface StateActions {
 
 export const createStateActions = (set: any, get: any): StateActions => ({
   setGroups: (groups) => set({ groups }),
+  
+  setActiveTopicId: (topicId) => set({ activeTopicId: topicId }),
   
   setActiveGroup: (group) => {
     // CRITICAL FIX: DON'T cleanup subscription when switching groups

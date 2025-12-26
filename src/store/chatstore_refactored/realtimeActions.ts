@@ -24,6 +24,7 @@ interface DbMessageRow {
   image_url: string | null;
   created_at: string;
   dedupe_key?: string | null;
+  topic_id?: string | null;
 }
 
 interface DbPollRow {
@@ -946,10 +947,19 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
             // Messages for other groups are still saved to SQLite but not added to React state
             const currentState = get();
             const isForActiveGroup = currentState.activeGroup?.id === row.group_id;
+            
+            // TOPIC FILTERING: Check if message belongs to current view context
+            // - Quick Chat (activeTopicId = null): Only show messages with topic_id = null
+            // - Topic Chat (activeTopicId = X): Only show messages with topic_id = X
+            const activeTopicId = currentState.activeTopicId;
+            const messageTopicId = row.topic_id || null;
+            const isForCurrentTopicContext = activeTopicId === messageTopicId;
+            
+            log(`📨 Topic filter: activeTopicId=${activeTopicId}, messageTopicId=${messageTopicId}, match=${isForCurrentTopicContext}`);
 
-            if (isForActiveGroup) {
+            if (isForActiveGroup && isForCurrentTopicContext) {
               attachMessageToState(message);
-              log(`📨 Message attached to state: id=${message.id} (active group)`);
+              log(`📨 Message attached to state: id=${message.id} (active group + topic match)`);
               
               // Mark message as read immediately since user is viewing the chat
               // This prevents it from counting as unread if user closes chat quickly
@@ -997,24 +1007,26 @@ export const createRealtimeActions = (set: any, get: any): RealtimeActions => {
                 }
               }, 50);
             } else {
-              log(`📨 Message NOT attached to state: id=${message.id} (different group: ${row.group_id})`);
+              log(`📨 Message NOT attached to state: id=${message.id} (group: ${row.group_id}, topic: ${messageTopicId}, activeGroup: ${currentState.activeGroup?.id}, activeTopic: ${activeTopicId})`);
 
               // CRITICAL FIX (LOG54): Dispatch event for dashboard to refresh this group
               // This ensures messages received while on dashboard are visible when user navigates to the group
               try {
                 window.dispatchEvent(new CustomEvent('message:background', {
-                  detail: { groupId: row.group_id, messageId: message.id }
+                  detail: { groupId: row.group_id, messageId: message.id, topicId: messageTopicId }
                 }));
                 log(`📨 Dispatched background message event for group ${row.group_id}`);
               } catch (eventErr) {
                 console.warn('⚠️ Failed to dispatch background message event:', eventErr);
               }
 
-              // CLEAN IMPLEMENTATION: Increment unread for background group
+              // CLEAN IMPLEMENTATION: Increment unread for background group (only for non-topic messages in Quick Chat context)
+              // Don't increment unread for topic messages when user is in Quick Chat
               const { user } = useAuthStore.getState();
               const isOwnMessage = row.user_id === user?.id;
+              const shouldIncrementUnread = !isOwnMessage && !messageTopicId; // Only increment for Quick Chat messages
               
-              if (!isOwnMessage) {
+              if (shouldIncrementUnread) {
                 log(`[unread] Incrementing for background group: ${row.group_id}`);
                 if (typeof (window as any).__incrementUnreadCount === 'function') {
                   (window as any).__incrementUnreadCount(row.group_id);

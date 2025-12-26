@@ -36,7 +36,7 @@ export class MessageOperations {
 
     const sql = `
       SELECT * FROM messages
-      WHERE group_id = ?
+      WHERE group_id = ? AND (topic_id IS NULL OR topic_id = '')
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `;
@@ -51,7 +51,7 @@ export class MessageOperations {
 
     const sql = `
       SELECT * FROM messages
-      WHERE group_id = ?
+      WHERE group_id = ? AND (topic_id IS NULL OR topic_id = '')
       ORDER BY created_at DESC
       LIMIT ?
     `;

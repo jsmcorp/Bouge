@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChatStore } from '@/store/chatStore';
 import { MessageBubble } from '@/components/chat/MessageBubble';
@@ -22,9 +22,10 @@ import {
 
 export function MessageList() {
   const { 
-    messages, 
+    messages: allMessages, 
     typingUsers, 
-    activeGroup, 
+    activeGroup,
+    activeTopicId,
     loadOlderMessages, 
     isLoadingOlder, 
     hasMoreOlder, 
@@ -45,14 +46,25 @@ export function MessageList() {
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  
+  // TOPIC FILTERING: Filter messages based on activeTopicId
+  // - Quick Chat (activeTopicId = null): Only show messages with topic_id = null/undefined
+  // - Topic Chat (activeTopicId = X): Only show messages with topic_id = X
+  const messages = useMemo(() => {
+    return allMessages.filter(msg => {
+      const msgTopicId = (msg as any).topic_id || null;
+      return activeTopicId === msgTopicId;
+    });
+  }, [allMessages, activeTopicId]);
+  
   const previousMessagesLength = useRef(messages.length);
   const previousReplyingTo = useRef(replyingTo);
   const isLazyLoadingRef = useRef(false); // Track if we're currently lazy loading to prevent auto-scroll
 
   // Debug logging for unread tracking and lazy loading state
   useEffect(() => {
-    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}, hasMoreOlder=${hasMoreOlder}, isLoadingOlder=${isLoadingOlder}`);
-  }, [firstUnreadMessageId, unreadCount, messages.length, hasMoreOlder, isLoadingOlder]);
+    console.log(`🔍 MessageList: firstUnreadMessageId=${firstUnreadMessageId}, unreadCount=${unreadCount}, messages=${messages.length}, hasMoreOlder=${hasMoreOlder}, isLoadingOlder=${isLoadingOlder}, activeTopicId=${activeTopicId}`);
+  }, [firstUnreadMessageId, unreadCount, messages.length, hasMoreOlder, isLoadingOlder, activeTopicId]);
 
   // Auto-exit selection mode when no messages are selected
   useEffect(() => {

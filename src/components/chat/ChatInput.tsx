@@ -29,12 +29,14 @@ interface ChatInputProps {
   isInThread?: boolean;
   showEmojiPanel?: boolean;
   setShowEmojiPanel?: (show: boolean) => void;
+  topicId?: string;
 }
 
 export function ChatInput({
   isInThread = false,
   showEmojiPanel = false,
-  setShowEmojiPanel
+  setShowEmojiPanel,
+  topicId
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isLoading] = useState(false);
@@ -201,7 +203,8 @@ export function ChatInput({
         category || null,
         replyingTo?.id || null,
         null,
-        selectedImage
+        selectedImage,
+        topicId || null
       ).catch((error) => console.error('❌ sendMessage promise rejected:', error));
       
       console.log('✅ Message dispatched, clearing input');

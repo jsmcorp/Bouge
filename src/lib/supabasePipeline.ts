@@ -20,6 +20,7 @@ export interface Message {
   message_type: string;
   category: string | null;
   parent_id: string | null;
+  topic_id?: string | null;
   image_url: string | null;
   dedupe_key?: string | null;
 }
@@ -1990,6 +1991,7 @@ class SupabasePipeline {
           users!messages_user_id_fkey(display_name, avatar_url, created_at)
         `)
         .eq('group_id', groupId)
+        .is('topic_id', null)
         .order('created_at', { ascending: false })
         .limit(limit);
     }, 'fetch messages');
@@ -2029,6 +2031,25 @@ class SupabasePipeline {
         .eq('parent_id', parentMessageId)
         .order('created_at', { ascending: true });
     }, 'fetch replies');
+  }
+
+  /**
+   * Fetch messages for a specific topic
+   */
+  public async fetchTopicMessages(topicId: string, limit: number = 50): Promise<{ data: any[] | null; error: any }> {
+    return this.executeQuery(async () => {
+      const client = await this.getClientFast();
+      return client
+        .from('messages')
+        .select(`
+          *,
+          reactions(*),
+          users!messages_user_id_fkey(display_name, avatar_url, created_at)
+        `)
+        .eq('topic_id', topicId)
+        .order('created_at', { ascending: true })
+        .limit(limit);
+    }, 'fetch topic messages');
   }
 
   /**
@@ -2559,6 +2580,7 @@ class SupabasePipeline {
             message_type: message.message_type,
             category: message.category,
             parent_id: message.parent_id,
+            topic_id: message.topic_id,
             image_url: message.image_url,
             dedupe_key: message.dedupe_key,
           }, { onConflict: 'dedupe_key' })
@@ -2693,6 +2715,7 @@ class SupabasePipeline {
       message_type: message.message_type,
       category: message.category,
       parent_id: message.parent_id,
+      topic_id: message.topic_id,
       image_url: message.image_url,
       dedupe_key: message.dedupe_key,
     } as any;

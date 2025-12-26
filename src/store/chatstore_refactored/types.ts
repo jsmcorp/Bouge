@@ -66,6 +66,7 @@ export interface Message {
   message_type: string;
   category: string | null;
   parent_id: string | null;
+  topic_id?: string | null;
   image_url: string | null;
   created_at: string;
   author?: {
@@ -100,6 +101,7 @@ export interface TypingUser {
 export interface ChatState {
   groups: Group[];
   activeGroup: Group | null;
+  activeTopicId: string | null;
   messages: Message[];
   polls: Poll[];
   userVotes: Record<string, number | null>;
