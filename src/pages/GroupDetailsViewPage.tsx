@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
+import { Capacitor } from '@capacitor/core';
 import {
   ArrowLeft,
   Camera,
@@ -271,7 +272,12 @@ export default function GroupDetailsViewPage() {
   return (
     <div className="h-screen w-screen bg-background flex flex-col">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border/50 bg-background/95 backdrop-blur-sm sticky top-0 z-10">
+      <div 
+        className="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border/50 bg-background/95 backdrop-blur-sm sticky top-0 z-10"
+        style={{
+          paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 12px)' : undefined
+        }}
+      >
         <div className="flex items-center">
           <Button
             variant="ghost"

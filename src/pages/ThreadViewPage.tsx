@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import { Button } from '@/components/ui/button';
 import { useChatStore } from '@/store/chatStore';
 import { ThreadPanel } from '@/components/chat/ThreadPanel';
@@ -53,7 +54,12 @@ export default function ThreadViewPage() {
   return (
     <div className="h-screen w-screen bg-background flex flex-col">
       {/* Mobile Header */}
-      <div className="flex-shrink-0 flex items-center p-2 sm:p-4 border-b border-border/50 bg-card/30 backdrop-blur-sm">
+      <div 
+        className="flex-shrink-0 flex items-center p-2 sm:p-4 border-b border-border/50 bg-card/30 backdrop-blur-sm"
+        style={{
+          paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 8px)' : undefined
+        }}
+      >
         <Button
           variant="ghost"
           size="sm"

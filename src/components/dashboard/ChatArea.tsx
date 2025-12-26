@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Hash, Users, MoreHorizontal, Wifi, WifiOff, RefreshCw, ArrowLeft } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
@@ -312,7 +313,12 @@ export function ChatArea() {
         !isMobile && (activeThread || showGroupDetailsPanel) ? 'flex-1' : 'w-full'
       }`}>
         {/* Header - Fixed at top */}
-        <div className="flex-shrink-0 flex items-center justify-between p-2 sm:p-3 md:p-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg">
+        <div 
+          className="flex-shrink-0 flex items-center justify-between px-2 sm:px-3 md:px-5 py-2 sm:py-3 md:py-5 border-b border-border/50 bg-card/30 backdrop-blur-sm z-10 shadow-lg"
+          style={{
+            paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 8px)' : undefined
+          }}
+        >
           <div className="flex items-center">
             {/* Back button - only show on mobile */}
             {isMobile && (

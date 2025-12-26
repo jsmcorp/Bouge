@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import { ArrowLeft, Search, RefreshCw, Share2, Check, UserCircle, CheckCircle2, Circle, UserCheck } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -328,7 +329,12 @@ export default function ContactSelectionPage() {
   return (
     <div className="flex flex-col h-screen bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-card">
+      <div 
+        className="flex items-center justify-between px-4 py-3 border-b bg-card"
+        style={{
+          paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 12px)' : undefined
+        }}
+      >
         <div className="flex items-center space-x-3 flex-1">
           <Button
             variant="ghost"

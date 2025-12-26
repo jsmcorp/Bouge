@@ -1,4 +1,5 @@
 import { ArrowLeft, Palette, Moon, Sun, Monitor } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -19,7 +20,12 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="border-b border-border/50 p-4 bg-card/30 backdrop-blur-sm">
+      <div 
+        className="border-b border-border/50 p-4 bg-card/30 backdrop-blur-sm"
+        style={{
+          paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 16px)' : undefined
+        }}
+      >
         <Button
           variant="ghost"
           onClick={() => navigate('/dashboard')}

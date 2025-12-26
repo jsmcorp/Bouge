@@ -1,6 +1,12 @@
-# Confessr - Premium Anonymous Messaging Platform
+# Bouge - Real-Time Messaging Platform
 
-A modern, premium React web application for anonymous group messaging with ghost mode functionality, confessions, and real-time chat features.
+A modern React + Capacitor mobile application for real-time group messaging with ghost mode functionality, offline-first architecture, and WhatsApp-style instant delivery.
+
+## 📚 Documentation
+
+- **[CHANGELOG.md](./CHANGELOG.md)** - Version history and bug fixes
+- **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** - System design and data flow
+- **[docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## 🌟 Features
 

@@ -85,7 +85,12 @@ export default function CreateGroupPage() {
   return (
     <div className="flex flex-col h-screen bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-card">
+      <div 
+        className="flex items-center justify-between px-4 py-3 border-b bg-card"
+        style={{
+          paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 12px)' : undefined
+        }}
+      >
         <div className="flex items-center space-x-3">
           <Button
             variant="ghost"

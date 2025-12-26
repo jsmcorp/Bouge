@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Capacitor } from '@capacitor/core';
 import { 
   Plus, 
   Hash, 
@@ -126,7 +127,12 @@ export function Sidebar() {
         className={`w-full h-full ${isMobile ? 'bg-background' : 'sm:w-60 md:w-64 bg-card/50 backdrop-blur-sm border-r border-border/50'} flex flex-col`}
       >
         {/* Header - Fixed */}
-        <div className={`flex-shrink-0 p-3 sm:p-4 ${!isMobile && 'border-b border-border/50'}`}>
+        <div 
+          className={`flex-shrink-0 p-3 sm:p-4 ${!isMobile && 'border-b border-border/50'}`}
+          style={{
+            paddingTop: Capacitor.getPlatform() === 'ios' ? 'calc(env(safe-area-inset-top, 0px) + 12px)' : undefined
+          }}
+        >
           <div className="flex items-center space-x-2 sm:space-x-3">
             <div className="flex items-center justify-center w-8 h-8 sm:w-10 sm:h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-xl">
               <Ghost className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
