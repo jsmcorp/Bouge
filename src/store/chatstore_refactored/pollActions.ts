@@ -87,7 +87,7 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
       // Update user votes
       const userVotes: Record<string, number | null> = {};
-      pollsWithVotes.forEach(poll => {
+      pollsWithVotes.forEach((poll: Poll) => {
         userVotes[poll.id] = poll.user_vote ?? null;
       });
       set({ userVotes });
