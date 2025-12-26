@@ -1180,6 +1180,67 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
       }
 
       const rows = filteredData.slice().reverse();
+      
+      // OPTIMIZATION: Pre-fetch all poll data in batch instead of N+1 queries
+      const pollMessageIds = rows.filter((msg: any) => msg.message_type === 'poll').map((msg: any) => msg.id);
+      let pollDataMap = new Map<string, any>();
+      
+      if (pollMessageIds.length > 0) {
+        // Fetch all polls for poll messages in one query
+        const { data: allPolls } = await client
+          .from('polls')
+          .select('*')
+          .in('message_id', pollMessageIds);
+        
+        if (allPolls && allPolls.length > 0) {
+          const pollIds = allPolls.map((p: any) => p.id);
+          
+          // Fetch ALL votes for all polls in one query
+          const { data: allVotes } = await client
+            .from('poll_votes')
+            .select('poll_id, option_index, user_id')
+            .in('poll_id', pollIds);
+          
+          // Get current user for checking user votes
+          const { data: { user } } = await supabasePipeline.getUser();
+          
+          // Group votes by poll_id
+          const votesByPoll = new Map<string, { option_index: number; user_id: string }[]>();
+          (allVotes || []).forEach((vote: any) => {
+            if (!votesByPoll.has(vote.poll_id)) {
+              votesByPoll.set(vote.poll_id, []);
+            }
+            votesByPoll.get(vote.poll_id)!.push(vote);
+          });
+          
+          // Build poll data map
+          allPolls.forEach((poll: any) => {
+            const pollVotes = votesByPoll.get(poll.id) || [];
+            const pollOptions = poll.options as string[];
+            const voteCounts = new Array(pollOptions.length).fill(0);
+            let userVoteIndex: number | null = null;
+            
+            pollVotes.forEach((vote) => {
+              if (vote.option_index < voteCounts.length) {
+                voteCounts[vote.option_index]++;
+              }
+              if (user && vote.user_id === user.id) {
+                userVoteIndex = vote.option_index;
+              }
+            });
+            
+            pollDataMap.set(poll.message_id, {
+              ...poll,
+              options: pollOptions,
+              vote_counts: voteCounts,
+              total_votes: pollVotes.length,
+              user_vote: userVoteIndex,
+              is_closed: new Date(poll.closes_at) < new Date(),
+            });
+          });
+        }
+      }
+      
       const messages = await Promise.all(rows.map(async (msg: any) => {
         const { count: replyCount } = await client
           .from('messages')
@@ -1204,49 +1265,8 @@ export const createFetchActions = (set: any, get: any): FetchActions => ({
           delivery_status: 'delivered' as const,
         }));
 
-        // Fetch poll data if this is a poll message
-        let pollData = null;
-        if (msg.message_type === 'poll') {
-          const { data: poll } = await client
-            .from('polls')
-            .select('*')
-            .eq('message_id', msg.id)
-            .single();
-
-          if (poll) {
-            // Fetch vote counts
-            const { data: votes } = await client
-              .from('poll_votes')
-              .select('option_index')
-              .eq('poll_id', poll.id);
-
-            const pollOptions = poll.options as string[];
-            const voteCounts = new Array(pollOptions.length).fill(0);
-            votes?.forEach((vote: any) => {
-              if (vote.option_index < voteCounts.length) {
-                voteCounts[vote.option_index]++;
-              }
-            });
-
-            // Check user's vote
-            const { data: { user } } = await supabasePipeline.getUser();
-            const { data: userVote } = await client
-              .from('poll_votes')
-              .select('option_index')
-              .eq('poll_id', poll.id)
-              .eq('user_id', user?.id)
-              .maybeSingle();
-
-            pollData = {
-              ...poll,
-              options: pollOptions,
-              vote_counts: voteCounts,
-              total_votes: votes?.length || 0,
-              user_vote: userVote?.option_index ?? null,
-              is_closed: new Date(poll.closes_at) < new Date(),
-            };
-          }
-        }
+        // Get pre-fetched poll data (no additional queries needed)
+        const pollData = msg.message_type === 'poll' ? pollDataMap.get(msg.id) : null;
 
         return {
           ...msg,

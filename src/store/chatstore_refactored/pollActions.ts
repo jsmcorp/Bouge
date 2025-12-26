@@ -28,28 +28,46 @@ export const createPollActions = (set: any, get: any): PollActions => ({
 
       if (error) throw error;
 
-      const pollsWithVotes = await Promise.all((polls || []).map(async (poll: any) => {
-        // Fetch vote counts
-        const { data: votes } = await client
-          .from('poll_votes')
-          .select('option_index')
-          .eq('poll_id', poll.id);
+      if (!polls || polls.length === 0) {
+        set({ polls: [] });
+        return;
+      }
 
+      // OPTIMIZATION: Batch fetch all votes in ONE query instead of N queries
+      const pollIds = polls.map((p: any) => p.id);
+      
+      // Fetch ALL votes for all polls in one query
+      const { data: allVotes } = await client
+        .from('poll_votes')
+        .select('poll_id, option_index, user_id')
+        .in('poll_id', pollIds);
+
+      // Group votes by poll_id for efficient lookup
+      const votesByPoll = new Map<string, { option_index: number; user_id: string }[]>();
+      (allVotes || []).forEach((vote: any) => {
+        if (!votesByPoll.has(vote.poll_id)) {
+          votesByPoll.set(vote.poll_id, []);
+        }
+        votesByPoll.get(vote.poll_id)!.push(vote);
+      });
+
+      // Process polls with pre-fetched vote data (no additional queries needed)
+      const pollsWithVotes = polls.map((poll: any) => {
+        const pollVotes = votesByPoll.get(poll.id) || [];
         const pollOptions = poll.options as string[];
         const voteCounts = new Array(pollOptions.length).fill(0);
-        votes?.forEach((vote: any) => {
+        
+        let userVoteIndex: number | null = null;
+        
+        pollVotes.forEach((vote) => {
           if (vote.option_index < voteCounts.length) {
             voteCounts[vote.option_index]++;
           }
+          // Check if this is the current user's vote
+          if (vote.user_id === user.id) {
+            userVoteIndex = vote.option_index;
+          }
         });
-
-        // Check user's vote
-        const { data: userVote } = await client
-          .from('poll_votes')
-          .select('option_index')
-          .eq('poll_id', poll.id)
-          .eq('user_id', user.id)
-          .maybeSingle();
 
         return {
           id: poll.id,
@@ -59,18 +77,18 @@ export const createPollActions = (set: any, get: any): PollActions => ({
           created_at: poll.created_at,
           closes_at: poll.closes_at,
           vote_counts: voteCounts,
-          total_votes: votes?.length || 0,
-          user_vote: userVote?.option_index ?? null,
+          total_votes: pollVotes.length,
+          user_vote: userVoteIndex,
           is_closed: new Date(poll.closes_at) < new Date(),
         } as Poll;
-      }));
+      });
 
       set({ polls: pollsWithVotes });
 
       // Update user votes
       const userVotes: Record<string, number | null> = {};
       pollsWithVotes.forEach(poll => {
-        userVotes[poll.id] = poll.user_vote || null;
+        userVotes[poll.id] = poll.user_vote ?? null;
       });
       set({ userVotes });
 

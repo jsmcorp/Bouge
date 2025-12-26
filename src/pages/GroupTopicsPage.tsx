@@ -135,7 +135,10 @@ export default function GroupTopicsPage() {
 
     const handleBack = () => {
         // Navigate back to dashboard
-        navigate('/dashboard');
+        console.log('[GroupTopicsPage] Back button clicked, navigating to dashboard');
+        // Clear active group to ensure clean state
+        setActiveGroup(null);
+        navigate('/dashboard', { replace: true });
     };
 
     const handleCreateTopic = () => {
@@ -313,7 +316,7 @@ export default function GroupTopicsPage() {
 
                 {/* Quick Chat Button */}
                 <Button
-                    onClick={() => navigate(`/groups/${groupId}/chat`)}
+                    onClick={() => navigate(`/groups/${groupId}/chat`, { replace: true })}
                     className="w-full h-14 rounded-2xl shadow-lg bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-2 pointer-events-auto transition-all active:scale-[0.98]"
                 >
                     <span className="text-lg font-bold">Quick Chat</span>

@@ -59,18 +59,46 @@ function AppContent() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
 
+  // Handle browser back/forward navigation (iOS swipe gestures, etc.)
+  useEffect(() => {
+    const handlePopState = () => {
+      const currentPath = window.location.pathname;
+      console.log('[App] Popstate event, currentPath:', currentPath);
+      
+      // If we ended up at quick chat from a back navigation, redirect to topics
+      if (currentPath.includes('/chat') && currentPath.includes('/groups/')) {
+        const groupId = currentPath.split('/')[2];
+        console.log('[App] Redirecting from quick chat to topics page');
+        navigate(`/groups/${groupId}/topics`, { replace: true });
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [navigate]);
+
   // Handle hardware back button and app state changes on mobile
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
       const handleBackButton = () => {
         const currentPath = window.location.pathname;
+        console.log('[App] Hardware back button pressed, currentPath:', currentPath);
 
-        // If we're in the chat view, go back to topics page
-        if (currentPath.includes('/chat') && currentPath.includes('/groups/')) {
-          navigate(-1); // Should go back to topics page
+        // If we're in a topic chat (viewing a specific topic), go back to topics list
+        if (currentPath.match(/\/groups\/[^/]+\/topics\/[^/]+$/)) {
+          const groupId = currentPath.split('/')[2];
+          console.log('[App] In topic chat, navigating to topics list');
+          navigate(`/groups/${groupId}/topics`, { replace: true });
+        }
+        // If we're in the quick chat view, go back to topics page
+        else if (currentPath.includes('/chat') && currentPath.includes('/groups/')) {
+          const groupId = currentPath.split('/')[2];
+          console.log('[App] In quick chat, navigating to topics list');
+          navigate(`/groups/${groupId}/topics`, { replace: true });
         }
         // If we're in a group topics page (root group route), navigate to dashboard
-        else if (currentPath.includes('/groups/') && !currentPath.includes('/thread/') && !currentPath.includes('/details') && !currentPath.includes('/chat')) {
+        else if (currentPath.match(/\/groups\/[^/]+\/?$/) || currentPath.match(/\/groups\/[^/]+\/topics\/?$/)) {
+          console.log('[App] In topics page, navigating to dashboard');
           // Clear active group first
           useChatStore.getState().setActiveGroup(null);
           // Use window.history to ensure immediate navigation
@@ -81,18 +109,22 @@ function AppContent() {
         else if (currentPath.includes('/create-group')) {
           if (currentPath === '/create-group/select-contacts') {
             // From contact selection, go back to create group
+            console.log('[App] In contact selection, navigating to create group');
             navigate('/create-group', { replace: true });
           } else {
             // From create group page, go back to dashboard
+            console.log('[App] In create group, navigating to dashboard');
             navigate('/dashboard', { replace: true });
           }
         }
         // For other pages (not dashboard), navigate back in history
         else if (currentPath !== '/dashboard') {
+          console.log('[App] Other page, navigating back in history');
           navigate(-1);
         }
         // If we're at dashboard, let the app exit
         else {
+          console.log('[App] At dashboard, exiting app');
           CapacitorApp.exitApp();
         }
       };
