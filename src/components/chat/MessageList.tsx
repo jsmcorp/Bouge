@@ -51,10 +51,17 @@ export function MessageList() {
   // - Quick Chat (activeTopicId = null): Only show messages with topic_id = null/undefined
   // - Topic Chat (activeTopicId = X): Only show messages with topic_id = X
   const messages = useMemo(() => {
-    return allMessages.filter(msg => {
+    const filtered = allMessages.filter(msg => {
       const msgTopicId = (msg as any).topic_id || null;
-      return activeTopicId === msgTopicId;
+      const matches = activeTopicId === msgTopicId;
+      // Debug log for topic filtering
+      if (!matches && allMessages.length > 0) {
+        console.log(`🔍 [MessageList] Filtering out message: id=${msg.id?.substring(0,8)}, msgTopicId=${msgTopicId}, activeTopicId=${activeTopicId}`);
+      }
+      return matches;
     });
+    console.log(`🔍 [MessageList] Topic filter: activeTopicId=${activeTopicId}, total=${allMessages.length}, filtered=${filtered.length}`);
+    return filtered;
   }, [allMessages, activeTopicId]);
   
   const previousMessagesLength = useRef(messages.length);

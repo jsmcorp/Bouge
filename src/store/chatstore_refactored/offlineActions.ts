@@ -231,7 +231,8 @@ export const createOfflineActions = (_set: any, get: any): OfflineActions => ({
         category: msg.category || null,
         parent_id: msg.parent_id || null,
         image_url: msg.image_url || null,
-        created_at: msg.created_at
+        created_at: msg.created_at,
+        topic_id: (msg as any).topic_id || null
       });
     } catch (e) {
       console.error('❌ markMessageAsDraft failed:', e);

@@ -185,6 +185,7 @@ export class MessageOperations {
     created_at: string | number;
     updated_at?: string | number | null;
     deleted_at?: string | number | null;
+    topic_id?: string | null;
   }>): Promise<number> {
     await this.dbManager.checkDatabaseReady();
     const db = this.dbManager.getConnection();
@@ -231,7 +232,8 @@ export class MessageOperations {
             : message.updated_at) : undefined,
           deleted_at: message.deleted_at ? (typeof message.deleted_at === 'string'
             ? new Date(message.deleted_at).getTime()
-            : message.deleted_at) : undefined
+            : message.deleted_at) : undefined,
+          topic_id: message.topic_id || null
         };
 
         await this.saveMessage(localMessage);

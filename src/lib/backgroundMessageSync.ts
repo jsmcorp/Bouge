@@ -691,6 +691,7 @@ class BackgroundMessageSyncService {
       parent_id: message.parent_id || null,
       image_url: message.image_url || null,
       created_at: new Date(message.created_at).getTime(),
+      topic_id: message.topic_id || null,
     });
   }
 
